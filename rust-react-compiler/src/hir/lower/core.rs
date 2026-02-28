@@ -250,6 +250,14 @@ pub fn lower_program(
     //   `const f = x => () => ref.current; ... f(args)()` → error.
     validate_no_curried_ref_factory_call(&program)?;
 
+    // Detect doubly-nested closures that reassign outer `let` variables:
+    //   `const mk = () => { const inner = v => { local = v; }; return inner; };`
+    validate_nested_closure_outer_let_reassign(&program)?;
+
+    // Detect uninitialized `let` variables that are only assigned inside
+    // conditional blocks via object destructuring — triggers TS compiler invariant.
+    validate_no_uninitialized_let_conditional_destructuring(&program)?;
+
     // Unsupported validation pragmas: flag any file that requests a validation
     // pass that we haven't implemented yet.
     {
@@ -10226,4 +10234,158 @@ fn validate_no_curried_ref_factory_call<'a>(
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// validate_nested_closure_outer_let_reassign
+// ---------------------------------------------------------------------------
+/// Detect const-assigned closures that contain nested closures that directly
+/// reassign outer `let` variables.
+///
+/// Pattern:
+/// ```js
+/// let local;
+/// const mk = () => {
+///   const inner = val => { local = val; };  // doubly-nested reassignment
+///   return inner;
+/// };
+/// ```
+/// This is always invalid because the inner closure captures a stale binding
+/// and any call to it after the initial render will observe inconsistent state.
+fn validate_nested_closure_outer_let_reassign<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::{Expression, Statement};
+
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        let outer_lets = collect_let_names_shallow(stmts);
+        if outer_lets.is_empty() { continue; }
+
+        for stmt in stmts {
+            let Statement::VariableDeclaration(v) = stmt else { continue };
+            for decl in &v.declarations {
+                let Some(init) = &decl.init else { continue };
+                // Level-1 closure
+                let level1_body: Option<&[Statement<'a>]> = match init {
+                    Expression::ArrowFunctionExpression(a) => Some(&a.body.statements),
+                    Expression::FunctionExpression(f) => f.body.as_ref().map(|b| b.statements.as_slice()),
+                    _ => None,
+                };
+                let Some(level1_stmts) = level1_body else { continue };
+
+                // Scan level-1 body for nested closures that directly assign outer lets
+                for inner_stmt in level1_stmts {
+                    let Statement::VariableDeclaration(inner_v) = inner_stmt else { continue };
+                    for inner_decl in &inner_v.declarations {
+                        let Some(inner_init) = &inner_decl.init else { continue };
+                        // Level-2 closure
+                        let level2_body: Option<&[Statement<'a>]> = match inner_init {
+                            Expression::ArrowFunctionExpression(a) => Some(&a.body.statements),
+                            Expression::FunctionExpression(f) => f.body.as_ref().map(|b| b.statements.as_slice()),
+                            _ => None,
+                        };
+                        let Some(level2_stmts) = level2_body else { continue };
+
+                        for outer_name in &outer_lets {
+                            if closure_body_assigns_name(level2_stmts, outer_name) {
+                                return Err(CompilerError::invalid_react(format!(
+                                    "Cannot reassign variable after render completes\n\n\
+                                     Reassigning `{outer_name}` after render has completed can cause \
+                                     inconsistent behavior on subsequent renders. Consider using state instead."
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_uninitialized_let_conditional_destructuring
+// ---------------------------------------------------------------------------
+/// Detect the pattern that triggers a TS compiler invariant:
+///   `let a; let b; if (cond) { ({a, b} = expr); }`
+/// where `a` and `b` are uninitialized `let` variables and the object
+/// destructuring assignment happens conditionally (inside an `if` block).
+/// Top-level destructuring assignment is valid; conditional-only is not.
+fn validate_no_uninitialized_let_conditional_destructuring<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::{AssignmentTarget, AssignmentTargetProperty, BindingPatternKind,
+                       Expression, Statement, VariableDeclarationKind};
+
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        // Collect names of `let` variables declared WITHOUT an initializer
+        let mut uninitialized_lets: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for stmt in stmts {
+            if let Statement::VariableDeclaration(v) = stmt {
+                if v.kind == VariableDeclarationKind::Let {
+                    for decl in &v.declarations {
+                        if decl.init.is_none() {
+                            if let BindingPatternKind::BindingIdentifier(id) = &decl.id.kind {
+                                uninitialized_lets.insert(id.name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if uninitialized_lets.is_empty() { continue; }
+
+        // Check if-blocks for object destructuring assignment of those uninitialized lets
+        for stmt in stmts {
+            if let Statement::IfStatement(if_stmt) = stmt {
+                if stmt_has_obj_destructure_of(&if_stmt.consequent, &uninitialized_lets) {
+                    return Err(CompilerError::todo(
+                        "Conditional object destructuring assignment of uninitialized let variables is not supported"
+                    ));
+                }
+                if let Some(alt) = &if_stmt.alternate {
+                    if stmt_has_obj_destructure_of(alt, &uninitialized_lets) {
+                        return Err(CompilerError::todo(
+                            "Conditional object destructuring assignment of uninitialized let variables is not supported"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn stmt_has_obj_destructure_of<'a>(
+    stmt: &oxc_ast::ast::Statement<'a>,
+    targets: &std::collections::HashSet<String>,
+) -> bool {
+    use oxc_ast::ast::{AssignmentTarget, AssignmentTargetProperty, Expression, Statement};
+    match stmt {
+        Statement::ExpressionStatement(e) => {
+            // `({a, b} = expr)` — parenthesized assignment expression with object target
+            let inner = if let Expression::ParenthesizedExpression(p) = &e.expression {
+                &p.expression
+            } else {
+                &e.expression
+            };
+            if let Expression::AssignmentExpression(a) = inner {
+                if let AssignmentTarget::ObjectAssignmentTarget(obj) = &a.left {
+                    return obj.properties.iter().any(|prop| {
+                        match prop {
+                            AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(id) => {
+                                targets.contains(id.binding.name.as_str())
+                            }
+                            AssignmentTargetProperty::AssignmentTargetPropertyProperty(_) => false,
+                        }
+                    });
+                }
+            }
+            false
+        }
+        Statement::BlockStatement(b) => b.body.iter().any(|s| stmt_has_obj_destructure_of(s, targets)),
+        _ => false,
+    }
 }
