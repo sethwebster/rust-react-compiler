@@ -19,6 +19,7 @@ oxc_span        = "0.69"
 oxc_diagnostics = "0.69"
 oxc_allocator   = "0.69"
 oxc_codegen     = "0.69"
+oxc_index       = "3"
 petgraph        = "0.6"
 indexmap        = { version = "2", features = ["serde"] }
 rustc-hash      = "2"
