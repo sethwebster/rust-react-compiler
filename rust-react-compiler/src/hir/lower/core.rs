@@ -183,12 +183,49 @@ pub fn lower_program(
     let semantic_ret = SemanticBuilder::new().build(&program);
     let semantic = semantic_ret.semantic;
 
+    // When @panicThreshold:"none" is set, any compilation error should bail
+    // out gracefully by returning the original source unchanged.
+    let first_line = source.lines().next().unwrap_or("");
+    let panic_threshold_none = first_line.contains("@panicThreshold:\"none\"")
+        || first_line.contains("@panicThreshold:'none'");
+
+    macro_rules! maybe_lower_fn {
+        ($call:expr) => {{
+            let result = $call;
+            if panic_threshold_none {
+                match result {
+                    Ok(hir) => return Ok(hir),
+                    Err(_) => return make_passthrough_hir(env),
+                }
+            } else {
+                return result;
+            }
+        }};
+    }
+
+    macro_rules! maybe_lower_opt {
+        ($call:expr) => {{
+            let result = $call;
+            if panic_threshold_none {
+                match result {
+                    Ok(Some(hir)) => return Ok(hir),
+                    Ok(None) => {}
+                    Err(_) => return make_passthrough_hir(env),
+                }
+            } else {
+                if let Some(hir) = result? {
+                    return Ok(hir);
+                }
+            }
+        }};
+    }
+
     for stmt in &program.body {
         match stmt {
             // ----------------------------------------------------------------
             // 1. Plain function declaration
             Statement::FunctionDeclaration(func) => {
-                return lower_function(func, &semantic, env);
+                maybe_lower_fn!(lower_function(func, &semantic, env));
             }
 
             // ----------------------------------------------------------------
@@ -196,13 +233,13 @@ pub fn lower_program(
             Statement::ExportDefaultDeclaration(decl) => {
                 match &decl.declaration {
                     ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
-                        return lower_function(func, &semantic, env);
+                        maybe_lower_fn!(lower_function(func, &semantic, env));
                     }
                     ExportDefaultDeclarationKind::ArrowFunctionExpression(arrow) => {
-                        return lower_arrow_function(arrow, &semantic, env);
+                        maybe_lower_fn!(lower_arrow_function(arrow, &semantic, env));
                     }
                     ExportDefaultDeclarationKind::FunctionExpression(func) => {
-                        return lower_function(func, &semantic, env);
+                        maybe_lower_fn!(lower_function(func, &semantic, env));
                     }
                     _ => {}
                 }
@@ -214,16 +251,14 @@ pub fn lower_program(
                 if let Some(declaration) = &decl.declaration {
                     match declaration {
                         Declaration::FunctionDeclaration(func) => {
-                            return lower_function(func, &semantic, env);
+                            maybe_lower_fn!(lower_function(func, &semantic, env));
                         }
                         Declaration::VariableDeclaration(var_decl) => {
-                            if let Some(hir) = try_lower_var_declarators(
+                            maybe_lower_opt!(try_lower_var_declarators(
                                 &var_decl.declarations,
                                 &semantic,
                                 env,
-                            )? {
-                                return Ok(hir);
-                            }
+                            ));
                         }
                         _ => {}
                     }
@@ -233,13 +268,11 @@ pub fn lower_program(
             // ----------------------------------------------------------------
             // 4. const foo = () => ... / const foo = function() { ... }
             Statement::VariableDeclaration(var_decl) => {
-                if let Some(hir) = try_lower_var_declarators(
+                maybe_lower_opt!(try_lower_var_declarators(
                     &var_decl.declarations,
                     &semantic,
                     env,
-                )? {
-                    return Ok(hir);
-                }
+                ));
             }
 
             // ----------------------------------------------------------------
@@ -247,16 +280,14 @@ pub fn lower_program(
             Statement::ExpressionStatement(expr_stmt) => {
                 match &expr_stmt.expression {
                     Expression::FunctionExpression(func) => {
-                        return lower_function(func, &semantic, env);
+                        maybe_lower_fn!(lower_function(func, &semantic, env));
                     }
                     Expression::ArrowFunctionExpression(arrow) => {
-                        return lower_arrow_function(arrow, &semantic, env);
+                        maybe_lower_fn!(lower_arrow_function(arrow, &semantic, env));
                     }
                     Expression::CallExpression(call) => {
                         // React.memo(fn) / React.forwardRef(fn): compile the first fn/arrow arg
-                        if let Some(hir) = try_lower_call_fn_arg(call, &semantic, env)? {
-                            return Ok(hir);
-                        }
+                        maybe_lower_opt!(try_lower_call_fn_arg(call, &semantic, env));
                     }
                     _ => {}
                 }
@@ -418,6 +449,10 @@ pub fn lower_function<'a>(
 
     // --- Body ---
     if let Some(body) = &func.body {
+        // Detect hoisted function declarations that appear after a return statement.
+        // This pattern requires special handling (function hoisting) that we don't support yet.
+        check_hoisted_function_declarations(&body.statements)?;
+
         for stmt in &body.statements {
             lower_statement(stmt, semantic, &mut ctx)?;
         }
@@ -1558,5 +1593,22 @@ fn validate_no_eslint_suppression(source: &str) -> Result<()> {
         ));
     }
 
+    Ok(())
+}
+
+/// Detect function declarations that appear after a return statement in a block.
+/// These are hoisted by JS but unsupported by the compiler.
+fn check_hoisted_function_declarations(stmts: &[oxc_ast::ast::Statement]) -> Result<()> {
+    let mut seen_return = false;
+    for stmt in stmts {
+        if matches!(stmt, oxc_ast::ast::Statement::ReturnStatement(_)) {
+            seen_return = true;
+        }
+        if seen_return && matches!(stmt, oxc_ast::ast::Statement::FunctionDeclaration(_)) {
+            return Err(CompilerError::todo(
+                "Support functions with unreachable code that may contain hoisted declarations",
+            ));
+        }
+    }
     Ok(())
 }
