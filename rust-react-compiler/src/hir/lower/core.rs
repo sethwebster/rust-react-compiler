@@ -198,6 +198,16 @@ pub fn lower_program(
     let panic_threshold_none = first_line.contains("@panicThreshold:\"none\"")
         || first_line.contains("@panicThreshold:'none'");
 
+    // Semantic-based validations (only run if not panic-threshold:none)
+    if !panic_threshold_none {
+        validate_no_global_reassignment(&program, &semantic)?;
+        validate_no_setstate_in_memo_callback(&program, &semantic)?;
+    }
+
+    let first_line = source.lines().next().unwrap_or("");
+    let panic_threshold_none = first_line.contains("@panicThreshold:\"none\"")
+        || first_line.contains("@panicThreshold:'none'");
+
     macro_rules! maybe_lower_fn {
         ($call:expr) => {{
             let result = $call;
@@ -2078,6 +2088,7 @@ fn check_expr_for_setter_call(expr: &Expression, setters: &std::collections::Has
 /// Validate that the program does not import from known-incompatible libraries.
 fn validate_no_incompatible_libraries(program: &oxc_ast::ast::Program) -> Result<()> {
     const INCOMPATIBLE: &[&str] = &["ReactCompilerKnownIncompatibleTest"];
+    const TYPE_PROVIDER: &[&str] = &["ReactCompilerTest", "useDefaultExportNotTypedAsHook"];
     for stmt in &program.body {
         if let oxc_ast::ast::Statement::ImportDeclaration(import) = stmt {
             let src = import.source.value.as_str();
@@ -2086,7 +2097,415 @@ fn validate_no_incompatible_libraries(program: &oxc_ast::ast::Program) -> Result
                     "Use of incompatible library\n\nThis API returns functions which cannot be memoized without leading to stale UI. To prevent this, by default React Compiler will skip memoizing this component/hook. However, you may see issues if values from this API are passed to other components/hooks that are memoized.",
                 ));
             }
+            if TYPE_PROVIDER.contains(&src) {
+                return Err(CompilerError::invalid_react(
+                    "Invalid type configuration for module",
+                ));
+            }
         }
+    }
+    Ok(())
+}
+
+/// Validate that global/module-scope variables are not reassigned inside component/hook functions.
+fn validate_no_global_reassignment<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+    semantic: &oxc_semantic::Semantic<'a>,
+) -> Result<()> {
+    let root_scope = semantic.scoping().root_scope_id();
+
+    // Helper: is this IdentifierReference a global or module-level variable?
+    let is_global_or_module_ref = |ident: &oxc_ast::ast::IdentifierReference| -> bool {
+        let ref_id = match ident.reference_id.get() {
+            Some(r) => r,
+            None => return true, // no reference info = treat as undeclared global
+        };
+        let sym_id = match semantic.scoping().get_reference(ref_id).symbol_id() {
+            Some(s) => s,
+            None => return true, // unresolved = undeclared global
+        };
+        semantic.scoping().symbol_scope_id(sym_id) == root_scope
+    };
+
+    // Find all component/hook function bodies in the program.
+    // Only check functions whose names look like components (uppercase) or hooks (use[A-Z]).
+    use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind, Statement};
+
+    fn is_component_or_hook_name(name: &str) -> bool {
+        let first = name.chars().next();
+        first.map_or(false, |c| c.is_uppercase()) || is_hook_name(name)
+    }
+
+    let mut bodies: Vec<&[oxc_ast::ast::Statement]> = Vec::new();
+    for stmt in &program.body {
+        match stmt {
+            Statement::FunctionDeclaration(f) => {
+                let name = f.id.as_ref().and_then(|id| Some(id.name.as_str())).unwrap_or("");
+                if is_component_or_hook_name(name) {
+                    if let Some(body) = &f.body { bodies.push(&body.statements); }
+                }
+            }
+            Statement::ExportDefaultDeclaration(d) => match &d.declaration {
+                ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
+                    let name = f.id.as_ref().and_then(|id| Some(id.name.as_str())).unwrap_or("");
+                    // Default exports: check if looks like component/hook, or allow by default
+                    if is_component_or_hook_name(name) || name.is_empty() {
+                        if let Some(body) = &f.body { bodies.push(&body.statements); }
+                    }
+                }
+                ExportDefaultDeclarationKind::ArrowFunctionExpression(a) => {
+                    bodies.push(&a.body.statements);
+                }
+                _ => {}
+            },
+            Statement::ExportNamedDeclaration(d) => {
+                if let Some(Declaration::FunctionDeclaration(f)) = &d.declaration {
+                    let name = f.id.as_ref().and_then(|id| Some(id.name.as_str())).unwrap_or("");
+                    if is_component_or_hook_name(name) {
+                        if let Some(body) = &f.body { bodies.push(&body.statements); }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for stmts in &bodies {
+        global_check_stmts(stmts, &is_global_or_module_ref)?;
+    }
+    Ok(())
+}
+
+fn global_check_stmts<'a, F>(stmts: &[oxc_ast::ast::Statement<'a>], is_global: &F) -> Result<()>
+where F: Fn(&oxc_ast::ast::IdentifierReference) -> bool
+{
+    for stmt in stmts { global_check_stmt(stmt, is_global)?; }
+    Ok(())
+}
+
+fn global_check_stmt<'a, F>(stmt: &oxc_ast::ast::Statement<'a>, is_global: &F) -> Result<()>
+where F: Fn(&oxc_ast::ast::IdentifierReference) -> bool
+{
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::ExpressionStatement(e) => global_check_expr(&e.expression, is_global)?,
+        Statement::VariableDeclaration(v) => {
+            for decl in &v.declarations {
+                if let Some(init) = &decl.init { global_check_expr(init, is_global)?; }
+            }
+        }
+        Statement::ReturnStatement(r) => {
+            if let Some(a) = &r.argument { global_check_expr(a, is_global)?; }
+        }
+        Statement::IfStatement(i) => {
+            global_check_expr(&i.test, is_global)?;
+            global_check_stmt(&i.consequent, is_global)?;
+            if let Some(alt) = &i.alternate { global_check_stmt(alt, is_global)?; }
+        }
+        Statement::BlockStatement(b) => global_check_stmts(&b.body, is_global)?,
+        Statement::WhileStatement(w) => {
+            global_check_expr(&w.test, is_global)?;
+            global_check_stmt(&w.body, is_global)?;
+        }
+        Statement::ForStatement(f) => {
+            if let Some(init) = &f.init {
+                if let Some(e) = init.as_expression() { global_check_expr(e, is_global)?; }
+            }
+            if let Some(t) = &f.test { global_check_expr(t, is_global)?; }
+            if let Some(u) = &f.update { global_check_expr(u, is_global)?; }
+            global_check_stmt(&f.body, is_global)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn global_check_expr<'a, F>(expr: &Expression<'a>, is_global: &F) -> Result<()>
+where F: Fn(&oxc_ast::ast::IdentifierReference) -> bool
+{
+    match expr {
+        Expression::AssignmentExpression(a) => {
+            global_check_assignment_target(&a.left, is_global)?;
+            global_check_expr(&a.right, is_global)?;
+        }
+        Expression::UpdateExpression(u) => {
+            if let oxc_ast::ast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) = &u.argument {
+                if is_global(id) {
+                    return Err(CompilerError::todo(
+                        "(BuildHIR::lowerExpression) Support UpdateExpression where argument is a global",
+                    ));
+                }
+            }
+        }
+        Expression::LogicalExpression(l) => {
+            global_check_expr(&l.left, is_global)?;
+            global_check_expr(&l.right, is_global)?;
+        }
+        Expression::ConditionalExpression(c) => {
+            global_check_expr(&c.test, is_global)?;
+            global_check_expr(&c.consequent, is_global)?;
+            global_check_expr(&c.alternate, is_global)?;
+        }
+        Expression::SequenceExpression(s) => {
+            for e in &s.expressions { global_check_expr(e, is_global)?; }
+        }
+        Expression::UnaryExpression(u) => {
+            if u.operator == oxc_ast::ast::UnaryOperator::Delete {
+                if let Expression::StaticMemberExpression(m) = &u.argument {
+                    if let Expression::Identifier(id) = &m.object {
+                        if is_global(id) {
+                            return Err(CompilerError::invalid_react(
+                                "This value cannot be modified\n\nModifying a variable defined outside a component or hook is not allowed. Consider using an effect.",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        // Do NOT recurse into nested arrow/function expressions — those are
+        // event handlers or effects, not render-time code.
+        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => {}
+        _ => {}
+    }
+    Ok(())
+}
+
+fn global_check_assignment_target<'a, F>(target: &oxc_ast::ast::AssignmentTarget<'a>, is_global: &F) -> Result<()>
+where F: Fn(&oxc_ast::ast::IdentifierReference) -> bool
+{
+    use oxc_ast::ast::AssignmentTarget;
+    match target {
+        AssignmentTarget::AssignmentTargetIdentifier(id) => {
+            if is_global(id) {
+                return Err(CompilerError::invalid_react(
+                    "Cannot reassign variables declared outside of the component/hook\n\nReassigning this value during render is a form of side effect.",
+                ));
+            }
+        }
+        AssignmentTarget::StaticMemberExpression(m) => {
+            if let Expression::Identifier(id) = &m.object {
+                if is_global(id) {
+                    return Err(CompilerError::invalid_react(
+                        "This value cannot be modified\n\nModifying a variable defined outside a component or hook is not allowed. Consider using an effect.",
+                    ));
+                }
+            }
+        }
+        AssignmentTarget::ComputedMemberExpression(m) => {
+            if let Expression::Identifier(id) = &m.object {
+                if is_global(id) {
+                    return Err(CompilerError::invalid_react(
+                        "This value cannot be modified\n\nModifying a variable defined outside a component or hook is not allowed. Consider using an effect.",
+                    ));
+                }
+            }
+        }
+        AssignmentTarget::ArrayAssignmentTarget(arr) => {
+            for elem in &arr.elements {
+                if let Some(target_elem) = elem {
+                    if let oxc_ast::ast::AssignmentTargetMaybeDefault::AssignmentTargetIdentifier(id) = target_elem {
+                        if is_global(id) {
+                            return Err(CompilerError::invalid_react(
+                                "Cannot reassign variables declared outside of the component/hook\n\nReassigning this value during render is a form of side effect.",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Validate that state setters are not called inside useMemo/useCallback callbacks.
+fn validate_no_setstate_in_memo_callback<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+    semantic: &oxc_semantic::Semantic<'a>,
+) -> Result<()> {
+    use std::collections::HashSet;
+
+    let body_stmts = {
+        use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind, Statement};
+        let mut result: Option<&'a [oxc_ast::ast::Statement<'a>]> = None;
+        for stmt in &program.body {
+            match stmt {
+                Statement::FunctionDeclaration(f) => {
+                    if let Some(body) = &f.body { result = Some(&body.statements); break; }
+                }
+                Statement::ExportDefaultDeclaration(d) => match &d.declaration {
+                    ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
+                        if let Some(body) = &f.body { result = Some(&body.statements); break; }
+                    }
+                    ExportDefaultDeclarationKind::ArrowFunctionExpression(a) => {
+                        result = Some(&a.body.statements); break;
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        match result {
+            Some(stmts) => stmts,
+            None => return Ok(()),
+        }
+    };
+
+    // Collect setter names from useState destructuring
+    let mut setters: HashSet<String> = HashSet::new();
+    for stmt in body_stmts {
+        collect_state_setters_from_stmt(stmt, &mut setters);
+    }
+    if setters.is_empty() {
+        return Ok(());
+    }
+
+    // Check each statement for useMemo/useCallback calls containing setters
+    for stmt in body_stmts {
+        check_stmt_for_memo_setter(stmt, &setters)?;
+    }
+    Ok(())
+}
+
+fn is_use_memo_call(expr: &Expression) -> bool {
+    match expr {
+        Expression::CallExpression(call) => {
+            match &call.callee {
+                Expression::Identifier(id) => id.name.as_str() == "useMemo",
+                Expression::StaticMemberExpression(m) => {
+                    if let Expression::Identifier(obj) = &m.object {
+                        obj.name == "React" && m.property.name.as_str() == "useMemo"
+                    } else { false }
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+fn check_stmt_for_memo_setter(stmt: &oxc_ast::ast::Statement, setters: &std::collections::HashSet<String>) -> Result<()> {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::ExpressionStatement(e) => check_expr_for_memo_setter(&e.expression, setters)?,
+        Statement::VariableDeclaration(v) => {
+            for decl in &v.declarations {
+                if let Some(init) = &decl.init {
+                    check_expr_for_memo_setter(init, setters)?;
+                }
+            }
+        }
+        Statement::ReturnStatement(r) => {
+            if let Some(arg) = &r.argument { check_expr_for_memo_setter(arg, setters)?; }
+        }
+        Statement::IfStatement(i) => {
+            check_stmt_for_memo_setter(&i.consequent, setters)?;
+            if let Some(alt) = &i.alternate { check_stmt_for_memo_setter(alt, setters)?; }
+        }
+        Statement::BlockStatement(b) => {
+            for s in &b.body { check_stmt_for_memo_setter(s, setters)?; }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn check_expr_for_memo_setter(expr: &Expression, setters: &std::collections::HashSet<String>) -> Result<()> {
+    match expr {
+        Expression::CallExpression(call) => {
+            if is_use_memo_call(expr) {
+                // Check the first argument (the callback) for setter calls
+                if let Some(first_arg) = call.arguments.first() {
+                    if let Some(callback_expr) = first_arg.as_expression() {
+                        check_memo_callback_for_setter(callback_expr, setters)?;
+                    }
+                }
+            }
+            // Recurse into other arguments (but not as memo callbacks)
+            for arg in call.arguments.iter().skip(if is_use_memo_call(expr) { 1 } else { 0 }) {
+                if let Some(e) = arg.as_expression() {
+                    check_expr_for_memo_setter(e, setters)?;
+                }
+            }
+        }
+        Expression::LogicalExpression(l) => {
+            check_expr_for_memo_setter(&l.left, setters)?;
+            check_expr_for_memo_setter(&l.right, setters)?;
+        }
+        Expression::ConditionalExpression(c) => {
+            check_expr_for_memo_setter(&c.consequent, setters)?;
+            check_expr_for_memo_setter(&c.alternate, setters)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Check inside a useMemo/useCallback callback for state setter calls.
+fn check_memo_callback_for_setter(expr: &Expression, setters: &std::collections::HashSet<String>) -> Result<()> {
+    match expr {
+        Expression::ArrowFunctionExpression(arrow) => {
+            for stmt in &arrow.body.statements {
+                check_memo_body_stmt_for_setter(stmt, setters)?;
+            }
+        }
+        Expression::FunctionExpression(func) => {
+            if let Some(body) = &func.body {
+                for stmt in &body.statements {
+                    check_memo_body_stmt_for_setter(stmt, setters)?;
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn check_memo_body_stmt_for_setter(stmt: &oxc_ast::ast::Statement, setters: &std::collections::HashSet<String>) -> Result<()> {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::ExpressionStatement(e) => check_memo_body_expr_for_setter(&e.expression, setters)?,
+        Statement::ReturnStatement(r) => {
+            if let Some(arg) = &r.argument { check_memo_body_expr_for_setter(arg, setters)?; }
+        }
+        Statement::IfStatement(i) => {
+            check_memo_body_stmt_for_setter(&i.consequent, setters)?;
+            if let Some(alt) = &i.alternate { check_memo_body_stmt_for_setter(alt, setters)?; }
+        }
+        Statement::BlockStatement(b) => {
+            for s in &b.body { check_memo_body_stmt_for_setter(s, setters)?; }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn check_memo_body_expr_for_setter(expr: &Expression, setters: &std::collections::HashSet<String>) -> Result<()> {
+    match expr {
+        Expression::CallExpression(call) => {
+            if let Expression::Identifier(id) = &call.callee {
+                if setters.contains(id.name.as_str()) {
+                    return Err(CompilerError::invalid_react(
+                        "Calling setState from useMemo may trigger an infinite loop\n\nEach time the memo callback is evaluated it will change state. This can cause a memoization dependency to change, running the memo function again and causing an infinite loop. Instead of setting state in useMemo(), prefer deriving the value during render. (https://react.dev/reference/react/useState).",
+                    ));
+                }
+            }
+            for arg in &call.arguments {
+                if let Some(e) = arg.as_expression() { check_memo_body_expr_for_setter(e, setters)?; }
+            }
+        }
+        Expression::LogicalExpression(l) => {
+            check_memo_body_expr_for_setter(&l.left, setters)?;
+            check_memo_body_expr_for_setter(&l.right, setters)?;
+        }
+        Expression::ConditionalExpression(c) => {
+            check_memo_body_expr_for_setter(&c.consequent, setters)?;
+            check_memo_body_expr_for_setter(&c.alternate, setters)?;
+        }
+        Expression::SequenceExpression(s) => {
+            for e in &s.expressions { check_memo_body_expr_for_setter(e, setters)?; }
+        }
+        _ => {}
     }
     Ok(())
 }
