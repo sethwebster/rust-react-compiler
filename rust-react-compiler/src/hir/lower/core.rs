@@ -282,6 +282,10 @@ pub fn lower_program(
         }
     }
 
+    // Detect indirect props mutations: props aliased via ternary or while-loop
+    // fixpoint, then mutated through a closure chain that ends in useEffect.
+    validate_no_indirect_props_mutation_in_effect(&program)?;
+
     // Unsupported validation pragmas: flag any file that requests a validation
     // pass that we haven't implemented yet.
     {
@@ -10815,6 +10819,263 @@ fn dep_has_post_optional_nonoptional(dep_src: &str) -> bool {
             }
         }
         i += 1;
+    }
+    false
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_indirect_props_mutation_in_effect
+// ---------------------------------------------------------------------------
+// Detects two patterns where props (or props-aliased values) are mutated
+// through a closure chain that ends up in useEffect:
+//
+// Pattern A (ternary phi): `let x = cond ? global : props.Y`  →  closure
+//   mutates x.Z  →  another closure calls the first  →  useEffect uses it.
+//
+// Pattern B (while-loop fixpoint): `while (...) { x = props.Y; }`  →  let
+//   y = x  →  closure mutates y.Z  →  indirect closure  →  useEffect.
+fn validate_no_indirect_props_mutation_in_effect<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::{AssignmentTarget, BindingPatternKind, Expression, Statement,
+                       VariableDeclarationKind};
+    use std::collections::HashSet;
+
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        // --- Pattern A: ternary init with props branch ---
+        // Collect let/const variables initialized with a ternary that has a
+        // `props.X` branch.
+        let mut phi_props_vars: HashSet<String> = HashSet::new();
+        for stmt in stmts {
+            if let Statement::VariableDeclaration(v) = stmt {
+                for decl in &v.declarations {
+                    let Some(init) = &decl.init else { continue };
+                    if let Expression::ConditionalExpression(ce) = init {
+                        let consequent_is_props = matches!(&ce.consequent,
+                            Expression::StaticMemberExpression(s)
+                            if matches!(&s.object, Expression::Identifier(id) if id.name == "props")
+                        );
+                        let alternate_is_props = matches!(&ce.alternate,
+                            Expression::StaticMemberExpression(s)
+                            if matches!(&s.object, Expression::Identifier(id) if id.name == "props")
+                        );
+                        if consequent_is_props || alternate_is_props {
+                            if let BindingPatternKind::BindingIdentifier(id) = &decl.id.kind {
+                                phi_props_vars.insert(id.name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- Pattern B: while-loop assigns props.X to a let variable ---
+        // Find while loops that have `x = props.MEMBER` in the body,
+        // then track one level of aliasing (`let y = x`).
+        let mut loop_props_vars: HashSet<String> = HashSet::new();
+        for stmt in stmts {
+            if let Statement::WhileStatement(while_stmt) = stmt {
+                if let Statement::BlockStatement(block) = &while_stmt.body {
+                    collect_props_assigns_in_stmts(&block.body, &mut loop_props_vars);
+                }
+            }
+        }
+        // Track one alias level: `let/const y = x` where x is in loop_props_vars
+        if !loop_props_vars.is_empty() {
+            for stmt in stmts {
+                if let Statement::VariableDeclaration(v) = stmt {
+                    for decl in &v.declarations {
+                        let Some(init) = &decl.init else { continue };
+                        if let Expression::Identifier(id) = init {
+                            if loop_props_vars.contains(id.name.as_str()) {
+                                if let BindingPatternKind::BindingIdentifier(bid) = &decl.id.kind {
+                                    phi_props_vars.insert(bid.name.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if phi_props_vars.is_empty() { continue; }
+
+        // Find closures (assigned to variables) that DIRECTLY mutate a
+        // phi_props_var's property: `phi_var.PROP = value`.
+        let mut mutating_closures: HashSet<String> = HashSet::new();
+        for stmt in stmts {
+            if let Statement::VariableDeclaration(v) = stmt {
+                for decl in &v.declarations {
+                    let Some(init) = &decl.init else { continue };
+                    let body_stmts: Option<&[Statement<'a>]> = match init {
+                        Expression::ArrowFunctionExpression(a) => Some(a.body.statements.as_slice()),
+                        Expression::FunctionExpression(f) =>
+                            f.body.as_ref().map(|b| b.statements.as_slice()),
+                        _ => None,
+                    };
+                    let Some(body) = body_stmts else { continue };
+                    if stmts_mutate_member_of_vars(body, &phi_props_vars) {
+                        if let BindingPatternKind::BindingIdentifier(bid) = &decl.id.kind {
+                            mutating_closures.insert(bid.name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        if mutating_closures.is_empty() { continue; }
+
+        // Find closures that call any mutating_closure.
+        let calling_closures = collect_closures_calling_any(stmts, &mutating_closures);
+
+        // Union of directly-mutating and indirectly-mutating closures.
+        let mut dangerous: HashSet<String> = mutating_closures;
+        dangerous.extend(calling_closures);
+
+        // Check if any useEffect callback calls one of the dangerous closures.
+        if use_effect_uses_any(stmts, &dangerous) {
+            return Err(CompilerError::invalid_react(
+                "This value cannot be modified\n\nModifying component props or hook arguments \
+                 is not allowed. Consider using a local variable instead."
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Walk statements looking for `IDENT = props.MEMBER` and add IDENT to `out`.
+fn collect_props_assigns_in_stmts<'a>(
+    stmts: &[oxc_ast::ast::Statement<'a>],
+    out: &mut std::collections::HashSet<String>,
+) {
+    use oxc_ast::ast::{AssignmentTarget, Expression, Statement};
+    for stmt in stmts {
+        if let Statement::ExpressionStatement(e) = stmt {
+            if let Expression::AssignmentExpression(a) = &e.expression {
+                if let AssignmentTarget::AssignmentTargetIdentifier(ident) = &a.left {
+                    if matches!(&a.right,
+                        Expression::StaticMemberExpression(s)
+                        if matches!(&s.object, Expression::Identifier(id) if id.name == "props")
+                    ) {
+                        out.insert(ident.name.to_string());
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Returns true if any statement directly assigns to `VAR.PROP = val`
+/// where VAR is in `vars`.
+fn stmts_mutate_member_of_vars<'a>(
+    stmts: &[oxc_ast::ast::Statement<'a>],
+    vars: &std::collections::HashSet<String>,
+) -> bool {
+    use oxc_ast::ast::{AssignmentTarget, Expression, Statement};
+    for stmt in stmts {
+        if let Statement::ExpressionStatement(e) = stmt {
+            if let Expression::AssignmentExpression(a) = &e.expression {
+                if let AssignmentTarget::StaticMemberExpression(sme) = &a.left {
+                    if let Expression::Identifier(obj) = &sme.object {
+                        if vars.contains(obj.name.as_str()) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Find all closures (assigned to variables) whose body calls any name in `targets`.
+fn collect_closures_calling_any<'a>(
+    stmts: &[oxc_ast::ast::Statement<'a>],
+    targets: &std::collections::HashSet<String>,
+) -> std::collections::HashSet<String> {
+    use oxc_ast::ast::{BindingPatternKind, Expression, Statement};
+    let mut callers = std::collections::HashSet::new();
+    for stmt in stmts {
+        if let Statement::VariableDeclaration(v) = stmt {
+            for decl in &v.declarations {
+                let Some(init) = &decl.init else { continue };
+                let body: Option<&[Statement<'a>]> = match init {
+                    Expression::ArrowFunctionExpression(a) => Some(a.body.statements.as_slice()),
+                    Expression::FunctionExpression(f) =>
+                        f.body.as_ref().map(|b| b.statements.as_slice()),
+                    _ => None,
+                };
+                let Some(body) = body else { continue };
+                if stmts_call_any(body, targets) {
+                    if let BindingPatternKind::BindingIdentifier(bid) = &decl.id.kind {
+                        callers.insert(bid.name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    callers
+}
+
+/// Returns true if any statement (at top level) calls any name in `targets`.
+fn stmts_call_any<'a>(
+    stmts: &[oxc_ast::ast::Statement<'a>],
+    targets: &std::collections::HashSet<String>,
+) -> bool {
+    use oxc_ast::ast::{Expression, Statement};
+    for stmt in stmts {
+        let call_expr = match stmt {
+            Statement::ExpressionStatement(e) => Some(&e.expression),
+            Statement::ReturnStatement(r) => r.argument.as_ref(),
+            _ => None,
+        };
+        if let Some(Expression::CallExpression(call)) = call_expr {
+            if let Expression::Identifier(id) = &call.callee {
+                if targets.contains(id.name.as_str()) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Returns true if any useEffect call's callback directly calls any name in `dangerous`.
+fn use_effect_uses_any<'a>(
+    stmts: &[oxc_ast::ast::Statement<'a>],
+    dangerous: &std::collections::HashSet<String>,
+) -> bool {
+    use oxc_ast::ast::{Expression, Statement};
+    for stmt in stmts {
+        if let Statement::ExpressionStatement(e) = stmt {
+            if let Expression::CallExpression(call) = &e.expression {
+                let is_effect = match &call.callee {
+                    Expression::Identifier(id) => id.name == "useEffect",
+                    _ => false,
+                };
+                if !is_effect { continue; }
+                let Some(callback) = call.arguments.first().and_then(|a| a.as_expression()) else {
+                    continue
+                };
+                let cb_body: Option<&[Statement<'a>]> = match callback {
+                    Expression::ArrowFunctionExpression(a) => Some(a.body.statements.as_slice()),
+                    Expression::FunctionExpression(f) =>
+                        f.body.as_ref().map(|b| b.statements.as_slice()),
+                    _ => None,
+                };
+                let Some(cb_stmts) = cb_body else {
+                    if let Expression::Identifier(id) = callback {
+                        if dangerous.contains(id.name.as_str()) {
+                            return true;
+                        }
+                    }
+                    continue;
+                };
+                if stmts_call_any(cb_stmts, dangerous) {
+                    return true;
+                }
+            }
+        }
     }
     false
 }
