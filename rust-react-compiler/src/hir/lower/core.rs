@@ -3402,8 +3402,12 @@ fn check_stmt_for_ref_access<'a>(
             }
         }
         Statement::BlockStatement(b) => check_stmts_for_ref_access(&b.body, refs)?,
-        // Don't recurse into nested function declarations
-        Statement::FunctionDeclaration(_) => {}
+        // Recurse into nested function declarations — they may capture outer refs
+        Statement::FunctionDeclaration(f) => {
+            if let Some(body) = &f.body {
+                check_stmts_for_ref_access(&body.statements, refs)?;
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -3501,8 +3505,22 @@ fn check_expr_for_ref_access<'a>(
         }
         // Function calls — check arguments for ref.current
         Expression::CallExpression(call) => {
+            // Effect hooks and useCallback: their callback (first arg) runs AFTER render,
+            // so ref.current access inside those callbacks is allowed.
+            let callee_name = match &call.callee {
+                Expression::Identifier(id) => Some(id.name.as_str()),
+                Expression::StaticMemberExpression(m) => Some(m.property.name.as_str()),
+                _ => None,
+            };
+            let is_deferred_hook = matches!(callee_name,
+                Some("useEffect" | "useLayoutEffect" | "useInsertionEffect" | "useCallback")
+            );
             check_expr_for_ref_access(&call.callee, refs)?;
-            for arg in &call.arguments {
+            for (i, arg) in call.arguments.iter().enumerate() {
+                // Skip the callback (first arg) for deferred hooks
+                if is_deferred_hook && i == 0 {
+                    continue;
+                }
                 if let Some(e) = arg.as_expression() {
                     check_expr_for_ref_access(e, refs)?;
                 }
@@ -3517,8 +3535,15 @@ fn check_expr_for_ref_access<'a>(
             check_expr_for_ref_access(&c.consequent, refs)?;
             check_expr_for_ref_access(&c.alternate, refs)?;
         }
-        // Don't recurse into nested closures
-        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => {}
+        // Recurse into nested closures — outer refs are in scope
+        Expression::ArrowFunctionExpression(arrow) => {
+            check_stmts_for_ref_access(&arrow.body.statements, refs)?;
+        }
+        Expression::FunctionExpression(func) => {
+            if let Some(body) = &func.body {
+                check_stmts_for_ref_access(&body.statements, refs)?;
+            }
+        }
         _ => {}
     }
     Ok(())
