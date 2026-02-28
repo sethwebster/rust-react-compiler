@@ -229,6 +229,23 @@ pub fn lower_program(
     // return value inside callbacks are errors.
     validate_reanimated_non_imported_shared_value_writes(source, &program)?;
 
+    // Detect mutations of hook results (or values that might alias hook results
+    // through conditional assignments), e.g. `frozen = useHook(); if(cond) x = frozen; x.prop = true`.
+    validate_no_hook_result_mutation(&program)?;
+
+    // Detect use-before-declaration: useEffect/useCallback callback references a
+    // variable declared later via useState/useReducer destructuring.
+    validate_no_use_before_declaration(&program)?;
+
+    // Detect chained outer-let assignment inside closures:
+    //   `const copy = (outer_let = val)` inside any closure → error.
+    // This is specifically the `(x = val)` assignment-as-expression pattern.
+    validate_no_chained_outer_let_assign_in_closure(&program)?;
+
+    // Detect indirect ref access via object method:
+    //   `obj.prop = () => ref.current; ... obj.prop()` → error.
+    validate_no_object_method_ref_call(&program)?;
+
     // Unsupported validation pragmas: flag any file that requests a validation
     // pass that we haven't implemented yet.
     {
@@ -5642,8 +5659,16 @@ fn ubd_check_expr<'a>(
                         _ => None,
                     };
                     if let Some(body) = body_stmts {
-                        // Check if body references any name in `all_decls` that isn't `declared_so_far`.
-                        if ubd_body_refs_undeclared(body, all_decls, declared_so_far) {
+                        // Subtract names declared LOCALLY inside the callback from `all_decls`
+                        // to avoid false positives where an inner `const a = ...` shadows outer `a`.
+                        let local_names = collect_all_local_decl_names(body);
+                        let effective_decls: std::collections::HashSet<String> = all_decls
+                            .iter()
+                            .filter(|n| !local_names.contains(*n))
+                            .cloned()
+                            .collect();
+                        // Check if body references any name in `effective_decls` not yet declared.
+                        if ubd_body_refs_undeclared(body, &effective_decls, declared_so_far) {
                             return Err(CompilerError::invalid_react(
                                 "Cannot access variable before it is declared",
                             ));
@@ -8489,54 +8514,22 @@ fn validate_no_funcdecl_outer_let_reassign<'a>(
         let outer_lets = collect_let_names_shallow(stmts);
         if outer_lets.is_empty() { continue; }
         for stmt in stmts {
-            match stmt {
-                // Function declarations: `function foo() { x = ... }`
-                Statement::FunctionDeclaration(f) => {
-                    let effective_lets: std::collections::HashSet<String> = outer_lets.iter()
-                        .filter(|name| !params_contain(&f.params, name))
-                        .cloned()
-                        .collect();
-                    if effective_lets.is_empty() { continue; }
-                    if let Some(body) = &f.body {
-                        if assigns_deep(&body.statements, &effective_lets) {
-                            return Err(CompilerError::invalid_react(
-                                "Cannot reassign variable after render completes. Consider using state instead.",
-                            ));
-                        }
+            // Only check named function declarations inside the body.
+            // Arrow functions assigned to variables are "context variables"
+            // handled by the compiler — checking them causes false positives.
+            if let Statement::FunctionDeclaration(f) = stmt {
+                let effective_lets: std::collections::HashSet<String> = outer_lets.iter()
+                    .filter(|name| !params_contain(&f.params, name))
+                    .cloned()
+                    .collect();
+                if effective_lets.is_empty() { continue; }
+                if let Some(body) = &f.body {
+                    if assigns_deep(&body.statements, &effective_lets) {
+                        return Err(CompilerError::invalid_react(
+                            "Cannot reassign variable after render completes. Consider using state instead.",
+                        ));
                     }
                 }
-                // Variable declarations: `const fn1 = () => { x = ... }`
-                Statement::VariableDeclaration(v) => {
-                    for decl in &v.declarations {
-                        if let Some(init) = &decl.init {
-                            let (params_opt, body_stmts): (Option<&oxc_ast::ast::FormalParameters>, Option<&[Statement]>) = match init {
-                                Expression::ArrowFunctionExpression(a) => (Some(&a.params), Some(&a.body.statements)),
-                                Expression::FunctionExpression(f) => (
-                                    Some(&f.params),
-                                    f.body.as_ref().map(|b| b.statements.as_slice()),
-                                ),
-                                _ => (None, None),
-                            };
-                            if let Some(body) = body_stmts {
-                                let effective_lets: std::collections::HashSet<String> = if let Some(params) = params_opt {
-                                    outer_lets.iter()
-                                        .filter(|name| !params_contain(params, name))
-                                        .cloned()
-                                        .collect()
-                                } else {
-                                    outer_lets.clone()
-                                };
-                                if effective_lets.is_empty() { continue; }
-                                if assigns_deep(body, &effective_lets) {
-                                    return Err(CompilerError::invalid_react(
-                                        "Cannot reassign variable after render completes. Consider using state instead.",
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
-                _ => {}
             }
         }
     }
@@ -8958,11 +8951,13 @@ fn validate_no_post_jsx_mutation<'a>(
         Ok(())
     }
 
-    /// Build an alias map from sequential statements: `let y = x` → `y → x`.
-    fn collect_aliases<'a>(stmts: &[Statement<'a>]) -> HashMap<String, String> {
-        let mut aliases: HashMap<String, String> = HashMap::new();
-        for stmt in stmts {
-            if let Statement::VariableDeclaration(v) = stmt {
+    /// Update alias map incrementally as we process statements:
+    /// - `let/const y = x` (identifier init) → add `y → x`
+    /// - `x = expr` at top level (ExpressionStatement) → remove all aliases
+    ///   where the ORIGINAL is `x` (unconditional reassignment breaks the alias)
+    fn update_aliases<'a>(stmt: &Statement<'a>, aliases: &mut HashMap<String, String>) {
+        match stmt {
+            Statement::VariableDeclaration(v) => {
                 for decl in &v.declarations {
                     if let Some(Expression::Identifier(id)) = &decl.init {
                         if let oxc_ast::ast::BindingPatternKind::BindingIdentifier(bind) = &decl.id.kind {
@@ -8971,16 +8966,26 @@ fn validate_no_post_jsx_mutation<'a>(
                     }
                 }
             }
+            Statement::ExpressionStatement(e) => {
+                if let Expression::AssignmentExpression(a) = &e.expression {
+                    if let AssignmentTarget::AssignmentTargetIdentifier(id) = &a.left {
+                        let reassigned = id.name.as_str();
+                        // Remove all aliases where the original is the reassigned variable
+                        aliases.retain(|_alias, original| original.as_str() != reassigned);
+                    }
+                }
+            }
+            _ => {}
         }
-        aliases
     }
 
     let bodies = collect_component_hook_bodies(program);
     for stmts in bodies {
-        let aliases = collect_aliases(stmts);
+        let mut aliases: HashMap<String, String> = HashMap::new();
         let mut frozen: HashSet<String> = HashSet::new();
         for stmt in stmts.iter() {
             check_mutation(stmt, &frozen)?;
+            update_aliases(stmt, &mut aliases);
             collect_frozen(stmt, &mut frozen, &aliases);
         }
     }
@@ -9668,6 +9673,359 @@ fn check_expr_for_shared_val_write<'a>(
             }
         }
         _ => {}
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_hook_result_mutation
+// ---------------------------------------------------------------------------
+/// Detect direct mutation of hook results or variables that might alias them.
+///
+/// Pattern: `const frozen = useHook(); if(cond) { x = frozen; } x.property = true;`
+fn validate_no_hook_result_mutation<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::{AssignmentTarget, BindingPatternKind, Expression, Statement};
+    use std::collections::HashSet;
+
+    fn is_hook_call(expr: &Expression) -> bool {
+        let callee = match expr {
+            Expression::CallExpression(c) => &c.callee,
+            _ => return false,
+        };
+        match callee {
+            Expression::Identifier(id) => {
+                let name = id.name.as_str();
+                name.starts_with("use") && name.len() > 3 &&
+                    name.chars().nth(3).map_or(false, |c| c.is_uppercase() || c == '_')
+            }
+            Expression::StaticMemberExpression(s) => {
+                let prop = s.property.name.as_str();
+                prop.starts_with("use") && prop.len() > 3 &&
+                    prop.chars().nth(3).map_or(false, |c| c.is_uppercase() || c == '_')
+            }
+            _ => false,
+        }
+    }
+
+    fn collect_hook_result_vars<'a>(stmts: &[Statement<'a>]) -> HashSet<String> {
+        let mut vars: HashSet<String> = HashSet::new();
+        for stmt in stmts {
+            if let Statement::VariableDeclaration(v) = stmt {
+                for decl in &v.declarations {
+                    if let Some(init) = &decl.init {
+                        if is_hook_call(init) {
+                            if let BindingPatternKind::BindingIdentifier(id) = &decl.id.kind {
+                                vars.insert(id.name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        vars
+    }
+
+    fn expand_aliases<'a>(stmts: &[Statement<'a>], frozen: &mut HashSet<String>) {
+        for stmt in stmts {
+            match stmt {
+                Statement::ExpressionStatement(e) => {
+                    if let Expression::AssignmentExpression(a) = &e.expression {
+                        if let AssignmentTarget::AssignmentTargetIdentifier(lhs) = &a.left {
+                            if let Expression::Identifier(rhs) = &a.right {
+                                if frozen.contains(rhs.name.as_str()) {
+                                    frozen.insert(lhs.name.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                Statement::IfStatement(i) => {
+                    expand_aliases(std::slice::from_ref(&i.consequent), frozen);
+                    if let Some(alt) = &i.alternate {
+                        expand_aliases(std::slice::from_ref(alt), frozen);
+                    }
+                }
+                Statement::BlockStatement(b) => expand_aliases(&b.body, frozen),
+                Statement::WhileStatement(w) => {
+                    expand_aliases(std::slice::from_ref(&w.body), frozen);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        let mut frozen = collect_hook_result_vars(stmts);
+        if frozen.is_empty() { continue; }
+
+        // Transitively expand: variables assigned from frozen values
+        for _ in 0..4 {
+            let before = frozen.len();
+            expand_aliases(stmts, &mut frozen);
+            if frozen.len() == before { break; }
+        }
+
+        // Check top-level mutations of frozen variables (property assignment)
+        for stmt in stmts {
+            if let Statement::ExpressionStatement(e) = stmt {
+                if let Expression::AssignmentExpression(a) = &e.expression {
+                    let base = match &a.left {
+                        AssignmentTarget::StaticMemberExpression(s) => {
+                            if let Expression::Identifier(id) = &s.object { Some(id.name.as_str()) } else { None }
+                        }
+                        AssignmentTarget::ComputedMemberExpression(c) => {
+                            if let Expression::Identifier(id) = &c.object { Some(id.name.as_str()) } else { None }
+                        }
+                        _ => None,
+                    };
+                    if let Some(name) = base {
+                        if frozen.contains(name) {
+                            return Err(CompilerError::invalid_react("This value cannot be modified"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+
+// validate_no_chained_outer_let_assign_in_closure
+// ---------------------------------------------------------------------------
+//
+// Detect the specific antipattern `const copy = (outer_let = val)` inside a closure.
+// This is the "chained assignment as value" pattern where `(x = 3)` is used as an
+// expression that both assigns x and returns the value. Inside a closure this is
+// problematic because it mutates the outer binding from within a potentially-escaped fn.
+fn validate_no_chained_outer_let_assign_in_closure<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    use std::collections::HashSet;
+
+    /// Check if an expression contains a chained assignment `(outer_let = val)`.
+    /// Only looks at ParenthesizedExpression wrapping an AssignmentExpression — the
+    /// specific syntactic form used for chained assignments.
+    fn contains_chained_assign_to_set<'a>(
+        expr: &Expression<'a>,
+        outer_lets: &HashSet<String>,
+    ) -> bool {
+        match expr {
+            Expression::ParenthesizedExpression(p) => {
+                if let Expression::AssignmentExpression(a) = &p.expression {
+                    if let oxc_ast::ast::AssignmentTarget::AssignmentTargetIdentifier(id) = &a.left {
+                        if outer_lets.contains(id.name.as_str()) {
+                            return true;
+                        }
+                    }
+                }
+                // Recurse in case of double-parens
+                contains_chained_assign_to_set(&p.expression, outer_lets)
+            }
+            Expression::AssignmentExpression(a) => {
+                // Also catch un-parenthesized assignment when used as value in VariableDecl init
+                // (this case is handled at the call site via VariableDeclaration check)
+                contains_chained_assign_to_set(&a.right, outer_lets)
+            }
+            Expression::SequenceExpression(s) => {
+                s.expressions.iter().any(|e| contains_chained_assign_to_set(e, outer_lets))
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if a closure body contains a `const y = (outer_let = val)` VariableDecl
+    /// where the assignment to outer_let is used as the value (chained assignment).
+    fn closure_body_has_chained_assign<'a>(
+        stmts: &[Statement<'a>],
+        outer_lets: &HashSet<String>,
+    ) -> bool {
+        for stmt in stmts {
+            match stmt {
+                Statement::VariableDeclaration(v) => {
+                    for decl in &v.declarations {
+                        if let Some(init) = &decl.init {
+                            // Skip nested closures
+                            if matches!(init, Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)) {
+                                continue;
+                            }
+                            if contains_chained_assign_to_set(init, outer_lets) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                Statement::IfStatement(i) => {
+                    if closure_body_has_chained_assign(std::slice::from_ref(&i.consequent), outer_lets) {
+                        return true;
+                    }
+                    if let Some(alt) = &i.alternate {
+                        if closure_body_has_chained_assign(std::slice::from_ref(alt), outer_lets) {
+                            return true;
+                        }
+                    }
+                }
+                Statement::BlockStatement(b) => {
+                    if closure_body_has_chained_assign(&b.body, outer_lets) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    let bodies = collect_all_function_bodies(program);
+    for stmts in bodies {
+        let outer_lets = collect_let_names_shallow(stmts);
+        if outer_lets.is_empty() { continue; }
+
+        for stmt in stmts {
+            if let Statement::VariableDeclaration(v) = stmt {
+                for decl in &v.declarations {
+                    if let Some(init) = &decl.init {
+                        let closure_body: Option<&[Statement]> = match init {
+                            Expression::ArrowFunctionExpression(a) => Some(&a.body.statements),
+                            Expression::FunctionExpression(f) => f.body.as_ref().map(|b| b.statements.as_slice()),
+                            _ => None,
+                        };
+                        if let Some(body) = closure_body {
+                            if closure_body_has_chained_assign(body, &outer_lets) {
+                                return Err(CompilerError::invalid_react(
+                                    "Cannot reassign variable after render completes. \
+                                     Consider using state instead.",
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// validate_no_object_method_ref_call
+// ---------------------------------------------------------------------------
+//
+// Detect: `obj.prop = () => ref.current; const x = obj.prop();`
+// The object property stores a closure that accesses a ref, and is then called
+// during render. This is indirect ref access.
+fn validate_no_object_method_ref_call<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    use std::collections::{HashMap, HashSet};
+
+    /// Returns true if the expression tree contains `ref.current` where `ref` is in `refs`.
+    fn expr_accesses_ref_current<'a>(expr: &Expression<'a>, refs: &HashSet<String>) -> bool {
+        match expr {
+            Expression::StaticMemberExpression(m) => {
+                if m.property.name == "current" {
+                    if let Expression::Identifier(obj) = &m.object {
+                        if refs.contains(obj.name.as_str()) { return true; }
+                    }
+                }
+                expr_accesses_ref_current(&m.object, refs)
+            }
+            Expression::CallExpression(call) => {
+                expr_accesses_ref_current(&call.callee, refs)
+                    || call.arguments.iter().any(|a| {
+                        a.as_expression().map_or(false, |e| expr_accesses_ref_current(e, refs))
+                    })
+            }
+            Expression::ArrowFunctionExpression(arrow) => {
+                stmts_access_ref_current(&arrow.body.statements, refs)
+            }
+            Expression::FunctionExpression(func) => {
+                func.body.as_ref().map_or(false, |b| stmts_access_ref_current(&b.statements, refs))
+            }
+            Expression::ConditionalExpression(c) => {
+                expr_accesses_ref_current(&c.test, refs)
+                    || expr_accesses_ref_current(&c.consequent, refs)
+                    || expr_accesses_ref_current(&c.alternate, refs)
+            }
+            Expression::LogicalExpression(l) => {
+                expr_accesses_ref_current(&l.left, refs)
+                    || expr_accesses_ref_current(&l.right, refs)
+            }
+            _ => false,
+        }
+    }
+
+    fn stmts_access_ref_current<'a>(stmts: &[Statement<'a>], refs: &HashSet<String>) -> bool {
+        stmts.iter().any(|s| stmt_accesses_ref_current(s, refs))
+    }
+
+    fn stmt_accesses_ref_current<'a>(stmt: &Statement<'a>, refs: &HashSet<String>) -> bool {
+        match stmt {
+            Statement::ExpressionStatement(e) => expr_accesses_ref_current(&e.expression, refs),
+            Statement::ReturnStatement(r) => {
+                r.argument.as_ref().map_or(false, |a| expr_accesses_ref_current(a, refs))
+            }
+            Statement::VariableDeclaration(v) => v.declarations.iter().any(|d| {
+                d.init.as_ref().map_or(false, |init| expr_accesses_ref_current(init, refs))
+            }),
+            Statement::IfStatement(i) => {
+                expr_accesses_ref_current(&i.test, refs)
+                    || stmt_accesses_ref_current(&i.consequent, refs)
+                    || i.alternate.as_ref().map_or(false, |a| stmt_accesses_ref_current(a, refs))
+            }
+            Statement::BlockStatement(b) => stmts_access_ref_current(&b.body, refs),
+            _ => false,
+        }
+    }
+
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        // Collect ref variable names (from useRef calls).
+        let mut refs: HashSet<String> = HashSet::new();
+        for stmt in stmts.iter() {
+            collect_ref_names_from_stmt(stmt, &mut refs);
+        }
+        if refs.is_empty() { continue; }
+
+        // Pass 1: collect `obj.prop = () => ...ref.current...` patterns.
+        // Key: (obj_name, prop_name) → true if the stored fn accesses a ref.
+        let mut ref_methods: HashMap<(String, String), bool> = HashMap::new();
+        for stmt in stmts.iter() {
+            if let Statement::ExpressionStatement(e) = stmt {
+                if let Expression::AssignmentExpression(a) = &e.expression {
+                    if let oxc_ast::ast::AssignmentTarget::StaticMemberExpression(m) = &a.left {
+                        if let Expression::Identifier(obj_id) = &m.object {
+                            let key = (obj_id.name.to_string(), m.property.name.to_string());
+                            if expr_accesses_ref_current(&a.right, &refs) {
+                                ref_methods.insert(key, true);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if ref_methods.is_empty() { continue; }
+
+        // Pass 2: detect `const result = obj.prop()` where (obj, prop) is a ref method.
+        for stmt in stmts.iter() {
+            if let Statement::VariableDeclaration(v) = stmt {
+                for decl in &v.declarations {
+                    if let Some(Expression::CallExpression(call)) = &decl.init {
+                        if let Expression::StaticMemberExpression(m) = &call.callee {
+                            if let Expression::Identifier(obj_id) = &m.object {
+                                let key = (obj_id.name.to_string(), m.property.name.to_string());
+                                if ref_methods.contains_key(&key) {
+                                    return Err(CompilerError::invalid_react(
+                                        "Cannot access refs during render\n\nReact refs are values that are not needed for rendering. Refs should only be accessed outside of render, such as in event handlers or effects. Accessing a ref value (the `current` property) during render can cause your component not to update as expected (https://react.dev/reference/react/useRef)."
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }
