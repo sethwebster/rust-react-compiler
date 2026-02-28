@@ -162,10 +162,8 @@ pub fn lower_program(
     // Check for hook identifiers used as values (not called).
     validate_no_hook_as_value(&program)?;
 
-    // Check for @validateNoSetStateInRender pragma.
-    if source.lines().next().unwrap_or("").contains("@validateNoSetStateInRender") {
-        validate_no_setstate_in_render(&program)?;
-    }
+    // Check for setState called during render (always checked, not just with pragma).
+    validate_no_setstate_in_render(&program)?;
 
     // Check for @validateBlocklistedImports pragma and validate imports.
     validate_blocklisted_imports(source, &program)?;
@@ -2019,7 +2017,9 @@ fn collect_state_setters_from_stmt(stmt: &oxc_ast::ast::Statement, setters: &mut
     }
 }
 
-/// Check if a setter is called at render level (not inside arrow/function).
+/// Check if a setter is called at render level.
+/// Does NOT enter conditional branches (setState in if-blocks is allowed).
+/// Does NOT enter loops or function expressions (setters in callbacks are fine).
 fn check_stmt_for_setter_call(stmt: &oxc_ast::ast::Statement, setters: &std::collections::HashSet<String>) -> Result<()> {
     use oxc_ast::ast::Statement;
     match stmt {
@@ -2029,35 +2029,13 @@ fn check_stmt_for_setter_call(stmt: &oxc_ast::ast::Statement, setters: &std::col
                 check_expr_for_setter_call(arg, setters)?;
             }
         }
-        Statement::IfStatement(i) => {
-            check_stmt_for_setter_call(&i.consequent, setters)?;
-            if let Some(alt) = &i.alternate {
-                check_stmt_for_setter_call(alt, setters)?;
-            }
-        }
         Statement::BlockStatement(b) => {
             for s in &b.body {
                 check_stmt_for_setter_call(s, setters)?;
             }
         }
-        Statement::ForOfStatement(f) => {
-            check_stmt_for_setter_call(&f.body, setters)?;
-        }
-        Statement::ForInStatement(f) => {
-            check_stmt_for_setter_call(&f.body, setters)?;
-        }
-        Statement::ForStatement(f) => {
-            if let Some(body) = Some(&f.body) {
-                check_stmt_for_setter_call(body, setters)?;
-            }
-        }
-        Statement::WhileStatement(w) => {
-            check_stmt_for_setter_call(&w.body, setters)?;
-        }
-        Statement::DoWhileStatement(d) => {
-            check_stmt_for_setter_call(&d.body, setters)?;
-        }
-        // Don't enter function expressions/arrow functions (those are callbacks)
+        // Don't recurse into conditionals, loops, or function expressions.
+        // setState inside an if/for/while/arrow is allowed (conditional update pattern).
         _ => {}
     }
     Ok(())
