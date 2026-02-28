@@ -96,6 +96,12 @@ pub fn lower_function_expr<'a>(
     let loc = SourceLocation::source(func.span.start, func.span.end);
     let name = func.id.as_ref().map(|id| id.name.to_string());
 
+    if func.generator {
+        return Err(crate::error::CompilerError::todo(
+            "(BuildHIR::lowerExpression) Handle YieldExpression expressions",
+        ));
+    }
+
     let lowered_fn = make_stub_hir_body(
         ctx,
         &loc,

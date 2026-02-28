@@ -122,6 +122,11 @@ pub fn lower_program(
         return make_passthrough_hir(env);
     }
 
+    // Test-only pragma: simulate an unexpected exception in the pipeline.
+    if source.contains("@throwUnknownException__testonly:true") {
+        return Err(CompilerError::invariant("unexpected error"));
+    }
+
     let allocator = Allocator::default();
     let mut parser_return = oxc_parser::Parser::new(&allocator, source, source_type).parse();
 
@@ -145,6 +150,10 @@ pub fn lower_program(
     }
 
     let program = parser_return.program;
+
+    // Check for @validateBlocklistedImports pragma and validate imports.
+    validate_blocklisted_imports(source, &program)?;
+
     let semantic_ret = SemanticBuilder::new().build(&program);
     let semantic = semantic_ret.semantic;
 
@@ -615,7 +624,14 @@ pub fn lower_statement<'r, 'a: 'r>(
 
         // ------------------------------------------------------------------
         Statement::TryStatement(s) => {
-            // TryStatement is not fully supported yet; emit UnsupportedNode.
+            // try...finally without a catch clause is not yet supported.
+            if s.handler.is_none() {
+                return Err(CompilerError::todo(
+                    "(BuildHIR::lowerStatement) Handle TryStatement without a catch clause",
+                ));
+            }
+            // TryStatement with catch (and optional finally) is not fully supported;
+            // emit UnsupportedNode as a placeholder.
             let loc = span_loc(s.span);
             ctx.push(InstructionValue::UnsupportedNode { loc }, SourceLocation::Generated);
             Ok(())
@@ -1251,4 +1267,49 @@ fn lower_object_pattern<'r, 'a: 'r>(
         properties.push(ObjectPatternProperty::Spread(SpreadPattern { place: tmp }));
     }
     ObjectPattern { properties, loc }
+}
+
+// ---------------------------------------------------------------------------
+// Pragma-based validations
+// ---------------------------------------------------------------------------
+
+/// Parse `@validateBlocklistedImports:["pkg1","pkg2"]` from the first comment
+/// line and verify that no import declarations use those packages.
+fn validate_blocklisted_imports(source: &str, program: &oxc_ast::ast::Program) -> Result<()> {
+    // Find the pragma in the first few lines.
+    let first_line = source.lines().next().unwrap_or("");
+    let blocklist = parse_blocklisted_imports_pragma(first_line);
+    if blocklist.is_empty() {
+        return Ok(());
+    }
+
+    for stmt in &program.body {
+        if let oxc_ast::ast::Statement::ImportDeclaration(import) = stmt {
+            let source_val = import.source.value.as_str();
+            if blocklist.iter().any(|b| b == source_val) {
+                return Err(CompilerError::todo("Bailing out due to blocklisted import"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Parse `@validateBlocklistedImports:["a","b"]` or `@validateBlocklistedImports:['a']`
+/// from a pragma comment line.
+fn parse_blocklisted_imports_pragma(line: &str) -> Vec<String> {
+    let needle = "@validateBlocklistedImports:";
+    let Some(idx) = line.find(needle) else { return vec![] };
+    let after = &line[idx + needle.len()..];
+    // Extract balanced brackets [...]
+    let Some(open) = after.find('[') else { return vec![] };
+    let Some(close) = after[open..].find(']') else { return vec![] };
+    let inner = &after[open + 1..open + close];
+    // Parse comma-separated quoted strings.
+    inner
+        .split(',')
+        .filter_map(|part| {
+            let trimmed = part.trim().trim_matches('"').trim_matches('\'');
+            if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+        })
+        .collect()
 }

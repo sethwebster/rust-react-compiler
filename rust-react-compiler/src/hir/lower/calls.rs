@@ -23,6 +23,29 @@ pub fn lower_call<'a>(
                 "The 'eval' function is not supported",
             ));
         }
+        // Hook calls (callee starts with 'use') with spread arguments are not yet supported.
+        let name = ident.name.as_str();
+        let first = name.chars().next();
+        let is_hook = name.starts_with("use") && first.map_or(false, |c| c.is_lowercase());
+        if is_hook && expr.arguments.iter().any(|a| matches!(a, Argument::SpreadElement(_))) {
+            return Err(CompilerError::todo(
+                "Support spread syntax for hook arguments",
+            ));
+        }
+
+        // useMemo/useCallback specific validations on the callback argument.
+        if matches!(name, "useMemo" | "useCallback") {
+            validate_memo_callback(expr)?;
+        }
+    }
+
+    // React.useMemo / React.useCallback via static member expression.
+    if let Expression::StaticMemberExpression(s) = &expr.callee {
+        if let Expression::Identifier(obj) = &s.object {
+            if obj.name == "React" && matches!(s.property.name.as_str(), "useMemo" | "useCallback") {
+                validate_memo_callback(expr)?;
+            }
+        }
     }
 
     // Static member expression: obj.method(args)
@@ -159,4 +182,63 @@ fn lower_arg<'a>(
             Ok(CallArg::Place(place))
         }
     }
+}
+
+/// Validate that a useMemo/useCallback callback argument follows React rules:
+/// - Must not be async or a generator function
+/// - (useMemo only) must not accept parameters
+/// - (useMemo) dependency list must be an array literal
+fn validate_memo_callback<'a>(expr: &CallExpression<'a>) -> Result<()> {
+    let callee_name = match &expr.callee {
+        Expression::Identifier(i) => i.name.as_str(),
+        Expression::StaticMemberExpression(s) => s.property.name.as_str(),
+        _ => return Ok(()),
+    };
+
+    let callback_arg = expr.arguments.first().and_then(|a| a.as_expression());
+
+    if let Some(callback) = callback_arg {
+        match callback {
+            Expression::ArrowFunctionExpression(arrow) => {
+                if arrow.r#async {
+                    return Err(CompilerError::invalid_react(format!(
+                        "{callee_name}() callbacks may not be async or generator functions\n\n\
+                         {callee_name}() callbacks are called once and must synchronously return a value."
+                    )));
+                }
+                if callee_name == "useMemo" && !arrow.params.items.is_empty() {
+                    return Err(CompilerError::invalid_react(format!(
+                        "{callee_name}() callbacks may not accept parameters"
+                    )));
+                }
+            }
+            Expression::FunctionExpression(func) => {
+                if func.r#async || func.generator {
+                    return Err(CompilerError::invalid_react(format!(
+                        "{callee_name}() callbacks may not be async or generator functions\n\n\
+                         {callee_name}() callbacks are called once and must synchronously return a value."
+                    )));
+                }
+                if callee_name == "useMemo" && !func.params.items.is_empty() {
+                    return Err(CompilerError::invalid_react(format!(
+                        "{callee_name}() callbacks may not accept parameters"
+                    )));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Validate dep list (second argument) for useMemo must be an array literal.
+    if callee_name == "useMemo" {
+        if let Some(dep_arg) = expr.arguments.get(1).and_then(|a| a.as_expression()) {
+            if !matches!(dep_arg, Expression::ArrayExpression(_)) {
+                return Err(CompilerError::invalid_react(
+                    "Expected the dependency list for useMemo to be an array literal"
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
