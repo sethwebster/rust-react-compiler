@@ -1,0 +1,8 @@
+# Rust build artifacts
+rust-react-compiler/target/
+
+# Claude session files (private)
+.claude/
+
+# OS
+.DS_Store
