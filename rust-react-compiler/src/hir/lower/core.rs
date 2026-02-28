@@ -162,6 +162,11 @@ pub fn lower_program(
     // Check for hook identifiers used as values (not called).
     validate_no_hook_as_value(&program)?;
 
+    // Check for @validateNoSetStateInRender pragma.
+    if source.lines().next().unwrap_or("").contains("@validateNoSetStateInRender") {
+        validate_no_setstate_in_render(&program)?;
+    }
+
     // Check for @validateBlocklistedImports pragma and validate imports.
     validate_blocklisted_imports(source, &program)?;
 
@@ -1899,6 +1904,194 @@ fn check_expr_hook_value(expr: &Expression, is_callee: bool) -> Result<()> {
         }
         // Don't recurse into nested arrow/function expressions (different scope)
         Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => {}
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Validate that state setter functions from useState() are not called during render.
+/// Applies when `@validateNoSetStateInRender` pragma is present.
+fn validate_no_setstate_in_render(program: &oxc_ast::ast::Program) -> Result<()> {
+    use std::collections::HashSet;
+
+    // Find the first component/hook function body in the program.
+    let body_stmts = find_first_fn_body(program);
+    if body_stmts.is_empty() {
+        return Ok(());
+    }
+
+    // Step 1: Collect setter names from useState/useCustomState destructuring.
+    let mut setters: HashSet<String> = HashSet::new();
+    for stmt in body_stmts {
+        collect_state_setters_from_stmt(stmt, &mut setters);
+    }
+
+    if setters.is_empty() {
+        return Ok(());
+    }
+
+    // Step 2: Check if any setter is called at render level (not inside callbacks).
+    for stmt in body_stmts {
+        check_stmt_for_setter_call(stmt, &setters)?;
+    }
+
+    Ok(())
+}
+
+/// Find the statements of the first function body in the program.
+fn find_first_fn_body<'a>(program: &'a oxc_ast::ast::Program<'a>) -> &'a [oxc_ast::ast::Statement<'a>] {
+    for stmt in &program.body {
+        match stmt {
+            oxc_ast::ast::Statement::FunctionDeclaration(f) => {
+                if let Some(body) = &f.body {
+                    return &body.statements;
+                }
+            }
+            oxc_ast::ast::Statement::ExportDefaultDeclaration(d) => {
+                match &d.declaration {
+                    ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
+                        if let Some(body) = &f.body {
+                            return &body.statements;
+                        }
+                    }
+                    ExportDefaultDeclarationKind::ArrowFunctionExpression(a) => {
+                        return &a.body.statements;
+                    }
+                    _ => {}
+                }
+            }
+            oxc_ast::ast::Statement::ExportNamedDeclaration(d) => {
+                if let Some(Declaration::FunctionDeclaration(f)) = &d.declaration {
+                    if let Some(body) = &f.body {
+                        return &body.statements;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    &[]
+}
+
+/// Collect names of state setter variables (from useState/use*State destructuring).
+fn collect_state_setters_from_stmt(stmt: &oxc_ast::ast::Statement, setters: &mut std::collections::HashSet<String>) {
+    if let oxc_ast::ast::Statement::VariableDeclaration(v) = stmt {
+        for decl in &v.declarations {
+            if let Some(init) = &decl.init {
+                if let Expression::CallExpression(call) = init {
+                    // Detect useState() or any use*State() or custom hooks
+                    let is_state_hook = match &call.callee {
+                        Expression::Identifier(id) => {
+                            let name = id.name.as_str();
+                            name == "useState" || (name.starts_with("use") && name.ends_with("State"))
+                        }
+                        Expression::StaticMemberExpression(m) => {
+                            if let Expression::Identifier(obj) = &m.object {
+                                (obj.name == "React" || obj.name == "react") && m.property.name == "useState"
+                            } else { false }
+                        }
+                        // Also match any useCustomState patterns
+                        _ => false,
+                    };
+                    // Also accept any use* hook that returns an array (common pattern)
+                    let is_any_hook_call = match &call.callee {
+                        Expression::Identifier(id) => is_hook_name(id.name.as_str()),
+                        _ => false,
+                    };
+
+                    if is_state_hook || is_any_hook_call {
+                        // LHS should be array destructure: [state, setter]
+                        if let BindingPatternKind::ArrayPattern(arr) = &decl.id.kind {
+                            // Setter is at position 1 (e.g. [state, setState])
+                            if let Some(Some(setter_pat)) = arr.elements.get(1) {
+                                if let BindingPatternKind::BindingIdentifier(id) = &setter_pat.kind {
+                                    let name = id.name.to_string();
+                                    if name.starts_with("set") {
+                                        setters.insert(name);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Check if a setter is called at render level (not inside arrow/function).
+fn check_stmt_for_setter_call(stmt: &oxc_ast::ast::Statement, setters: &std::collections::HashSet<String>) -> Result<()> {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::ExpressionStatement(e) => check_expr_for_setter_call(&e.expression, setters)?,
+        Statement::ReturnStatement(r) => {
+            if let Some(arg) = &r.argument {
+                check_expr_for_setter_call(arg, setters)?;
+            }
+        }
+        Statement::IfStatement(i) => {
+            check_stmt_for_setter_call(&i.consequent, setters)?;
+            if let Some(alt) = &i.alternate {
+                check_stmt_for_setter_call(alt, setters)?;
+            }
+        }
+        Statement::BlockStatement(b) => {
+            for s in &b.body {
+                check_stmt_for_setter_call(s, setters)?;
+            }
+        }
+        Statement::ForOfStatement(f) => {
+            check_stmt_for_setter_call(&f.body, setters)?;
+        }
+        Statement::ForInStatement(f) => {
+            check_stmt_for_setter_call(&f.body, setters)?;
+        }
+        Statement::ForStatement(f) => {
+            if let Some(body) = Some(&f.body) {
+                check_stmt_for_setter_call(body, setters)?;
+            }
+        }
+        Statement::WhileStatement(w) => {
+            check_stmt_for_setter_call(&w.body, setters)?;
+        }
+        Statement::DoWhileStatement(d) => {
+            check_stmt_for_setter_call(&d.body, setters)?;
+        }
+        // Don't enter function expressions/arrow functions (those are callbacks)
+        _ => {}
+    }
+    Ok(())
+}
+
+fn check_expr_for_setter_call(expr: &Expression, setters: &std::collections::HashSet<String>) -> Result<()> {
+    match expr {
+        Expression::CallExpression(call) => {
+            if let Expression::Identifier(id) = &call.callee {
+                if setters.contains(id.name.as_str()) {
+                    return Err(CompilerError::invalid_react(
+                        "Cannot call setState during render\n\nCalling setState during render may trigger an infinite loop.\n* To reset state when other state/props change, store the previous value in state and update conditionally: https://react.dev/reference/react/useState#storing-information-from-previous-renders\n* To derive data from other state/props, compute the derived data during render without using state.",
+                    ));
+                }
+            }
+            for arg in &call.arguments {
+                if let Some(e) = arg.as_expression() {
+                    check_expr_for_setter_call(e, setters)?;
+                }
+            }
+        }
+        Expression::LogicalExpression(l) => {
+            check_expr_for_setter_call(&l.left, setters)?;
+            check_expr_for_setter_call(&l.right, setters)?;
+        }
+        Expression::ConditionalExpression(c) => {
+            check_expr_for_setter_call(&c.consequent, setters)?;
+            check_expr_for_setter_call(&c.alternate, setters)?;
+        }
+        Expression::SequenceExpression(s) => {
+            for e in &s.expressions {
+                check_expr_for_setter_call(e, setters)?;
+            }
+        }
         _ => {}
     }
     Ok(())
