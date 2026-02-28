@@ -258,6 +258,19 @@ pub fn lower_program(
     // conditional blocks via object destructuring — triggers TS compiler invariant.
     validate_no_uninitialized_let_conditional_destructuring(&program)?;
 
+    // When @validatePreserveExistingMemoizationGuarantees is active AND
+    // @enableTreatRefLikeIdentifiersAsRefs is NOT active, detect variables
+    // from custom hooks (non-useRef) with non-ref names whose `.current` is
+    // accessed in a useCallback with empty deps [].
+    {
+        let first = source.lines().next().unwrap_or("");
+        if first.contains("@validatePreserveExistingMemoizationGuarantees")
+            && !first.contains("@enableTreatRefLikeIdentifiersAsRefs")
+        {
+            validate_no_non_ref_custom_hook_current_in_empty_deps_callback(&program)?;
+        }
+    }
+
     // Unsupported validation pragmas: flag any file that requests a validation
     // pass that we haven't implemented yet.
     {
@@ -10388,4 +10401,192 @@ fn stmt_has_obj_destructure_of<'a>(
         Statement::BlockStatement(b) => b.body.iter().any(|s| stmt_has_obj_destructure_of(s, targets)),
         _ => false,
     }
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_non_ref_custom_hook_current_in_empty_deps_callback
+// ---------------------------------------------------------------------------
+/// When @validatePreserveExistingMemoizationGuarantees is active, detect the
+/// pattern where a variable:
+///   - Is assigned from a CUSTOM hook (not `useRef`)
+///   - Has a name that does NOT start with lowercase "ref"
+///   - Has its `.current` property accessed inside a `useCallback` callback
+///   - The `useCallback` has an empty `[]` dependency array
+///
+/// In this case, the compiler infers `X.current` as a dependency that is
+/// missing from the specified `[]`, causing the memoization check to fail.
+fn validate_no_non_ref_custom_hook_current_in_empty_deps_callback<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::{Argument, BindingPatternKind, Expression, Statement};
+
+    fn name_is_ref_by_convention(name: &str) -> bool {
+        // React compiler treats variables as refs if their name starts with lowercase "ref"
+        name.starts_with("ref") && name.chars().next().map_or(false, |c| c.is_lowercase())
+    }
+
+    fn hook_is_use_ref(callee: &Expression) -> bool {
+        match callee {
+            Expression::Identifier(id) => id.name.as_str() == "useRef",
+            Expression::StaticMemberExpression(s) => s.property.name.as_str() == "useRef",
+            _ => false,
+        }
+    }
+
+    /// Check if the expression body accesses `name.current` or `name.current?.method`
+    fn body_accesses_current<'a>(stmts: &[Statement<'a>], name: &str) -> bool {
+        for stmt in stmts {
+            if stmt_accesses_current(stmt, name) { return true; }
+        }
+        false
+    }
+
+    fn stmt_accesses_current<'a>(stmt: &Statement<'a>, name: &str) -> bool {
+        match stmt {
+            Statement::ExpressionStatement(e) => expr_accesses_current(&e.expression, name),
+            Statement::ReturnStatement(r) => r.argument.as_ref().map_or(false, |a| expr_accesses_current(a, name)),
+            Statement::VariableDeclaration(v) => v.declarations.iter().any(|d| {
+                d.init.as_ref().map_or(false, |i| expr_accesses_current(i, name))
+            }),
+            Statement::IfStatement(i) => {
+                stmt_accesses_current(&i.consequent, name)
+                    || i.alternate.as_ref().map_or(false, |a| stmt_accesses_current(a, name))
+            }
+            Statement::BlockStatement(b) => b.body.iter().any(|s| stmt_accesses_current(s, name)),
+            _ => false,
+        }
+    }
+
+    fn expr_accesses_current<'a>(expr: &Expression<'a>, name: &str) -> bool {
+        match expr {
+            Expression::StaticMemberExpression(m) => {
+                // name.current or name.current (chained)
+                if m.property.name.as_str() == "current" {
+                    if let Expression::Identifier(id) = &m.object {
+                        if id.name.as_str() == name { return true; }
+                    }
+                }
+                expr_accesses_current(&m.object, name)
+            }
+            Expression::ChainExpression(c) => {
+                match &c.expression {
+                    oxc_ast::ast::ChainElement::StaticMemberExpression(m) => {
+                        if m.property.name.as_str() == "current" {
+                            if let Expression::Identifier(id) = &m.object {
+                                if id.name.as_str() == name { return true; }
+                            }
+                        }
+                        expr_accesses_current(&m.object, name)
+                    }
+                    oxc_ast::ast::ChainElement::CallExpression(c) => {
+                        expr_accesses_current(&c.callee, name)
+                            || c.arguments.iter().any(|a| {
+                                a.as_expression().map_or(false, |e| expr_accesses_current(e, name))
+                            })
+                    }
+                    _ => false,
+                }
+            }
+            Expression::CallExpression(c) => {
+                expr_accesses_current(&c.callee, name)
+                    || c.arguments.iter().any(|a| {
+                        a.as_expression().map_or(false, |e| expr_accesses_current(e, name))
+                    })
+            }
+            Expression::ConditionalExpression(c) => {
+                expr_accesses_current(&c.test, name)
+                    || expr_accesses_current(&c.consequent, name)
+                    || expr_accesses_current(&c.alternate, name)
+            }
+            Expression::LogicalExpression(l) => {
+                expr_accesses_current(&l.left, name) || expr_accesses_current(&l.right, name)
+            }
+            _ => false,
+        }
+    }
+
+    /// Returns true if the argument list is an empty array literal `[]`
+    fn is_empty_array<'a>(args: &[Argument<'a>]) -> bool {
+        if let Some(last) = args.last() {
+            if let Some(expr) = last.as_expression() {
+                if let Expression::ArrayExpression(arr) = expr {
+                    return arr.elements.is_empty();
+                }
+            }
+        }
+        false
+    }
+
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        // Collect non-ref-named variables from custom hooks (non-useRef)
+        let mut non_ref_hook_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for stmt in stmts {
+            if let Statement::VariableDeclaration(v) = stmt {
+                for decl in &v.declarations {
+                    let Some(init) = &decl.init else { continue };
+                    let Expression::CallExpression(call) = init else { continue };
+                    // Must be a hook call (starts with "use") but NOT "useRef"
+                    let is_custom_hook = match &call.callee {
+                        Expression::Identifier(id) => {
+                            let n = id.name.as_str();
+                            n.starts_with("use") && n != "useRef"
+                        }
+                        Expression::StaticMemberExpression(s) => {
+                            let n = s.property.name.as_str();
+                            n.starts_with("use") && n != "useRef"
+                        }
+                        _ => false,
+                    };
+                    if !is_custom_hook { continue; }
+                    if hook_is_use_ref(&call.callee) { continue; }
+
+                    // Extract the bound variable name
+                    if let BindingPatternKind::BindingIdentifier(id) = &decl.id.kind {
+                        let var_name = id.name.to_string();
+                        // Only flag non-ref-named variables
+                        if !name_is_ref_by_convention(&var_name) {
+                            non_ref_hook_vars.insert(var_name);
+                        }
+                    }
+                }
+            }
+        }
+        if non_ref_hook_vars.is_empty() { continue; }
+
+        // Check for useCallback(() => { non_ref.current }, [])
+        for stmt in stmts {
+            if let Statement::VariableDeclaration(v) = stmt {
+                for decl in &v.declarations {
+                    let Some(init) = &decl.init else { continue };
+                    let Expression::CallExpression(call) = init else { continue };
+                    let is_use_callback = match &call.callee {
+                        Expression::Identifier(id) => id.name.as_str() == "useCallback",
+                        _ => false,
+                    };
+                    if !is_use_callback { continue; }
+                    if !is_empty_array(&call.arguments) { continue; }
+
+                    // Get the callback body
+                    let callback_body = call.arguments.first().and_then(|a| a.as_expression());
+                    let Some(callback) = callback_body else { continue };
+                    let callback_stmts: Option<&[Statement<'a>]> = match callback {
+                        Expression::ArrowFunctionExpression(a) => Some(&a.body.statements),
+                        Expression::FunctionExpression(f) => f.body.as_ref().map(|b| b.statements.as_slice()),
+                        _ => None,
+                    };
+                    let Some(cb_stmts) = callback_stmts else { continue };
+
+                    for var_name in &non_ref_hook_vars {
+                        if body_accesses_current(cb_stmts, var_name) {
+                            return Err(CompilerError::compilation_skipped(
+                                "Existing memoization could not be preserved\n\nReact Compiler has skipped optimizing this component because the existing manual memoization could not be preserved. The inferred dependencies did not match the manually specified dependencies, which could cause the value to change more or less frequently than expected.",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
