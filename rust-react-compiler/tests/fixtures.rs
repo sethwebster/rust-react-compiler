@@ -25,7 +25,7 @@ fn source_type_for(path: &Path) -> SourceType {
     match path.extension().and_then(|e| e.to_str()) {
         Some("tsx") => SourceType::tsx(),
         Some("ts") => SourceType::ts(),
-        Some("jsx") => SourceType::jsx(),
+        Some("jsx") | Some("js") => SourceType::jsx(),
         _ => SourceType::mjs(),
     }
 }

@@ -736,16 +736,19 @@ impl Terminal {
             Terminal::While { test, loop_, fallthrough, .. } => {
                 vec![*test, *loop_, *fallthrough]
             }
-            Terminal::For { init, test, update, loop_, fallthrough, .. } => {
-                let mut succs = vec![*init, *test, *loop_, *fallthrough];
+            Terminal::For { test, update, loop_, fallthrough, .. } => {
+                // `init` == the block containing this terminal; omit to avoid self-predecessor loop.
+                let mut succs = vec![*test, *loop_, *fallthrough];
                 if let Some(u) = update { succs.push(*u); }
                 succs
             }
-            Terminal::ForOf { init, test, loop_, fallthrough, .. } => {
-                vec![*init, *test, *loop_, *fallthrough]
+            Terminal::ForOf { test, loop_, fallthrough, .. } => {
+                // `init` == the block containing this terminal; omit to avoid self-predecessor loop.
+                vec![*test, *loop_, *fallthrough]
             }
-            Terminal::ForIn { init, loop_, fallthrough, .. } => {
-                vec![*init, *loop_, *fallthrough]
+            Terminal::ForIn { loop_, fallthrough, .. } => {
+                // `init` == the block containing this terminal; omit to avoid self-predecessor loop.
+                vec![*loop_, *fallthrough]
             }
             Terminal::Logical { test, fallthrough, .. } => vec![*test, *fallthrough],
             Terminal::Ternary { test, fallthrough, .. } => vec![*test, *fallthrough],
