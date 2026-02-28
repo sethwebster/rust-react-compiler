@@ -10766,9 +10766,57 @@ fn check_expr_for_optional_dep_mismatch<'a>(
                 }
             }
         }
+
+        // Case 4 (known TS compiler bug): dep has `?.IDENT.` pattern (post-optional
+        // non-optional access followed by more chain, e.g. `a.b?.c.d?.e`), AND the dep
+        // text appears verbatim in the body, AND the body contains `=>` before that
+        // occurrence (dep is accessed inside a nested arrow function). The TS compiler
+        // truncates dep inference at the first optional boundary when the access is
+        // nested, causing "inferred less specific dep than source" mismatch.
+        if dep_has_post_optional_nonoptional(dep_src)
+            && contains_as_word(cb_body_src, dep_src)
+        {
+            if let Some(dep_pos) = cb_body_src.find(dep_src) {
+                let before_dep = &cb_body_src[..dep_pos];
+                if before_dep.contains("=>") {
+                    return Err(CompilerError::compilation_skipped(
+                        "Existing memoization could not be preserved\n\nReact Compiler has skipped \
+                         optimizing this component because the existing manual memoization could not \
+                         be preserved. The inferred dependencies did not match the manually specified \
+                         dependencies, which could cause the value to change more or less frequently \
+                         than expected.",
+                    ));
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Returns true if `dep_src` contains the pattern `?.IDENT.` — an optional chain
+/// element followed by a non-optional member access (e.g. `b?.c.d`). This is the
+/// pattern that causes the TS compiler's dep inference to truncate when the access
+/// is inside a nested function.
+fn dep_has_post_optional_nonoptional(dep_src: &str) -> bool {
+    let bytes = dep_src.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i + 2 < len {
+        if bytes[i] == b'?' && bytes[i + 1] == b'.' {
+            // Found `?.`; skip identifier chars
+            let mut j = i + 2;
+            while j < len && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] == b'$') {
+                j += 1;
+            }
+            // If next char is `.` (not `?`), we have `?.IDENT.` — non-optional follows
+            if j < len && bytes[j] == b'.' {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Check whether `s` contains `pattern` as a whole-word match (not preceded
