@@ -122,6 +122,11 @@ pub fn lower_program(
         return make_passthrough_hir(env);
     }
 
+    // 'use no forget' directive opts a function out of compilation → passthrough.
+    if source.contains("'use no forget'") || source.contains("\"use no forget\"") {
+        return make_passthrough_hir(env);
+    }
+
     // Test-only pragma: simulate an unexpected exception in the pipeline.
     if source.contains("@throwUnknownException__testonly:true") {
         return Err(CompilerError::invariant("unexpected error"));
@@ -153,6 +158,27 @@ pub fn lower_program(
 
     // Check for @validateBlocklistedImports pragma and validate imports.
     validate_blocklisted_imports(source, &program)?;
+
+    // Check for @validateNoCapitalizedCalls pragma.
+    if source.lines().next().unwrap_or("").contains("@validateNoCapitalizedCalls") {
+        validate_no_capitalized_calls(&program)?;
+    }
+
+    // Check for @validateNoImpureFunctionsInRender pragma.
+    if source.lines().next().unwrap_or("").contains("@validateNoImpureFunctionsInRender") {
+        validate_no_impure_functions(&program)?;
+    }
+
+    // Check for ESLint/Flow rule suppressions.
+    // Skip this check when @panicThreshold:"none" is set (compiler returns passthrough instead).
+    {
+        let first = source.lines().next().unwrap_or("");
+        let panic_threshold_none = first.contains("@panicThreshold:\"none\"")
+            || first.contains("@panicThreshold:'none'");
+        if !panic_threshold_none {
+            validate_no_eslint_suppression(source)?;
+        }
+    }
 
     let semantic_ret = SemanticBuilder::new().build(&program);
     let semantic = semantic_ret.semantic;
@@ -1312,4 +1338,225 @@ fn parse_blocklisted_imports_pragma(line: &str) -> Vec<String> {
             if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
         })
         .collect()
+}
+
+/// Traverse the AST to find direct calls to capitalized identifier functions.
+/// Called when `@validateNoCapitalizedCalls` pragma is present.
+fn validate_no_capitalized_calls(program: &oxc_ast::ast::Program) -> Result<()> {
+    for stmt in &program.body {
+        if let Err(e) = check_stmt_capitalized_calls(stmt) {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+fn check_stmt_capitalized_calls(stmt: &oxc_ast::ast::Statement) -> Result<()> {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::FunctionDeclaration(f) => {
+            if let Some(body) = &f.body {
+                for s in &body.statements {
+                    check_stmt_capitalized_calls(s)?;
+                }
+            }
+        }
+        Statement::ExpressionStatement(e) => check_expr_capitalized_calls(&e.expression)?,
+        Statement::ReturnStatement(r) => {
+            if let Some(arg) = &r.argument {
+                check_expr_capitalized_calls(arg)?;
+            }
+        }
+        Statement::VariableDeclaration(v) => {
+            for d in &v.declarations {
+                if let Some(init) = &d.init {
+                    check_expr_capitalized_calls(init)?;
+                }
+            }
+        }
+        Statement::BlockStatement(b) => {
+            for s in &b.body {
+                check_stmt_capitalized_calls(s)?;
+            }
+        }
+        Statement::IfStatement(i) => {
+            check_stmt_capitalized_calls(&i.consequent)?;
+            if let Some(alt) = &i.alternate {
+                check_stmt_capitalized_calls(alt)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn check_expr_capitalized_calls(expr: &Expression) -> Result<()> {
+    match expr {
+        Expression::CallExpression(call) => {
+            // Direct capitalized identifier call: SomeFunc()
+            if let Expression::Identifier(id) = &call.callee {
+                let name = id.name.as_str();
+                if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                    return Err(CompilerError::invalid_react(
+                        "Capitalized functions are reserved for components, which must be invoked with JSX.",
+                    ));
+                }
+            }
+            // Member expression with capitalized property: obj.SomeFunc()
+            if let Expression::StaticMemberExpression(m) = &call.callee {
+                let prop = m.property.name.as_str();
+                if prop.chars().next().map_or(false, |c| c.is_uppercase()) {
+                    return Err(CompilerError::invalid_react(
+                        "Capitalized functions are reserved for components, which must be invoked with JSX.",
+                    ));
+                }
+            }
+            // Recurse into arguments
+            for arg in &call.arguments {
+                if let Some(e) = arg.as_expression() {
+                    check_expr_capitalized_calls(e)?;
+                }
+            }
+            check_expr_capitalized_calls(&call.callee)?;
+        }
+        Expression::SequenceExpression(s) => {
+            for e in &s.expressions {
+                check_expr_capitalized_calls(e)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Detect calls to known impure functions (Date.now, Math.random, etc.)
+/// when @validateNoImpureFunctionsInRender pragma is present.
+fn validate_no_impure_functions(program: &oxc_ast::ast::Program) -> Result<()> {
+    // Known impure functions: (object, method)
+    const IMPURE: &[(&str, &str)] = &[
+        ("Date", "now"),
+        ("Date", "getTime"),
+        ("Math", "random"),
+        ("performance", "now"),
+        ("crypto", "getRandomValues"),
+    ];
+
+    for stmt in &program.body {
+        check_stmt_impure_functions(stmt, IMPURE)?;
+    }
+    Ok(())
+}
+
+fn check_stmt_impure_functions(stmt: &oxc_ast::ast::Statement, impure: &[(&str, &str)]) -> Result<()> {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::FunctionDeclaration(f) => {
+            if let Some(body) = &f.body {
+                for s in &body.statements {
+                    check_stmt_impure_functions(s, impure)?;
+                }
+            }
+        }
+        Statement::ExpressionStatement(e) => check_expr_impure_functions(&e.expression, impure)?,
+        Statement::ReturnStatement(r) => {
+            if let Some(arg) = &r.argument {
+                check_expr_impure_functions(arg, impure)?;
+            }
+        }
+        Statement::VariableDeclaration(v) => {
+            for d in &v.declarations {
+                if let Some(init) = &d.init {
+                    check_expr_impure_functions(init, impure)?;
+                }
+            }
+        }
+        Statement::BlockStatement(b) => {
+            for s in &b.body {
+                check_stmt_impure_functions(s, impure)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn check_expr_impure_functions(expr: &Expression, impure: &[(&str, &str)]) -> Result<()> {
+    match expr {
+        Expression::CallExpression(call) => {
+            if let Expression::StaticMemberExpression(m) = &call.callee {
+                if let Expression::Identifier(obj) = &m.object {
+                    let obj_name = obj.name.as_str();
+                    let prop_name = m.property.name.as_str();
+                    if impure.iter().any(|(o, p)| *o == obj_name && *p == prop_name) {
+                        return Err(CompilerError::invalid_react(format!(
+                            "Calling {obj_name}.{prop_name}() during render produces a new value each call and is not allowed"
+                        )));
+                    }
+                }
+            }
+            for arg in &call.arguments {
+                if let Some(e) = arg.as_expression() {
+                    check_expr_impure_functions(e, impure)?;
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Detect ESLint rule suppressions that the compiler must bail out for.
+/// Always checks react-hooks/rules-of-hooks.
+/// Additional rules can be specified via @eslintSuppressionRules pragma.
+fn validate_no_eslint_suppression(source: &str) -> Result<()> {
+    let first_line = source.lines().next().unwrap_or("");
+
+    // Parse @eslintSuppressionRules:["rule1","rule2"] pragma.
+    let mut rules_to_check: Vec<String> = vec![
+        "react-hooks/rules-of-hooks".to_string(),
+        "react-compiler/react-compiler".to_string(),
+    ];
+
+    if let Some(idx) = first_line.find("@eslintSuppressionRules:") {
+        let after = &first_line[idx + "@eslintSuppressionRules:".len()..];
+        if let Some(open) = after.find('[') {
+            if let Some(close) = after[open..].find(']') {
+                let inner = &after[open + 1..open + close];
+                for part in inner.split(',') {
+                    let rule = part.trim().trim_matches('"').trim_matches('\'').to_string();
+                    if !rule.is_empty() {
+                        rules_to_check.push(rule);
+                    }
+                }
+            }
+        }
+    }
+
+    // Check if any of the rules are suppressed in the source.
+    for rule in &rules_to_check {
+        let disable_patterns = [
+            format!("eslint-disable {}", rule),
+            format!("eslint-disable-next-line {}", rule),
+        ];
+        for pattern in &disable_patterns {
+            if source.contains(pattern.as_str()) {
+                return Err(CompilerError::invalid_react(format!(
+                    "React Compiler has skipped optimizing this component because one or more React ESLint rules were disabled\n\
+                     React Compiler only works when your components follow all the rules of React, disabling them may result in unexpected or incorrect behavior. \
+                     Found suppression `{pattern}`."
+                )));
+            }
+        }
+    }
+
+    // Check for @enableFlowSuppressions and $FlowFixMe[react-rule-hook] comment.
+    if first_line.contains("@enableFlowSuppressions")
+        && source.contains("$FlowFixMe[react-rule-hook]")
+    {
+        return Err(CompilerError::invalid_react(
+            "React Compiler has skipped optimizing this component because a Flow suppression was found"
+        ));
+    }
+
+    Ok(())
 }
