@@ -206,6 +206,53 @@ pub fn lower_program(
             if !ref_disabled {
                 validate_ref_access_during_render(&program, ref_deep)?;
             }
+            // When @validateRefAccessDuringRender is explicitly enabled and
+            // @enableTreatRefLikeIdentifiersAsRefs is NOT set, also check for
+            // passing ref objects directly to non-hook functions.
+            if ref_deep && !first.contains("@enableTreatRefLikeIdentifiersAsRefs") {
+                validate_no_passing_ref_to_function(&program)?;
+            }
+        }
+    }
+
+    // @validateNoFreezingKnownMutableFunctions: error if a function that mutates
+    // a locally-created mutable (Map/Set/etc.) is passed to a hook, used as a
+    // JSX prop, or returned from the component/hook.
+    validate_no_freezing_known_mutable_functions(source, &program)?;
+
+    // @enableTransitivelyFreezeFunctionExpressions: after a hook call with a
+    // callback that captures a variable, that variable must not be mutated.
+    validate_hook_call_freezes_captured(source, &program)?;
+
+    // @enableCustomTypeDefinitionForReanimated: when useSharedValue is NOT
+    // imported from react-native-reanimated, assignments to .value of its
+    // return value inside callbacks are errors.
+    validate_reanimated_non_imported_shared_value_writes(source, &program)?;
+
+    // Unsupported validation pragmas: flag any file that requests a validation
+    // pass that we haven't implemented yet.
+    {
+        let first = source.lines().next().unwrap_or("");
+        if first.contains("@validateSourceLocations") {
+            return Err(CompilerError::todo(
+                "validateSourceLocations is not yet implemented",
+            ));
+        }
+        // @validatePreserveExistingMemoizationGuarantees combined with
+        // @enablePreserveExistingMemoizationGuarantees:false requests validation
+        // of memoization with the feature disabled — not yet implemented.
+        if first.contains("@validatePreserveExistingMemoizationGuarantees")
+            && first.contains("@enablePreserveExistingMemoizationGuarantees:false")
+        {
+            return Err(CompilerError::todo(
+                "validatePreserveExistingMemoizationGuarantees with enablePreserveExistingMemoizationGuarantees:false is not yet implemented",
+            ));
+        }
+        // @validateNoDerivedComputationsInEffects — not yet implemented.
+        if first.contains("@validateNoDerivedComputationsInEffects") {
+            return Err(CompilerError::todo(
+                "validateNoDerivedComputationsInEffects is not yet implemented",
+            ));
         }
     }
 
@@ -234,6 +281,28 @@ pub fn lower_program(
         validate_no_global_reassignment(&program, &semantic)?;
         validate_no_setstate_in_memo_callback(&program, &semantic)?;
         validate_no_const_reassignment(&program, &semantic)?;
+        validate_usememo_no_outer_let_assign(&program, &semantic)?;
+        validate_no_state_mutation(&program, &semantic)?;
+        validate_no_tzdv_self_reference(&program, &semantic)?;
+        validate_no_param_mutation(&program, &semantic)?;
+        validate_no_param_reassignment_in_closures(&program, &semantic)?;
+        validate_no_async_local_reassignment(&program, &semantic)?;
+        validate_no_context_var_iterator(&program)?;
+        validate_no_update_on_captured_locals(&program, &semantic)?;
+        validate_self_referential_closures(&program, &semantic)?;
+        validate_hook_return_closure_mutation(&program, &semantic)?;
+        validate_no_escaping_let_assigner(&program)?;
+        validate_no_capturing_default_param(&program)?;
+        validate_no_destructured_catch(&program)?;
+        validate_no_catch_binding_captured_by_closure(&program)?;
+        validate_no_function_self_shadow(&program)?;
+        validate_no_functiondecl_forward_call(&program)?;
+        validate_no_funcdecl_outer_let_reassign(&program)?;
+        validate_no_nested_array_destructure_assign(&program)?;
+        validate_no_local_function_property_mutation(&program)?;
+        validate_no_post_jsx_mutation(&program)?;
+        validate_no_method_call_with_method_arg(&program)?;
+        validate_no_jsx_rest_param_callback(&program)?;
     }
 
     let first_line = source.lines().next().unwrap_or("");
@@ -2515,6 +2584,69 @@ where F: Fn(&oxc_ast::ast::IdentifierReference) -> bool
     result
 }
 
+/// Collect closures that BOTH directly assign globals AND return JSX (render helpers).
+/// Render helpers are unsafe to pass as JSX props because they run during render.
+fn collect_render_helper_global_assigners<'a, F>(
+    stmts: &[oxc_ast::ast::Statement<'a>],
+    is_global: &F,
+) -> std::collections::HashSet<String>
+where F: Fn(&oxc_ast::ast::IdentifierReference) -> bool
+{
+    use oxc_ast::ast::{Statement, BindingPatternKind};
+    let mut result = std::collections::HashSet::new();
+    for stmt in stmts {
+        if let Statement::VariableDeclaration(v) = stmt {
+            for decl in &v.declarations {
+                if let Some(init) = &decl.init {
+                    let body_stmts: Option<&[oxc_ast::ast::Statement]> = match init {
+                        Expression::ArrowFunctionExpression(a) => Some(&a.body.statements),
+                        Expression::FunctionExpression(f) => f.body.as_ref().map(|b| b.statements.as_slice()),
+                        _ => None,
+                    };
+                    if let Some(body) = body_stmts {
+                        if closure_body_assigns_global_directly(body, is_global)
+                            && closure_body_has_jsx_return(body)
+                        {
+                            if let BindingPatternKind::BindingIdentifier(id) = &decl.id.kind {
+                                result.insert(id.name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
+/// Returns true if `stmts` contains at least one `return <JSX...>` or `return <></>` statement
+/// (searching through if/block nesting, but not into nested closures).
+fn closure_body_has_jsx_return<'a>(stmts: &[oxc_ast::ast::Statement<'a>]) -> bool {
+    use oxc_ast::ast::Statement;
+    for stmt in stmts {
+        match stmt {
+            Statement::ReturnStatement(r) => {
+                if let Some(arg) = &r.argument {
+                    if matches!(arg, Expression::JSXElement(_) | Expression::JSXFragment(_)) {
+                        return true;
+                    }
+                }
+            }
+            Statement::IfStatement(i) => {
+                if closure_body_has_jsx_return(std::slice::from_ref(&i.consequent)) { return true; }
+                if let Some(alt) = &i.alternate {
+                    if closure_body_has_jsx_return(std::slice::from_ref(alt)) { return true; }
+                }
+            }
+            Statement::BlockStatement(b) => {
+                if closure_body_has_jsx_return(&b.body) { return true; }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Returns true if any statement in `stmts` directly assigns to a global (no recursion into nested closures).
 fn closure_body_assigns_global_directly<'a, F>(
     stmts: &[oxc_ast::ast::Statement<'a>],
@@ -2567,6 +2699,50 @@ where F: Fn(&oxc_ast::ast::IdentifierReference) -> bool
         // Don't recurse into nested closures
         Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => false,
         _ => false,
+    }
+}
+
+/// Expand `callers` by adding hook-wrapped closures (`const fn = useHook(arrow, ...)`) whose
+/// wrapped arrow body calls any name already in `callers`.
+/// Handles patterns like: `const fn = useCallback(() => setState(x), [...])`.
+fn expand_hook_wrapped_setter_callers<'a>(
+    stmts: &[oxc_ast::ast::Statement<'a>],
+    callers: &mut std::collections::HashSet<String>,
+) {
+    use oxc_ast::ast::{BindingPatternKind, Statement};
+    loop {
+        let before = callers.len();
+        for stmt in stmts {
+            if let Statement::VariableDeclaration(v) = stmt {
+                for decl in &v.declarations {
+                    if let Some(Expression::CallExpression(call)) = &decl.init {
+                        // Only hook calls (useCallback, useEvent, etc.)
+                        let is_hook_call = match &call.callee {
+                            Expression::Identifier(id) => is_hook_name(id.name.as_str()),
+                            Expression::StaticMemberExpression(m) => is_hook_name(m.property.name.as_str()),
+                            _ => false,
+                        };
+                        if !is_hook_call { continue; }
+                        // Extract the body of the first argument (the callback)
+                        let body = call.arguments.first().and_then(|a| a.as_expression()).and_then(|e| {
+                            match e {
+                                Expression::ArrowFunctionExpression(a) => Some(a.body.statements.as_slice()),
+                                Expression::FunctionExpression(f) => f.body.as_ref().map(|b| b.statements.as_slice()),
+                                _ => None,
+                            }
+                        });
+                        if let Some(body) = body {
+                            if closure_body_calls_any(body, callers) {
+                                if let BindingPatternKind::BindingIdentifier(id) = &decl.id.kind {
+                                    callers.insert(id.name.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if callers.len() == before { break; }
     }
 }
 
@@ -2714,62 +2890,67 @@ fn validate_no_global_reassignment<'a>(
     for stmts in &bodies {
         let mut local_assigners = collect_direct_global_assigning_closures(stmts, &is_global_or_module_ref);
         expand_transitive_global_assigners(stmts, &mut local_assigners);
-        global_check_stmts(stmts, &is_global_or_module_ref, &local_assigners)?;
+        // Render helpers: closures that both assign globals AND return JSX.
+        // Only these are flagged when passed as JSX props (event handlers are allowed).
+        let render_helper_assigners = collect_render_helper_global_assigners(stmts, &is_global_or_module_ref);
+        global_check_stmts(stmts, &is_global_or_module_ref, &local_assigners, &render_helper_assigners)?;
     }
     Ok(())
 }
 
-fn global_check_stmts<'a, F>(stmts: &[oxc_ast::ast::Statement<'a>], is_global: &F, local_assigners: &std::collections::HashSet<String>) -> Result<()>
+type AssignerSet = std::collections::HashSet<String>;
+
+fn global_check_stmts<'a, F>(stmts: &[oxc_ast::ast::Statement<'a>], is_global: &F, local_assigners: &AssignerSet, render_helpers: &AssignerSet) -> Result<()>
 where F: Fn(&oxc_ast::ast::IdentifierReference) -> bool
 {
-    for stmt in stmts { global_check_stmt(stmt, is_global, local_assigners)?; }
+    for stmt in stmts { global_check_stmt(stmt, is_global, local_assigners, render_helpers)?; }
     Ok(())
 }
 
-fn global_check_stmt<'a, F>(stmt: &oxc_ast::ast::Statement<'a>, is_global: &F, local_assigners: &std::collections::HashSet<String>) -> Result<()>
+fn global_check_stmt<'a, F>(stmt: &oxc_ast::ast::Statement<'a>, is_global: &F, local_assigners: &AssignerSet, render_helpers: &AssignerSet) -> Result<()>
 where F: Fn(&oxc_ast::ast::IdentifierReference) -> bool
 {
     use oxc_ast::ast::Statement;
     match stmt {
-        Statement::ExpressionStatement(e) => global_check_expr(&e.expression, is_global, local_assigners)?,
+        Statement::ExpressionStatement(e) => global_check_expr(&e.expression, is_global, local_assigners, render_helpers)?,
         Statement::VariableDeclaration(v) => {
             for decl in &v.declarations {
-                if let Some(init) = &decl.init { global_check_expr(init, is_global, local_assigners)?; }
+                if let Some(init) = &decl.init { global_check_expr(init, is_global, local_assigners, render_helpers)?; }
             }
         }
         Statement::ReturnStatement(r) => {
-            if let Some(a) = &r.argument { global_check_expr(a, is_global, local_assigners)?; }
+            if let Some(a) = &r.argument { global_check_expr(a, is_global, local_assigners, render_helpers)?; }
         }
         Statement::IfStatement(i) => {
-            global_check_expr(&i.test, is_global, local_assigners)?;
-            global_check_stmt(&i.consequent, is_global, local_assigners)?;
-            if let Some(alt) = &i.alternate { global_check_stmt(alt, is_global, local_assigners)?; }
+            global_check_expr(&i.test, is_global, local_assigners, render_helpers)?;
+            global_check_stmt(&i.consequent, is_global, local_assigners, render_helpers)?;
+            if let Some(alt) = &i.alternate { global_check_stmt(alt, is_global, local_assigners, render_helpers)?; }
         }
-        Statement::BlockStatement(b) => global_check_stmts(&b.body, is_global, local_assigners)?,
+        Statement::BlockStatement(b) => global_check_stmts(&b.body, is_global, local_assigners, render_helpers)?,
         Statement::WhileStatement(w) => {
-            global_check_expr(&w.test, is_global, local_assigners)?;
-            global_check_stmt(&w.body, is_global, local_assigners)?;
+            global_check_expr(&w.test, is_global, local_assigners, render_helpers)?;
+            global_check_stmt(&w.body, is_global, local_assigners, render_helpers)?;
         }
         Statement::ForStatement(f) => {
             if let Some(init) = &f.init {
-                if let Some(e) = init.as_expression() { global_check_expr(e, is_global, local_assigners)?; }
+                if let Some(e) = init.as_expression() { global_check_expr(e, is_global, local_assigners, render_helpers)?; }
             }
-            if let Some(t) = &f.test { global_check_expr(t, is_global, local_assigners)?; }
-            if let Some(u) = &f.update { global_check_expr(u, is_global, local_assigners)?; }
-            global_check_stmt(&f.body, is_global, local_assigners)?;
+            if let Some(t) = &f.test { global_check_expr(t, is_global, local_assigners, render_helpers)?; }
+            if let Some(u) = &f.update { global_check_expr(u, is_global, local_assigners, render_helpers)?; }
+            global_check_stmt(&f.body, is_global, local_assigners, render_helpers)?;
         }
         _ => {}
     }
     Ok(())
 }
 
-fn global_check_expr<'a, F>(expr: &Expression<'a>, is_global: &F, local_assigners: &std::collections::HashSet<String>) -> Result<()>
+fn global_check_expr<'a, F>(expr: &Expression<'a>, is_global: &F, local_assigners: &AssignerSet, render_helpers: &AssignerSet) -> Result<()>
 where F: Fn(&oxc_ast::ast::IdentifierReference) -> bool
 {
     match expr {
         Expression::AssignmentExpression(a) => {
             global_check_assignment_target(&a.left, is_global)?;
-            global_check_expr(&a.right, is_global, local_assigners)?;
+            global_check_expr(&a.right, is_global, local_assigners, render_helpers)?;
         }
         Expression::UpdateExpression(u) => {
             if let oxc_ast::ast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) = &u.argument {
@@ -2781,16 +2962,16 @@ where F: Fn(&oxc_ast::ast::IdentifierReference) -> bool
             }
         }
         Expression::LogicalExpression(l) => {
-            global_check_expr(&l.left, is_global, local_assigners)?;
-            global_check_expr(&l.right, is_global, local_assigners)?;
+            global_check_expr(&l.left, is_global, local_assigners, render_helpers)?;
+            global_check_expr(&l.right, is_global, local_assigners, render_helpers)?;
         }
         Expression::ConditionalExpression(c) => {
-            global_check_expr(&c.test, is_global, local_assigners)?;
-            global_check_expr(&c.consequent, is_global, local_assigners)?;
-            global_check_expr(&c.alternate, is_global, local_assigners)?;
+            global_check_expr(&c.test, is_global, local_assigners, render_helpers)?;
+            global_check_expr(&c.consequent, is_global, local_assigners, render_helpers)?;
+            global_check_expr(&c.alternate, is_global, local_assigners, render_helpers)?;
         }
         Expression::SequenceExpression(s) => {
-            for e in &s.expressions { global_check_expr(e, is_global, local_assigners)?; }
+            for e in &s.expressions { global_check_expr(e, is_global, local_assigners, render_helpers)?; }
         }
         Expression::UnaryExpression(u) => {
             if u.operator == oxc_ast::ast::UnaryOperator::Delete {
@@ -2814,7 +2995,7 @@ where F: Fn(&oxc_ast::ast::IdentifierReference) -> bool
                     ));
                 }
             }
-            global_check_expr(&call.callee, is_global, local_assigners)?;
+            global_check_expr(&call.callee, is_global, local_assigners, render_helpers)?;
             // Detect deferred hooks: don't flag closures passed as args to hooks (useX)
             let callee_name = match &call.callee {
                 Expression::Identifier(id) => Some(id.name.as_str()),
@@ -2834,18 +3015,63 @@ where F: Fn(&oxc_ast::ast::IdentifierReference) -> bool
                                 ));
                             }
                         }
+                        // For non-hook calls, recurse into inline closure bodies to catch
+                        // direct global mutations like `foo(() => { x.a = 10; })`.
+                        match e {
+                            Expression::ArrowFunctionExpression(arrow) => {
+                                global_check_stmts(&arrow.body.statements, is_global, local_assigners, render_helpers)?;
+                                continue;
+                            }
+                            Expression::FunctionExpression(func) => {
+                                if let Some(body) = &func.body {
+                                    global_check_stmts(&body.statements, is_global, local_assigners, render_helpers)?;
+                                }
+                                continue;
+                            }
+                            _ => {}
+                        }
                     }
-                    global_check_expr(e, is_global, local_assigners)?;
+                    global_check_expr(e, is_global, local_assigners, render_helpers)?;
                 }
             }
         }
         Expression::JSXElement(jsx) => {
-            // JSX component tag: <Foo /> where Foo is a local global-assigning closure
-            if let oxc_ast::ast::JSXElementName::Identifier(id) = &jsx.opening_element.name {
-                if local_assigners.contains(id.name.as_str()) {
+            // JSX component tag: <Foo /> where Foo is a local global-assigning closure.
+            // HTML-like tags use JSXElementName::Identifier; component references (JS
+            // variables) use JSXElementName::IdentifierReference.
+            let tag_name = match &jsx.opening_element.name {
+                oxc_ast::ast::JSXElementName::Identifier(id) => Some(id.name.as_str()),
+                oxc_ast::ast::JSXElementName::IdentifierReference(id) => Some(id.name.as_str()),
+                _ => None,
+            };
+            if let Some(name) = tag_name {
+                if local_assigners.contains(name) {
                     return Err(CompilerError::invalid_react(
                         "Cannot reassign variables declared outside of the component/hook\n\nReassigning this value during render is a form of side effect.",
                     ));
+                }
+            }
+            // JSX attribute values: only render helpers (closures returning JSX) are unsafe
+            // as JSX props. Event handlers that mutate globals are allowed.
+            for attr_item in &jsx.opening_element.attributes {
+                match attr_item {
+                    oxc_ast::ast::JSXAttributeItem::Attribute(attr) => {
+                        if let Some(oxc_ast::ast::JSXAttributeValue::ExpressionContainer(c)) = &attr.value {
+                            if let Some(e) = c.expression.as_expression() {
+                                if let Expression::Identifier(id) = e {
+                                    if render_helpers.contains(id.name.as_str()) {
+                                        return Err(CompilerError::invalid_react(
+                                            "Cannot reassign variables declared outside of the component/hook\n\nReassigning this value during render is a form of side effect.",
+                                        ));
+                                    }
+                                }
+                                global_check_expr(e, is_global, local_assigners, render_helpers)?;
+                            }
+                        }
+                    }
+                    oxc_ast::ast::JSXAttributeItem::SpreadAttribute(spread) => {
+                        global_check_expr(&spread.argument, is_global, local_assigners, render_helpers)?;
+                    }
                 }
             }
             // JSX children expression containers
@@ -2859,7 +3085,7 @@ where F: Fn(&oxc_ast::ast::IdentifierReference) -> bool
                                 ));
                             }
                         }
-                        global_check_expr(e, is_global, local_assigners)?;
+                        global_check_expr(e, is_global, local_assigners, render_helpers)?;
                     }
                 }
             }
@@ -2961,6 +3187,14 @@ fn validate_no_setstate_in_memo_callback<'a>(
     if setters.is_empty() {
         return Ok(());
     }
+
+    // Expand setters transitively: add closures that call any setter (or setter-caller).
+    // This catches indirect patterns like: const fn = useCallback(() => setState(x));
+    // useMemo(() => { fn(); }, ...) — fn() is an indirect setter call.
+    // First pass: handle hook-wrapped closures (const fn = useCallback(arrowBody, ...))
+    expand_hook_wrapped_setter_callers(body_stmts, &mut setters);
+    // Second pass: handle bare arrows/fns and transitive call chains
+    expand_transitive_global_assigners(body_stmts, &mut setters);
 
     // Check each statement for useMemo/useCallback calls containing setters
     for stmt in body_stmts {
@@ -3233,6 +3467,2743 @@ where F: Fn(&oxc_ast::ast::IdentifierReference) -> bool
         // Don't recurse into nested closures
         Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => {}
         _ => {}
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// validate_usememo_no_outer_let_assign
+// ---------------------------------------------------------------------------
+
+/// useMemo callbacks may not reassign `let` variables declared in the outer
+/// component/hook scope.  Assignments to variables declared *inside* the
+/// callback are fine; only the outer-scope `let` names are checked.
+fn validate_usememo_no_outer_let_assign<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+    semantic: &oxc_semantic::Semantic<'a>,
+) -> Result<()> {
+    let root_scope = semantic.scoping().root_scope_id();
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        let outer_lets = collect_let_names_shallow(stmts);
+        if outer_lets.is_empty() { continue; }
+        for stmt in stmts {
+            usememo_check_stmt_for_outer_assign(stmt, &outer_lets, semantic, root_scope)?;
+        }
+    }
+    Ok(())
+}
+
+fn usememo_check_stmt_for_outer_assign<'a>(
+    stmt: &oxc_ast::ast::Statement<'a>,
+    outer_lets: &std::collections::HashSet<String>,
+    semantic: &oxc_semantic::Semantic<'a>,
+    root_scope: oxc_semantic::ScopeId,
+) -> Result<()> {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::VariableDeclaration(v) => {
+            for decl in &v.declarations {
+                if let Some(init) = &decl.init {
+                    usememo_check_expr_for_outer_assign(init, outer_lets, semantic, root_scope)?;
+                }
+            }
+        }
+        Statement::ExpressionStatement(e) => {
+            usememo_check_expr_for_outer_assign(&e.expression, outer_lets, semantic, root_scope)?;
+        }
+        Statement::IfStatement(i) => {
+            usememo_check_stmt_for_outer_assign(&i.consequent, outer_lets, semantic, root_scope)?;
+            if let Some(a) = &i.alternate {
+                usememo_check_stmt_for_outer_assign(a, outer_lets, semantic, root_scope)?;
+            }
+        }
+        Statement::BlockStatement(b) => {
+            for s in &b.body {
+                usememo_check_stmt_for_outer_assign(s, outer_lets, semantic, root_scope)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn usememo_check_expr_for_outer_assign<'a>(
+    expr: &oxc_ast::ast::Expression<'a>,
+    outer_lets: &std::collections::HashSet<String>,
+    semantic: &oxc_semantic::Semantic<'a>,
+    root_scope: oxc_semantic::ScopeId,
+) -> Result<()> {
+    use oxc_ast::ast::Expression;
+    match expr {
+        Expression::CallExpression(call) if is_use_memo_call(expr) => {
+            // Check the first arg (the callback) for assignments to outer lets
+            if let Some(first) = call.arguments.first() {
+                if let Some(callback) = first.as_expression() {
+                    let body_stmts: &[_] = match callback {
+                        Expression::ArrowFunctionExpression(arrow) => &arrow.body.statements,
+                        Expression::FunctionExpression(func) => {
+                            if let Some(body) = &func.body { &body.statements } else { return Ok(()) }
+                        }
+                        _ => return Ok(()),
+                    };
+                    // Names declared inside the callback are excluded (shadow outer lets)
+                    let callback_lets = collect_let_names_shallow(body_stmts);
+                    for s in body_stmts {
+                        usememo_body_check_stmt(s, outer_lets, &callback_lets, semantic, root_scope)?;
+                    }
+                }
+            }
+        }
+        Expression::CallExpression(call) => {
+            for arg in &call.arguments {
+                if let Some(e) = arg.as_expression() {
+                    usememo_check_expr_for_outer_assign(e, outer_lets, semantic, root_scope)?;
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn usememo_body_check_stmt<'a>(
+    stmt: &oxc_ast::ast::Statement<'a>,
+    outer_lets: &std::collections::HashSet<String>,
+    excluded: &std::collections::HashSet<String>,
+    semantic: &oxc_semantic::Semantic<'a>,
+    root_scope: oxc_semantic::ScopeId,
+) -> Result<()> {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::ExpressionStatement(e) => {
+            usememo_body_check_expr(&e.expression, outer_lets, excluded, semantic, root_scope)?;
+        }
+        Statement::VariableDeclaration(v) => {
+            for decl in &v.declarations {
+                if let Some(init) = &decl.init {
+                    usememo_body_check_expr(init, outer_lets, excluded, semantic, root_scope)?;
+                }
+            }
+        }
+        Statement::ReturnStatement(r) => {
+            if let Some(a) = &r.argument {
+                usememo_body_check_expr(a, outer_lets, excluded, semantic, root_scope)?;
+            }
+        }
+        Statement::IfStatement(i) => {
+            usememo_body_check_stmt(&i.consequent, outer_lets, excluded, semantic, root_scope)?;
+            if let Some(a) = &i.alternate {
+                usememo_body_check_stmt(a, outer_lets, excluded, semantic, root_scope)?;
+            }
+        }
+        Statement::BlockStatement(b) => {
+            for s in &b.body {
+                usememo_body_check_stmt(s, outer_lets, excluded, semantic, root_scope)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn usememo_body_check_expr<'a>(
+    expr: &oxc_ast::ast::Expression<'a>,
+    outer_lets: &std::collections::HashSet<String>,
+    excluded: &std::collections::HashSet<String>,
+    semantic: &oxc_semantic::Semantic<'a>,
+    root_scope: oxc_semantic::ScopeId,
+) -> Result<()> {
+    use oxc_ast::ast::{AssignmentTarget, Expression};
+    use oxc_semantic::SymbolFlags;
+    match expr {
+        Expression::AssignmentExpression(a) => {
+            if let AssignmentTarget::AssignmentTargetIdentifier(id) = &a.left {
+                let name = id.name.as_str();
+                if outer_lets.contains(name) && !excluded.contains(name) {
+                    let is_outer_let = id.reference_id.get().and_then(|ref_id| {
+                        let sym_id = semantic.scoping().get_reference(ref_id).symbol_id()?;
+                        if semantic.scoping().symbol_scope_id(sym_id) == root_scope { return None; }
+                        let flags = semantic.scoping().symbol_flags(sym_id);
+                        if flags.contains(SymbolFlags::BlockScopedVariable)
+                            && !flags.contains(SymbolFlags::ConstVariable) {
+                            Some(())
+                        } else { None }
+                    }).is_some();
+                    if is_outer_let {
+                        return Err(CompilerError::invalid_react(
+                            "useMemo() callbacks may not reassign variables declared outside of the callback\n\nuseMemo() callbacks must be pure functions and cannot reassign variables defined outside of the callback function.",
+                        ));
+                    }
+                }
+            }
+            usememo_body_check_expr(&a.right, outer_lets, excluded, semantic, root_scope)?;
+        }
+        Expression::CallExpression(c) => {
+            usememo_body_check_expr(&c.callee, outer_lets, excluded, semantic, root_scope)?;
+            for arg in &c.arguments {
+                if let Some(e) = arg.as_expression() {
+                    // Recurse into closures passed to non-hook functions inside useMemo
+                    match e {
+                        Expression::ArrowFunctionExpression(arrow) => {
+                            let inner_lets = collect_let_names_shallow(&arrow.body.statements);
+                            let mut new_excluded = excluded.clone();
+                            new_excluded.extend(inner_lets);
+                            for s in &arrow.body.statements {
+                                usememo_body_check_stmt(s, outer_lets, &new_excluded, semantic, root_scope)?;
+                            }
+                        }
+                        Expression::FunctionExpression(func) => {
+                            if let Some(body) = &func.body {
+                                let inner_lets = collect_let_names_shallow(&body.statements);
+                                let mut new_excluded = excluded.clone();
+                                new_excluded.extend(inner_lets);
+                                for s in &body.statements {
+                                    usememo_body_check_stmt(s, outer_lets, &new_excluded, semantic, root_scope)?;
+                                }
+                            }
+                        }
+                        _ => usememo_body_check_expr(e, outer_lets, excluded, semantic, root_scope)?,
+                    }
+                }
+            }
+        }
+        Expression::LogicalExpression(l) => {
+            usememo_body_check_expr(&l.left, outer_lets, excluded, semantic, root_scope)?;
+            usememo_body_check_expr(&l.right, outer_lets, excluded, semantic, root_scope)?;
+        }
+        Expression::ConditionalExpression(c) => {
+            usememo_body_check_expr(&c.test, outer_lets, excluded, semantic, root_scope)?;
+            usememo_body_check_expr(&c.consequent, outer_lets, excluded, semantic, root_scope)?;
+            usememo_body_check_expr(&c.alternate, outer_lets, excluded, semantic, root_scope)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_state_mutation
+// ---------------------------------------------------------------------------
+
+/// Detect direct mutation of state values returned from `useState` / `useReducer`.
+///
+/// Pattern: `const [state, setState] = useState(...)` followed by
+/// `state.prop = value` or `state[key] = value`.
+fn validate_no_state_mutation<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+    _semantic: &oxc_semantic::Semantic<'a>,
+) -> Result<()> {
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        state_mutation_check_stmts(stmts)?;
+    }
+    Ok(())
+}
+
+/// Scan a set of statements for useState/useReducer declarations and then
+/// check all statements for mutations of those state variables.
+fn state_mutation_check_stmts<'a>(
+    stmts: &[oxc_ast::ast::Statement<'a>],
+) -> Result<()> {
+    use oxc_ast::ast::{BindingPatternKind, Expression, Statement};
+
+    // Collect state variable names from array destructuring of useState/useReducer.
+    let mut state_vars: std::collections::HashMap<String, &'static str> =
+        std::collections::HashMap::new();
+
+    for stmt in stmts {
+        if let Statement::VariableDeclaration(v) = stmt {
+            for decl in &v.declarations {
+                // Must be array destructuring: const [state, ...] = ...
+                let BindingPatternKind::ArrayPattern(arr) = &decl.id.kind else { continue };
+                let Some(first_elem) = arr.elements.first().and_then(|e| e.as_ref()) else { continue };
+                let BindingPatternKind::BindingIdentifier(id) = &first_elem.kind else { continue };
+                let name = id.name.to_string();
+
+                // Init must be a useState/useReducer call
+                let Some(init) = &decl.init else { continue };
+                let hook_name: Option<&'static str> = match init {
+                    Expression::CallExpression(c) => match &c.callee {
+                        Expression::Identifier(i) => match i.name.as_str() {
+                            "useState" => Some("useState"),
+                            "useReducer" => Some("useReducer"),
+                            _ => None,
+                        },
+                        Expression::StaticMemberExpression(s)
+                            if matches!(&s.object, Expression::Identifier(o) if o.name == "React") =>
+                        {
+                            match s.property.name.as_str() {
+                                "useState" => Some("useState"),
+                                "useReducer" => Some("useReducer"),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(hook) = hook_name {
+                    state_vars.insert(name, hook);
+                }
+            }
+        }
+    }
+
+    // Also collect useContext results — context values are also immutable.
+    for stmt in stmts {
+        if let Statement::VariableDeclaration(v) = stmt {
+            for decl in &v.declarations {
+                // const context = useContext(X) — simple identifier binding
+                let BindingPatternKind::BindingIdentifier(id) = &decl.id.kind else { continue };
+                let name = id.name.to_string();
+                if state_vars.contains_key(&name) { continue; }
+                let Some(init) = &decl.init else { continue };
+                let is_context = match init {
+                    Expression::CallExpression(c) => match &c.callee {
+                        Expression::Identifier(i) => i.name == "useContext",
+                        Expression::StaticMemberExpression(s) => {
+                            s.property.name == "useContext"
+                                && matches!(&s.object, Expression::Identifier(o) if o.name == "React")
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                };
+                if is_context {
+                    state_vars.insert(name, "useContext");
+                }
+            }
+        }
+    }
+
+    if state_vars.is_empty() {
+        return Ok(());
+    }
+
+    // Collect 1-level aliases: `const foo = stateVar` or `const foo = stateVar.anything`.
+    // These aliases must not have their properties mutated.
+    let mut all_vars = state_vars.clone();
+    for stmt in stmts {
+        if let Statement::VariableDeclaration(v) = stmt {
+            for decl in &v.declarations {
+                let BindingPatternKind::BindingIdentifier(id) = &decl.id.kind else { continue };
+                let alias_name = id.name.to_string();
+                if all_vars.contains_key(&alias_name) { continue; } // already a state var
+                let Some(init) = &decl.init else { continue };
+                let is_state_alias = match init {
+                    // `const foo = stateVar`
+                    Expression::Identifier(i) if all_vars.contains_key(i.name.as_str()) => true,
+                    // `const foo = stateVar.something`
+                    Expression::StaticMemberExpression(s) => {
+                        matches!(&s.object, Expression::Identifier(i) if all_vars.contains_key(i.name.as_str()))
+                    }
+                    _ => false,
+                };
+                if is_state_alias {
+                    all_vars.insert(alias_name, "useState");
+                }
+            }
+        }
+    }
+
+    // Scan all statements for assignments to state vars (direct property or computed).
+    for stmt in stmts {
+        state_mutation_check_stmt(stmt, &all_vars)?;
+    }
+    Ok(())
+}
+
+fn state_mutation_check_stmt<'a>(
+    stmt: &oxc_ast::ast::Statement<'a>,
+    state_vars: &std::collections::HashMap<String, &'static str>,
+) -> Result<()> {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::ExpressionStatement(e) => {
+            state_mutation_check_expr(&e.expression, state_vars)?;
+        }
+        Statement::VariableDeclaration(v) => {
+            for decl in &v.declarations {
+                if let Some(init) = &decl.init {
+                    state_mutation_check_expr(init, state_vars)?;
+                }
+            }
+        }
+        Statement::IfStatement(i) => {
+            state_mutation_check_stmt(&i.consequent, state_vars)?;
+            if let Some(alt) = &i.alternate {
+                state_mutation_check_stmt(alt, state_vars)?;
+            }
+        }
+        Statement::BlockStatement(b) => {
+            for s in &b.body {
+                state_mutation_check_stmt(s, state_vars)?;
+            }
+        }
+        Statement::ReturnStatement(r) => {
+            if let Some(e) = &r.argument {
+                state_mutation_check_expr(e, state_vars)?;
+            }
+        }
+        Statement::ForStatement(f) => {
+            if let Some(body) = Some(&f.body) {
+                state_mutation_check_stmt(body, state_vars)?;
+            }
+        }
+        Statement::WhileStatement(w) => {
+            state_mutation_check_stmt(&w.body, state_vars)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn state_mutation_check_expr<'a>(
+    expr: &oxc_ast::ast::Expression<'a>,
+    state_vars: &std::collections::HashMap<String, &'static str>,
+) -> Result<()> {
+    use oxc_ast::ast::{AssignmentTarget, Expression};
+    match expr {
+        Expression::AssignmentExpression(a) => {
+            // Check left side: state.prop = ... or state[x] = ...
+            let base_name: Option<&str> = match &a.left {
+                AssignmentTarget::StaticMemberExpression(s) => {
+                    if let Expression::Identifier(id) = &s.object {
+                        Some(id.name.as_str())
+                    } else {
+                        None
+                    }
+                }
+                AssignmentTarget::ComputedMemberExpression(c) => {
+                    if let Expression::Identifier(id) = &c.object {
+                        Some(id.name.as_str())
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            if let Some(name) = base_name {
+                if let Some(hook_name) = state_vars.get(name) {
+                    return Err(crate::error::CompilerError::invalid_react(format!(
+                        "This value cannot be modified\n\n\
+                         Modifying a value returned from '{hook_name}()', which should not be \
+                         modified directly. Use the setter function to update instead."
+                    )));
+                }
+            }
+            // Also check right side
+            state_mutation_check_expr(&a.right, state_vars)?;
+        }
+        Expression::CallExpression(c) => {
+            for arg in &c.arguments {
+                if let Some(e) = arg.as_expression() {
+                    state_mutation_check_expr(e, state_vars)?;
+                }
+            }
+        }
+        Expression::SequenceExpression(s) => {
+            for e in &s.expressions {
+                state_mutation_check_expr(e, state_vars)?;
+            }
+        }
+        Expression::ArrowFunctionExpression(arrow) => {
+            // Recurse into closure body, but exclude any state names shadowed by params.
+            let mut inner_vars = state_vars.clone();
+            for param in &arrow.params.items {
+                let mut shadowed = std::collections::HashSet::new();
+                collect_binding_names(&param.pattern, &mut shadowed);
+                for name in &shadowed { inner_vars.remove(name); }
+            }
+            if !inner_vars.is_empty() {
+                for s in &arrow.body.statements {
+                    state_mutation_check_stmt(s, &inner_vars)?;
+                }
+            }
+        }
+        Expression::FunctionExpression(func) => {
+            if let Some(body) = &func.body {
+                let mut inner_vars = state_vars.clone();
+                for param in &func.params.items {
+                    let mut shadowed = std::collections::HashSet::new();
+                    collect_binding_names(&param.pattern, &mut shadowed);
+                    for name in &shadowed { inner_vars.remove(name); }
+                }
+                if !inner_vars.is_empty() {
+                    for s in &body.statements {
+                        state_mutation_check_stmt(s, &inner_vars)?;
+                    }
+                }
+            }
+        }
+        Expression::ParenthesizedExpression(p) => {
+            state_mutation_check_expr(&p.expression, state_vars)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_function_hoisting_call
+// ---------------------------------------------------------------------------
+
+/// Detect calling a function declaration before it appears in the statement list.
+///
+/// Pattern: `const result = bar(); function bar() {...}` in a component/hook.
+/// JavaScript hoists function declarations, but React Compiler cannot safely
+/// handle calls to hoisted functions.
+///
+/// Also detects: `function foo() { return bar(); } function bar() {...}` where
+/// a function declared earlier references a function declared later (mutual
+/// hoisting in function bodies).
+fn validate_no_function_hoisting_call<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+    semantic: &oxc_semantic::Semantic<'a>,
+) -> Result<()> {
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        check_stmts_for_hoisted_call(stmts, semantic)?;
+    }
+    Ok(())
+}
+
+fn check_stmts_for_hoisted_call<'a>(
+    stmts: &[oxc_ast::ast::Statement<'a>],
+    semantic: &oxc_semantic::Semantic<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::{Expression, Statement};
+
+    // Collect all function declaration names in the body.
+    let all_func_names: std::collections::HashSet<String> = stmts.iter()
+        .filter_map(|s| {
+            if let Statement::FunctionDeclaration(f) = s {
+                f.id.as_ref().map(|id| id.name.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if all_func_names.is_empty() { return Ok(()); }
+
+    let mut seen_funcs: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for stmt in stmts {
+        match stmt {
+            Statement::FunctionDeclaration(f) => {
+                // Check if this function's body calls any function not yet declared.
+                let name = f.id.as_ref().map(|id| id.name.as_str()).unwrap_or("");
+                if !name.is_empty() {
+                    if let Some(body) = &f.body {
+                        for s in &body.statements {
+                            if stmt_calls_unseen_func(s, &all_func_names, &seen_funcs) {
+                                return Err(CompilerError::todo(
+                                    "Function declaration references a function that is declared later in the component/hook body",
+                                ));
+                            }
+                        }
+                    }
+                    seen_funcs.insert(name.to_string());
+                }
+            }
+            Statement::VariableDeclaration(v) => {
+                for decl in &v.declarations {
+                    if let Some(init) = &decl.init {
+                        if expr_calls_unseen_func(init, &all_func_names, &seen_funcs) {
+                            return Err(CompilerError::todo(
+                                "Calling a function before its declaration in the component/hook body",
+                            ));
+                        }
+                    }
+                }
+            }
+            Statement::ExpressionStatement(e) => {
+                if expr_calls_unseen_func(&e.expression, &all_func_names, &seen_funcs) {
+                    return Err(CompilerError::todo(
+                        "Calling a function before its declaration in the component/hook body",
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn stmt_calls_unseen_func<'a>(
+    stmt: &oxc_ast::ast::Statement<'a>,
+    all_funcs: &std::collections::HashSet<String>,
+    seen: &std::collections::HashSet<String>,
+) -> bool {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::ReturnStatement(r) => {
+            r.argument.as_ref().map_or(false, |e| expr_calls_unseen_func(e, all_funcs, seen))
+        }
+        Statement::ExpressionStatement(e) => expr_calls_unseen_func(&e.expression, all_funcs, seen),
+        Statement::VariableDeclaration(v) => v.declarations.iter().any(|d| {
+            d.init.as_ref().map_or(false, |e| expr_calls_unseen_func(e, all_funcs, seen))
+        }),
+        Statement::BlockStatement(b) => b.body.iter().any(|s| stmt_calls_unseen_func(s, all_funcs, seen)),
+        Statement::IfStatement(i) => {
+            stmt_calls_unseen_func(&i.consequent, all_funcs, seen)
+                || i.alternate.as_ref().map_or(false, |a| stmt_calls_unseen_func(a, all_funcs, seen))
+        }
+        _ => false,
+    }
+}
+
+fn expr_calls_unseen_func<'a>(
+    expr: &oxc_ast::ast::Expression<'a>,
+    all_funcs: &std::collections::HashSet<String>,
+    seen: &std::collections::HashSet<String>,
+) -> bool {
+    use oxc_ast::ast::Expression;
+    match expr {
+        Expression::CallExpression(c) => {
+            // Check if callee is an identifier that's in all_funcs but NOT yet seen
+            if let Expression::Identifier(id) = &c.callee {
+                let name = id.name.as_str();
+                if all_funcs.contains(name) && !seen.contains(name) {
+                    return true;
+                }
+            }
+            // Recurse into args (but not into closure bodies — don't recurse into arrow/func)
+            c.arguments.iter().any(|a| {
+                a.as_expression().map_or(false, |e| expr_calls_unseen_func(e, all_funcs, seen))
+            })
+        }
+        Expression::SequenceExpression(s) => {
+            s.expressions.iter().any(|e| expr_calls_unseen_func(e, all_funcs, seen))
+        }
+        // Don't recurse into closures (they evaluate lazily, not during init)
+        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => false,
+        _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_tzdv_self_reference
+// ---------------------------------------------------------------------------
+
+/// Detect `const x = f(x)` — using a const binding in its own initializer.
+///
+/// This is a temporal dead zone (TDZ) violation. React compiler raises a
+/// "hoisting" error for this pattern during SSA construction.
+fn validate_no_tzdv_self_reference<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+    semantic: &oxc_semantic::Semantic<'a>,
+) -> Result<()> {
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        for stmt in stmts {
+            tzdv_check_stmt(stmt, semantic)?;
+        }
+    }
+    Ok(())
+}
+
+fn tzdv_check_stmt<'a>(
+    stmt: &oxc_ast::ast::Statement<'a>,
+    semantic: &oxc_semantic::Semantic<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::{BindingPatternKind, Statement, VariableDeclarationKind};
+    if let Statement::VariableDeclaration(v) = stmt {
+        // Only const/let can have TDZ
+        if matches!(v.kind, VariableDeclarationKind::Const | VariableDeclarationKind::Let) {
+            for decl in &v.declarations {
+                if let BindingPatternKind::BindingIdentifier(id) = &decl.id.kind {
+                    if let Some(sym_id) = id.symbol_id.get() {
+                        if let Some(init) = &decl.init {
+                            if init_directly_references_symbol(init, sym_id, semantic) {
+                                return Err(CompilerError::todo(
+                                    "[hoisting] EnterSSA: Expected identifier to be defined before being used",
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Walk `expr` looking for identifier references that resolve to `sym_id`.
+/// Does NOT recurse into function expressions or arrow functions (those have
+/// lazy evaluation and may validly capture the binding).
+fn init_directly_references_symbol<'a>(
+    expr: &oxc_ast::ast::Expression<'a>,
+    sym_id: oxc_semantic::SymbolId,
+    semantic: &oxc_semantic::Semantic<'a>,
+) -> bool {
+    use oxc_ast::ast::Expression;
+    match expr {
+        Expression::Identifier(id) => {
+            id.reference_id.get().and_then(|ref_id| {
+                semantic.scoping().get_reference(ref_id).symbol_id()
+            }) == Some(sym_id)
+        }
+        // Recurse into call args (direct call), member expressions, binary ops
+        Expression::CallExpression(c) => {
+            // Don't check callee — only arguments (callee could be the function itself)
+            c.arguments.iter().any(|a| {
+                a.as_expression().map_or(false, |e| init_directly_references_symbol(e, sym_id, semantic))
+            })
+        }
+        Expression::BinaryExpression(b) => {
+            init_directly_references_symbol(&b.left, sym_id, semantic)
+                || init_directly_references_symbol(&b.right, sym_id, semantic)
+        }
+        Expression::UnaryExpression(u) => {
+            init_directly_references_symbol(&u.argument, sym_id, semantic)
+        }
+        Expression::StaticMemberExpression(s) => {
+            init_directly_references_symbol(&s.object, sym_id, semantic)
+        }
+        Expression::ComputedMemberExpression(c) => {
+            init_directly_references_symbol(&c.object, sym_id, semantic)
+        }
+        // Do NOT recurse into closures (lazy evaluation)
+        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => false,
+        _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_param_mutation
+// ---------------------------------------------------------------------------
+
+/// Detect direct property mutations of component/hook parameters.
+///
+/// Pattern: `function Foo(props) { props.x = 1; }` or
+///          `function useHook(a, b) { b.test = 1; }`
+fn validate_no_param_mutation<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+    _semantic: &oxc_semantic::Semantic<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind, Statement};
+
+    fn check_fn<'a>(func: &oxc_ast::ast::Function<'a>) -> Result<()> {
+        let name = func.id.as_ref().map(|id| id.name.as_str()).unwrap_or("");
+        if name.is_empty() { return Ok(()); }
+
+        // Collect ALL parameter binding names, including from destructured ObjectPattern.
+        let mut param_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for param in &func.params.items {
+            collect_binding_names(&param.pattern, &mut param_names);
+        }
+        if param_names.is_empty() { return Ok(()); }
+
+        let Some(body) = &func.body else { return Ok(()); };
+        for stmt in &body.statements {
+            param_mutation_check_stmt(stmt, &param_names)?;
+        }
+        Ok(())
+    }
+
+    for stmt in &program.body {
+        match stmt {
+            Statement::FunctionDeclaration(f) => { check_fn(f)?; }
+            Statement::ExportDefaultDeclaration(d) => {
+                if let ExportDefaultDeclarationKind::FunctionDeclaration(f) = &d.declaration {
+                    check_fn(f)?;
+                }
+            }
+            Statement::ExportNamedDeclaration(d) => {
+                if let Some(Declaration::FunctionDeclaration(f)) = &d.declaration {
+                    check_fn(f)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn param_mutation_check_stmt<'a>(
+    stmt: &oxc_ast::ast::Statement<'a>,
+    param_names: &std::collections::HashSet<String>,
+) -> Result<()> {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::ExpressionStatement(e) => {
+            param_mutation_check_expr(&e.expression, param_names)?;
+        }
+        Statement::VariableDeclaration(v) => {
+            for decl in &v.declarations {
+                if let Some(init) = &decl.init {
+                    param_mutation_check_expr(init, param_names)?;
+                }
+            }
+        }
+        Statement::IfStatement(i) => {
+            param_mutation_check_stmt(&i.consequent, param_names)?;
+            if let Some(a) = &i.alternate {
+                param_mutation_check_stmt(a, param_names)?;
+            }
+        }
+        Statement::BlockStatement(b) => {
+            for s in &b.body {
+                param_mutation_check_stmt(s, param_names)?;
+            }
+        }
+        Statement::ReturnStatement(r) => {
+            if let Some(e) = &r.argument {
+                param_mutation_check_expr(e, param_names)?;
+            }
+        }
+        Statement::ForOfStatement(fo) => {
+            use oxc_ast::ast::{BindingPatternKind, Expression, ForStatementLeft};
+            // Check if iterating over a param property: `for (const x of param.items)`
+            let iter_var: Option<String> = if let ForStatementLeft::VariableDeclaration(vd) = &fo.left {
+                if let Some(decl) = vd.declarations.first() {
+                    if let BindingPatternKind::BindingIdentifier(id) = &decl.id.kind {
+                        // Right-hand side must be `paramName.something`
+                        let is_param_source = match &fo.right {
+                            Expression::Identifier(i) => param_names.contains(i.name.as_str()),
+                            Expression::StaticMemberExpression(s) => {
+                                matches!(&s.object, Expression::Identifier(i) if param_names.contains(i.name.as_str()))
+                            }
+                            _ => false,
+                        };
+                        if is_param_source { Some(id.name.to_string()) } else { None }
+                    } else { None }
+                } else { None }
+            } else { None };
+            if let Some(var) = iter_var {
+                // The loop variable is a param alias — treat it like a param inside the loop body
+                let mut extended = param_names.clone();
+                extended.insert(var);
+                param_mutation_check_stmt(&fo.body, &extended)?;
+            } else {
+                param_mutation_check_stmt(&fo.body, param_names)?;
+            }
+        }
+        Statement::FunctionDeclaration(f) => {
+            // Recurse into nested function declarations.
+            // Outer param names are captured, but the inner function's own params shadow them.
+            if let Some(body) = &f.body {
+                let mut inner_params = param_names.clone();
+                for param in &f.params.items {
+                    let mut shadowed = std::collections::HashSet::new();
+                    collect_binding_names(&param.pattern, &mut shadowed);
+                    for name in &shadowed { inner_params.remove(name); }
+                }
+                for s in &body.statements {
+                    param_mutation_check_stmt(s, &inner_params)?;
+                }
+            }
+        }
+        Statement::ForInStatement(fi) => {
+            param_mutation_check_stmt(&fi.body, param_names)?;
+        }
+        Statement::WhileStatement(w) => {
+            param_mutation_check_stmt(&w.body, param_names)?;
+        }
+        Statement::ForStatement(f) => {
+            param_mutation_check_stmt(&f.body, param_names)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Returns true if a parameter name looks like a React ref (mutable .current is allowed).
+fn is_ref_like_param_name(name: &str) -> bool {
+    name == "ref" || name.ends_with("Ref") || name.starts_with("ref")
+}
+
+/// Compute the set of variable names that a closure body shadows.
+fn collect_closure_shadows<'a>(stmts: &[oxc_ast::ast::Statement<'a>]) -> std::collections::HashSet<String> {
+    let mut shadowed = std::collections::HashSet::new();
+    for stmt in stmts {
+        if let oxc_ast::ast::Statement::VariableDeclaration(vd) = stmt {
+            for decl in &vd.declarations {
+                collect_binding_names(&decl.id, &mut shadowed);
+            }
+        }
+    }
+    shadowed
+}
+
+fn param_mutation_check_expr<'a>(
+    expr: &oxc_ast::ast::Expression<'a>,
+    param_names: &std::collections::HashSet<String>,
+) -> Result<()> {
+    use oxc_ast::ast::{AssignmentTarget, Expression};
+    match expr {
+        Expression::AssignmentExpression(a) => {
+            let base_name: Option<&str> = match &a.left {
+                AssignmentTarget::StaticMemberExpression(s) => {
+                    if let Expression::Identifier(id) = &s.object {
+                        Some(id.name.as_str())
+                    } else { None }
+                }
+                AssignmentTarget::ComputedMemberExpression(c) => {
+                    if let Expression::Identifier(id) = &c.object {
+                        Some(id.name.as_str())
+                    } else { None }
+                }
+                _ => None,
+            };
+            if let Some(name) = base_name {
+                if param_names.contains(name) && !is_ref_like_param_name(name) {
+                    return Err(crate::error::CompilerError::invalid_react(
+                        "This value cannot be modified\n\n\
+                         Modifying component props or hook arguments is not allowed. \
+                         Consider using a local variable instead."
+                    ));
+                }
+            }
+            param_mutation_check_expr(&a.right, param_names)?;
+        }
+        Expression::CallExpression(c) => {
+            param_mutation_check_expr(&c.callee, param_names)?;
+            for arg in &c.arguments {
+                if let Some(e) = arg.as_expression() {
+                    param_mutation_check_expr(e, param_names)?;
+                }
+            }
+        }
+        // Recurse into closures — prop mutations inside callbacks are always invalid.
+        // Compute shadows to avoid flagging locally-redeclared names.
+        Expression::ArrowFunctionExpression(arrow) => {
+            let shadows = collect_closure_shadows(&arrow.body.statements);
+            if shadows.is_empty() {
+                for s in &arrow.body.statements {
+                    param_mutation_check_stmt(s, param_names)?;
+                }
+            } else {
+                let filtered: std::collections::HashSet<String> = param_names.iter()
+                    .filter(|n| !shadows.contains(*n))
+                    .cloned().collect();
+                if !filtered.is_empty() {
+                    for s in &arrow.body.statements {
+                        param_mutation_check_stmt(s, &filtered)?;
+                    }
+                }
+            }
+        }
+        Expression::FunctionExpression(func) => {
+            if let Some(body) = &func.body {
+                let shadows = collect_closure_shadows(&body.statements);
+                if shadows.is_empty() {
+                    for s in &body.statements {
+                        param_mutation_check_stmt(s, param_names)?;
+                    }
+                } else {
+                    let filtered: std::collections::HashSet<String> = param_names.iter()
+                        .filter(|n| !shadows.contains(*n))
+                        .cloned().collect();
+                    if !filtered.is_empty() {
+                        for s in &body.statements {
+                            param_mutation_check_stmt(s, &filtered)?;
+                        }
+                    }
+                }
+            }
+        }
+        Expression::ParenthesizedExpression(p) => {
+            param_mutation_check_expr(&p.expression, param_names)?;
+        }
+        Expression::JSXElement(jsx) => {
+            for attr in &jsx.opening_element.attributes {
+                if let oxc_ast::ast::JSXAttributeItem::Attribute(a) = attr {
+                    if let Some(oxc_ast::ast::JSXAttributeValue::ExpressionContainer(ec)) = &a.value {
+                        if let Some(e) = ec.expression.as_expression() {
+                            param_mutation_check_expr(e, param_names)?;
+                        }
+                    }
+                }
+            }
+            for child in &jsx.children {
+                if let oxc_ast::ast::JSXChild::ExpressionContainer(ec) = child {
+                    if let Some(e) = ec.expression.as_expression() {
+                        param_mutation_check_expr(e, param_names)?;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_param_reassignment_in_closures
+// ---------------------------------------------------------------------------
+
+/// Detect reassignment of function parameter bindings inside nested closures.
+///
+/// Pattern: `function Component({foo}) { ... handler={() => { foo = true; }} }`
+/// Reassigning a destructured parameter binding (which is effectively a prop)
+/// inside a closure is not allowed.
+fn validate_no_param_reassignment_in_closures<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+    semantic: &oxc_semantic::Semantic<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind, Statement};
+
+    fn check_fn<'a>(
+        func: &oxc_ast::ast::Function<'a>,
+        semantic: &oxc_semantic::Semantic<'a>,
+    ) -> Result<()> {
+        let name = func.id.as_ref().map(|id| id.name.as_str()).unwrap_or("");
+        if name.is_empty() { return Ok(()); }
+        // Only check component/hook functions
+        let first = name.chars().next();
+        let is_comp_hook = first.map_or(false, |c| c.is_uppercase()) || is_hook_name(name);
+        if !is_comp_hook { return Ok(()); }
+
+        // Collect parameter binding symbol IDs AND names (for fallback)
+        let mut param_syms: std::collections::HashSet<oxc_semantic::SymbolId> =
+            std::collections::HashSet::new();
+        let mut param_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        collect_param_symbol_ids_and_names(&func.params, &mut param_syms, &mut param_names);
+        if param_syms.is_empty() && param_names.is_empty() { return Ok(()); }
+
+        let Some(body) = &func.body else { return Ok(()); };
+        // Walk body, entering closures to check for param reassignments
+        for stmt in &body.statements {
+            check_stmt_for_param_reassign(stmt, &param_syms, &param_names, false, semantic)?;
+        }
+        Ok(())
+    }
+
+    for stmt in &program.body {
+        match stmt {
+            Statement::FunctionDeclaration(f) => { check_fn(f, semantic)?; }
+            Statement::ExportDefaultDeclaration(d) => {
+                if let ExportDefaultDeclarationKind::FunctionDeclaration(f) = &d.declaration {
+                    check_fn(f, semantic)?;
+                }
+            }
+            Statement::ExportNamedDeclaration(d) => {
+                if let Some(Declaration::FunctionDeclaration(f)) = &d.declaration {
+                    check_fn(f, semantic)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn collect_param_symbol_ids_and_names<'a>(
+    params: &oxc_ast::ast::FormalParameters<'a>,
+    syms: &mut std::collections::HashSet<oxc_semantic::SymbolId>,
+    names: &mut std::collections::HashSet<String>,
+) {
+    for param in &params.items {
+        collect_binding_symbol_ids_and_names(&param.pattern, syms, names);
+    }
+}
+
+fn collect_binding_symbol_ids_and_names<'a>(
+    pat: &oxc_ast::ast::BindingPattern<'a>,
+    syms: &mut std::collections::HashSet<oxc_semantic::SymbolId>,
+    names: &mut std::collections::HashSet<String>,
+) {
+    use oxc_ast::ast::BindingPatternKind;
+    match &pat.kind {
+        BindingPatternKind::BindingIdentifier(id) => {
+            names.insert(id.name.to_string());
+            if let Some(sym_id) = id.symbol_id.get() {
+                syms.insert(sym_id);
+            }
+        }
+        BindingPatternKind::ObjectPattern(obj) => {
+            for prop in &obj.properties {
+                collect_binding_symbol_ids_and_names(&prop.value, syms, names);
+            }
+            if let Some(rest) = &obj.rest {
+                collect_binding_symbol_ids_and_names(&rest.argument, syms, names);
+            }
+        }
+        BindingPatternKind::ArrayPattern(arr) => {
+            for el in arr.elements.iter().filter_map(|e| e.as_ref()) {
+                collect_binding_symbol_ids_and_names(el, syms, names);
+            }
+        }
+        BindingPatternKind::AssignmentPattern(ap) => {
+            collect_binding_symbol_ids_and_names(&ap.left, syms, names);
+        }
+    }
+}
+
+fn check_stmt_for_param_reassign<'a>(
+    stmt: &oxc_ast::ast::Statement<'a>,
+    param_syms: &std::collections::HashSet<oxc_semantic::SymbolId>,
+    param_names: &std::collections::HashSet<String>,
+    in_closure: bool,
+    semantic: &oxc_semantic::Semantic<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::ExpressionStatement(e) => {
+            check_expr_for_param_reassign(&e.expression, param_syms, param_names, in_closure, semantic)?;
+        }
+        Statement::VariableDeclaration(v) => {
+            for decl in &v.declarations {
+                if let Some(init) = &decl.init {
+                    check_expr_for_param_reassign(init, param_syms, param_names, in_closure, semantic)?;
+                }
+            }
+        }
+        Statement::ReturnStatement(r) => {
+            if let Some(e) = &r.argument {
+                check_expr_for_param_reassign(e, param_syms, param_names, in_closure, semantic)?;
+            }
+        }
+        Statement::IfStatement(i) => {
+            check_stmt_for_param_reassign(&i.consequent, param_syms, param_names, in_closure, semantic)?;
+            if let Some(a) = &i.alternate {
+                check_stmt_for_param_reassign(a, param_syms, param_names, in_closure, semantic)?;
+            }
+        }
+        Statement::BlockStatement(b) => {
+            for s in &b.body {
+                check_stmt_for_param_reassign(s, param_syms, param_names, in_closure, semantic)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn check_expr_for_param_reassign<'a>(
+    expr: &oxc_ast::ast::Expression<'a>,
+    param_syms: &std::collections::HashSet<oxc_semantic::SymbolId>,
+    param_names: &std::collections::HashSet<String>,
+    in_closure: bool,
+    semantic: &oxc_semantic::Semantic<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::{AssignmentTarget, Expression};
+    match expr {
+        Expression::AssignmentExpression(a) if in_closure => {
+            if let AssignmentTarget::AssignmentTargetIdentifier(id) = &a.left {
+                let name = id.name.as_str();
+                // Check via symbol ID (accurate, handles shadowing)
+                let is_param_sym = id.reference_id.get()
+                    .and_then(|ref_id| semantic.scoping().get_reference(ref_id).symbol_id())
+                    .map_or(false, |sym_id| param_syms.contains(&sym_id));
+                // Fallback: name-based check (catches cases where symbol_id is missing)
+                let is_param_name = param_names.contains(name);
+                if is_param_sym || is_param_name {
+                    return Err(CompilerError::invalid_react(
+                        "This value cannot be modified\n\n\
+                         Modifying component props or hook arguments is not allowed. \
+                         Consider using a local variable instead."
+                    ));
+                }
+            }
+            check_expr_for_param_reassign(&a.right, param_syms, param_names, in_closure, semantic)?;
+        }
+        Expression::ArrowFunctionExpression(arrow) => {
+            for s in &arrow.body.statements {
+                check_stmt_for_param_reassign(s, param_syms, param_names, true, semantic)?;
+            }
+        }
+        Expression::FunctionExpression(func) => {
+            if let Some(body) = &func.body {
+                for s in &body.statements {
+                    check_stmt_for_param_reassign(s, param_syms, param_names, true, semantic)?;
+                }
+            }
+        }
+        Expression::CallExpression(c) => {
+            check_expr_for_param_reassign(&c.callee, param_syms, param_names, in_closure, semantic)?;
+            for arg in &c.arguments {
+                if let Some(e) = arg.as_expression() {
+                    check_expr_for_param_reassign(e, param_syms, param_names, in_closure, semantic)?;
+                }
+            }
+        }
+        Expression::ParenthesizedExpression(p) => {
+            check_expr_for_param_reassign(&p.expression, param_syms, param_names, in_closure, semantic)?;
+        }
+        Expression::JSXElement(jsx) => {
+            for attr in &jsx.opening_element.attributes {
+                if let oxc_ast::ast::JSXAttributeItem::Attribute(a) = attr {
+                    if let Some(oxc_ast::ast::JSXAttributeValue::ExpressionContainer(ec)) = &a.value {
+                        if let Some(e) = ec.expression.as_expression() {
+                            check_expr_for_param_reassign(e, param_syms, param_names, in_closure, semantic)?;
+                        }
+                    }
+                }
+            }
+            // Also check JSX children
+            for child in &jsx.children {
+                if let oxc_ast::ast::JSXChild::ExpressionContainer(ec) = child {
+                    if let Some(e) = ec.expression.as_expression() {
+                        check_expr_for_param_reassign(e, param_syms, param_names, in_closure, semantic)?;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_async_local_reassignment
+// ---------------------------------------------------------------------------
+
+/// Detect reassignment of outer `let` variables inside async closures.
+///
+/// React rule: async closures always run after the render phase completes, so
+/// assigning to a `let` variable captured from the component/hook body is
+/// always invalid. This includes nested sync callbacks *inside* an async
+/// closure (e.g. `.then(result => { outerLet = result; })`).
+///
+/// The check is a variant of `check_expr_let_in_closure` where we only flip
+/// `in_closure` to `true` when entering an **async** function/arrow, not
+/// every closure. Once inside an async closure, all nested closures inherit
+/// `in_closure=true`.
+fn validate_no_async_local_reassignment<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+    semantic: &oxc_semantic::Semantic<'a>,
+) -> Result<()> {
+    let root_scope = semantic.scoping().root_scope_id();
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        let outer_lets = collect_let_names_shallow(stmts);
+        if outer_lets.is_empty() { continue; }
+        let excluded = std::collections::HashSet::new();
+        for stmt in stmts {
+            async_check_stmt(stmt, &outer_lets, &excluded, false, semantic, root_scope)?;
+        }
+    }
+    Ok(())
+}
+
+/// Statement walker for async-closure let-reassignment checks.
+/// `in_closure` starts `false` at component body level and flips to `true`
+/// only when entering an async function/arrow.
+fn async_check_stmt<'a>(
+    stmt: &oxc_ast::ast::Statement<'a>,
+    outer_lets: &std::collections::HashSet<String>,
+    excluded: &std::collections::HashSet<String>,
+    in_closure: bool,
+    semantic: &oxc_semantic::Semantic<'a>,
+    root_scope: oxc_semantic::ScopeId,
+) -> Result<()> {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::ExpressionStatement(e) => {
+            async_check_expr(&e.expression, outer_lets, excluded, in_closure, semantic, root_scope)?;
+        }
+        Statement::VariableDeclaration(vd) => {
+            for decl in &vd.declarations {
+                if let Some(init) = &decl.init {
+                    async_check_expr(init, outer_lets, excluded, in_closure, semantic, root_scope)?;
+                }
+            }
+        }
+        Statement::ReturnStatement(r) => {
+            if let Some(arg) = &r.argument {
+                async_check_expr(arg, outer_lets, excluded, in_closure, semantic, root_scope)?;
+            }
+        }
+        Statement::BlockStatement(b) => {
+            for s in &b.body {
+                async_check_stmt(s, outer_lets, excluded, in_closure, semantic, root_scope)?;
+            }
+        }
+        Statement::IfStatement(i) => {
+            async_check_expr(&i.test, outer_lets, excluded, in_closure, semantic, root_scope)?;
+            async_check_stmt(&i.consequent, outer_lets, excluded, in_closure, semantic, root_scope)?;
+            if let Some(a) = &i.alternate {
+                async_check_stmt(a, outer_lets, excluded, in_closure, semantic, root_scope)?;
+            }
+        }
+        Statement::FunctionDeclaration(f) => {
+            if let Some(body) = &f.body {
+                let new_in = in_closure || f.r#async;
+                let closure_lets = collect_let_names_shallow(&body.statements);
+                let mut new_excl = excluded.clone();
+                new_excl.extend(closure_lets);
+                for s in &body.statements {
+                    async_check_stmt(s, outer_lets, &new_excl, new_in, semantic, root_scope)?;
+                }
+            }
+        }
+        Statement::WhileStatement(w) => {
+            async_check_expr(&w.test, outer_lets, excluded, in_closure, semantic, root_scope)?;
+            async_check_stmt(&w.body, outer_lets, excluded, in_closure, semantic, root_scope)?;
+        }
+        Statement::ForStatement(f) => {
+            if let Some(t) = &f.test {
+                async_check_expr(t, outer_lets, excluded, in_closure, semantic, root_scope)?;
+            }
+            async_check_stmt(&f.body, outer_lets, excluded, in_closure, semantic, root_scope)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Expression walker for async-closure let-reassignment checks.
+fn async_check_expr<'a>(
+    expr: &oxc_ast::ast::Expression<'a>,
+    outer_lets: &std::collections::HashSet<String>,
+    excluded: &std::collections::HashSet<String>,
+    in_closure: bool,
+    semantic: &oxc_semantic::Semantic<'a>,
+    root_scope: oxc_semantic::ScopeId,
+) -> Result<()> {
+    use oxc_ast::ast::{AssignmentTarget, Expression};
+    use oxc_semantic::SymbolFlags;
+    match expr {
+        Expression::AssignmentExpression(a) if in_closure => {
+            if let AssignmentTarget::AssignmentTargetIdentifier(id) = &a.left {
+                let name = id.name.as_str();
+                if outer_lets.contains(name) && !excluded.contains(name) {
+                    let is_local_let = id.reference_id.get().and_then(|ref_id| {
+                        let sym_id = semantic.scoping().get_reference(ref_id).symbol_id()?;
+                        let sym_scope = semantic.scoping().symbol_scope_id(sym_id);
+                        if sym_scope == root_scope { return None; }
+                        let flags = semantic.scoping().symbol_flags(sym_id);
+                        if flags.contains(SymbolFlags::BlockScopedVariable)
+                            && !flags.contains(SymbolFlags::ConstVariable) {
+                            Some(())
+                        } else {
+                            None
+                        }
+                    }).is_some();
+                    if is_local_let {
+                        return Err(CompilerError::invalid_react(
+                            "Cannot reassign a variable after render completes. \
+                             Consider using state instead.",
+                        ));
+                    }
+                }
+            }
+            async_check_expr(&a.right, outer_lets, excluded, in_closure, semantic, root_scope)?;
+        }
+        Expression::AssignmentExpression(a) => {
+            async_check_expr(&a.right, outer_lets, excluded, in_closure, semantic, root_scope)?;
+        }
+        Expression::ArrowFunctionExpression(arrow) => {
+            let new_in = in_closure || arrow.r#async;
+            let closure_lets = collect_let_names_shallow(&arrow.body.statements);
+            let mut new_excl = excluded.clone();
+            new_excl.extend(closure_lets);
+            for s in &arrow.body.statements {
+                async_check_stmt(s, outer_lets, &new_excl, new_in, semantic, root_scope)?;
+            }
+        }
+        Expression::FunctionExpression(func) => {
+            if let Some(body) = &func.body {
+                let new_in = in_closure || func.r#async;
+                let closure_lets = collect_let_names_shallow(&body.statements);
+                let mut new_excl = excluded.clone();
+                new_excl.extend(closure_lets);
+                for s in &body.statements {
+                    async_check_stmt(s, outer_lets, &new_excl, new_in, semantic, root_scope)?;
+                }
+            }
+        }
+        Expression::CallExpression(c) => {
+            async_check_expr(&c.callee, outer_lets, excluded, in_closure, semantic, root_scope)?;
+            for arg in &c.arguments {
+                if let Some(e) = arg.as_expression() {
+                    async_check_expr(e, outer_lets, excluded, in_closure, semantic, root_scope)?;
+                }
+            }
+        }
+        Expression::LogicalExpression(l) => {
+            async_check_expr(&l.left, outer_lets, excluded, in_closure, semantic, root_scope)?;
+            async_check_expr(&l.right, outer_lets, excluded, in_closure, semantic, root_scope)?;
+        }
+        Expression::ConditionalExpression(c) => {
+            async_check_expr(&c.test, outer_lets, excluded, in_closure, semantic, root_scope)?;
+            async_check_expr(&c.consequent, outer_lets, excluded, in_closure, semantic, root_scope)?;
+            async_check_expr(&c.alternate, outer_lets, excluded, in_closure, semantic, root_scope)?;
+        }
+        Expression::SequenceExpression(s) => {
+            for e in &s.expressions {
+                async_check_expr(e, outer_lets, excluded, in_closure, semantic, root_scope)?;
+            }
+        }
+        Expression::AwaitExpression(a) => {
+            async_check_expr(&a.argument, outer_lets, excluded, in_closure, semantic, root_scope)?;
+        }
+        Expression::ParenthesizedExpression(p) => {
+            async_check_expr(&p.expression, outer_lets, excluded, in_closure, semantic, root_scope)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_context_var_iterator
+// ---------------------------------------------------------------------------
+
+/// Detect for-loop iterator variables that are "context variables" — variables
+/// that are both mutated and captured in a closure within the loop body.
+///
+/// Patterns detected:
+/// 1. for-of/for-in: iterator var is reassigned inside the body AND referenced
+///    inside a closure in the same body.
+/// 2. for-loop: init var is modified by the update expression (compound
+///    assignment or `++`/`--`) AND referenced inside a closure in the body.
+fn validate_no_context_var_iterator<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        for stmt in stmts {
+            civ_check_stmt(stmt)?;
+        }
+    }
+    Ok(())
+}
+
+fn civ_check_stmt<'a>(stmt: &'a oxc_ast::ast::Statement<'a>) -> Result<()> {
+    use oxc_ast::ast::{ForStatementInit, ForStatementLeft, Statement};
+    match stmt {
+        Statement::ForOfStatement(fo) => {
+            if let Some(var_name) = civ_get_for_iter_var(&fo.left) {
+                let body = civ_block_stmts(&fo.body);
+                if civ_stmts_reassign_var(body, &var_name)
+                    && civ_stmts_have_closure_with_var(body, &var_name)
+                {
+                    return Err(crate::error::CompilerError::invalid_react(
+                        "Iterator variable is a context variable: it is reassigned \
+                         and also captured in a closure within the loop body",
+                    ));
+                }
+            }
+        }
+        Statement::ForInStatement(fi) => {
+            if let Some(var_name) = civ_get_for_iter_var(&fi.left) {
+                let body = civ_block_stmts(&fi.body);
+                if civ_stmts_reassign_var(body, &var_name)
+                    && civ_stmts_have_closure_with_var(body, &var_name)
+                {
+                    return Err(crate::error::CompilerError::invalid_react(
+                        "Iterator variable is a context variable: it is reassigned \
+                         and also captured in a closure within the loop body",
+                    ));
+                }
+            }
+        }
+        Statement::ForStatement(f) => {
+            if let Some(var_name) = civ_get_for_init_var(f) {
+                let is_updated = f.update.as_ref()
+                    .map_or(false, |u| civ_update_modifies_var(u, &var_name));
+                if is_updated {
+                    let body = civ_block_stmts(&f.body);
+                    if civ_stmts_have_closure_with_var(body, &var_name) {
+                        return Err(crate::error::CompilerError::invalid_react(
+                            "For-loop iterator variable is a context variable: \
+                             it is modified by the update expression and captured \
+                             in a closure within the loop body",
+                        ));
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn civ_get_for_iter_var<'a>(left: &'a oxc_ast::ast::ForStatementLeft<'a>) -> Option<String> {
+    use oxc_ast::ast::{BindingPatternKind, ForStatementLeft};
+    if let ForStatementLeft::VariableDeclaration(vd) = left {
+        if let Some(decl) = vd.declarations.first() {
+            if let BindingPatternKind::BindingIdentifier(id) = &decl.id.kind {
+                return Some(id.name.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn civ_get_for_init_var<'a>(f: &'a oxc_ast::ast::ForStatement<'a>) -> Option<String> {
+    use oxc_ast::ast::{BindingPatternKind, ForStatementInit};
+    if let Some(ForStatementInit::VariableDeclaration(vd)) = &f.init {
+        if let Some(decl) = vd.declarations.first() {
+            if let BindingPatternKind::BindingIdentifier(id) = &decl.id.kind {
+                return Some(id.name.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn civ_block_stmts<'a>(body: &'a oxc_ast::ast::Statement<'a>) -> &'a [oxc_ast::ast::Statement<'a>] {
+    if let oxc_ast::ast::Statement::BlockStatement(b) = body {
+        &b.body
+    } else {
+        std::slice::from_ref(body)
+    }
+}
+
+fn civ_update_modifies_var<'a>(expr: &'a oxc_ast::ast::Expression<'a>, var_name: &str) -> bool {
+    use oxc_ast::ast::{AssignmentTarget, Expression, SimpleAssignmentTarget};
+    match expr {
+        Expression::AssignmentExpression(a) => {
+            if let AssignmentTarget::AssignmentTargetIdentifier(id) = &a.left {
+                id.name == var_name
+            } else {
+                false
+            }
+        }
+        Expression::UpdateExpression(u) => {
+            if let SimpleAssignmentTarget::AssignmentTargetIdentifier(id) = &u.argument {
+                id.name == var_name
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Check if `var_name` is directly assigned (outside any nested function) in `stmts`.
+fn civ_stmts_reassign_var<'a>(stmts: &'a [oxc_ast::ast::Statement<'a>], var_name: &str) -> bool {
+    use oxc_ast::ast::{AssignmentTarget, Expression, Statement};
+    for stmt in stmts {
+        match stmt {
+            Statement::ExpressionStatement(e) => {
+                if let Expression::AssignmentExpression(a) = &e.expression {
+                    if let AssignmentTarget::AssignmentTargetIdentifier(id) = &a.left {
+                        if id.name == var_name { return true; }
+                    }
+                }
+            }
+            Statement::BlockStatement(b) => {
+                if civ_stmts_reassign_var(&b.body, var_name) { return true; }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Check if any closure in `stmts` references `var_name` (i.e., captures it).
+fn civ_stmts_have_closure_with_var<'a>(stmts: &'a [oxc_ast::ast::Statement<'a>], var_name: &str) -> bool {
+    stmts.iter().any(|s| civ_stmt_has_closure_with_var(s, var_name))
+}
+
+fn civ_stmt_has_closure_with_var<'a>(stmt: &'a oxc_ast::ast::Statement<'a>, var_name: &str) -> bool {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::ExpressionStatement(e) => civ_expr_has_closure_with_var(&e.expression, var_name),
+        Statement::VariableDeclaration(v) => v.declarations.iter().any(|d| {
+            d.init.as_ref().map_or(false, |i| civ_expr_has_closure_with_var(i, var_name))
+        }),
+        Statement::ReturnStatement(r) => r.argument.as_ref().map_or(false, |a| civ_expr_has_closure_with_var(a, var_name)),
+        Statement::BlockStatement(b) => civ_stmts_have_closure_with_var(&b.body, var_name),
+        Statement::IfStatement(i) => {
+            civ_expr_has_closure_with_var(&i.test, var_name)
+                || civ_stmt_has_closure_with_var(&i.consequent, var_name)
+                || i.alternate.as_ref().map_or(false, |a| civ_stmt_has_closure_with_var(a, var_name))
+        }
+        _ => false,
+    }
+}
+
+fn civ_expr_has_closure_with_var<'a>(expr: &'a oxc_ast::ast::Expression<'a>, var_name: &str) -> bool {
+    use oxc_ast::ast::{Expression, JSXAttributeItem, JSXAttributeValue, JSXChild};
+    match expr {
+        // This IS a closure — check if var_name is referenced inside it.
+        Expression::ArrowFunctionExpression(arrow) => {
+            let mut params = std::collections::HashSet::new();
+            for p in &arrow.params.items {
+                collect_binding_names(&p.pattern, &mut params);
+            }
+            if params.contains(var_name) { return false; }
+            civ_stmts_contain_identifier(&arrow.body.statements, var_name)
+        }
+        Expression::FunctionExpression(func) => {
+            let mut params = std::collections::HashSet::new();
+            for p in &func.params.items {
+                collect_binding_names(&p.pattern, &mut params);
+            }
+            if params.contains(var_name) { return false; }
+            func.body.as_ref()
+                .map_or(false, |b| civ_stmts_contain_identifier(&b.statements, var_name))
+        }
+        // Recurse into calls (e.g. items.push(<JSX onClick={...}>))
+        Expression::CallExpression(c) => {
+            civ_expr_has_closure_with_var(&c.callee, var_name)
+                || c.arguments.iter().any(|a| {
+                    a.as_expression().map_or(false, |e| civ_expr_has_closure_with_var(e, var_name))
+                })
+        }
+        // Recurse into JSX elements
+        Expression::JSXElement(j) => {
+            j.opening_element.attributes.iter().any(|attr| match attr {
+                JSXAttributeItem::Attribute(a) => match &a.value {
+                    Some(JSXAttributeValue::ExpressionContainer(c)) => {
+                        c.expression.as_expression()
+                            .map_or(false, |e| civ_expr_has_closure_with_var(e, var_name))
+                    }
+                    Some(JSXAttributeValue::Element(el)) => {
+                        civ_jsx_element_has_closure_with_var(el, var_name)
+                    }
+                    _ => false,
+                },
+                JSXAttributeItem::SpreadAttribute(s) => {
+                    civ_expr_has_closure_with_var(&s.argument, var_name)
+                }
+            }) || j.children.iter().any(|child| civ_jsx_child_has_closure_with_var(child, var_name))
+        }
+        Expression::JSXFragment(frag) => {
+            frag.children.iter().any(|child| civ_jsx_child_has_closure_with_var(child, var_name))
+        }
+        Expression::ArrayExpression(arr) => arr.elements.iter().any(|el| {
+            el.as_expression().map_or(false, |e| civ_expr_has_closure_with_var(e, var_name))
+        }),
+        _ => false,
+    }
+}
+
+fn civ_jsx_element_has_closure_with_var<'a>(
+    j: &'a oxc_ast::ast::JSXElement<'a>,
+    var_name: &str,
+) -> bool {
+    use oxc_ast::ast::{JSXAttributeItem, JSXAttributeValue};
+    j.opening_element.attributes.iter().any(|attr| match attr {
+        JSXAttributeItem::Attribute(a) => match &a.value {
+            Some(JSXAttributeValue::ExpressionContainer(c)) => {
+                c.expression.as_expression()
+                    .map_or(false, |e| civ_expr_has_closure_with_var(e, var_name))
+            }
+            Some(JSXAttributeValue::Element(el)) => {
+                civ_jsx_element_has_closure_with_var(el, var_name)
+            }
+            _ => false,
+        },
+        JSXAttributeItem::SpreadAttribute(s) => civ_expr_has_closure_with_var(&s.argument, var_name),
+    }) || j.children.iter().any(|child| civ_jsx_child_has_closure_with_var(child, var_name))
+}
+
+fn civ_jsx_child_has_closure_with_var<'a>(
+    child: &'a oxc_ast::ast::JSXChild<'a>,
+    var_name: &str,
+) -> bool {
+    use oxc_ast::ast::JSXChild;
+    match child {
+        JSXChild::Element(el) => civ_jsx_element_has_closure_with_var(el, var_name),
+        JSXChild::Fragment(frag) => {
+            frag.children.iter().any(|c| civ_jsx_child_has_closure_with_var(c, var_name))
+        }
+        JSXChild::ExpressionContainer(c) => {
+            c.expression.as_expression()
+                .map_or(false, |e| civ_expr_has_closure_with_var(e, var_name))
+        }
+        _ => false,
+    }
+}
+
+/// Check if any statement in `stmts` contains an Identifier with `var_name`.
+fn civ_stmts_contain_identifier<'a>(
+    stmts: &'a [oxc_ast::ast::Statement<'a>],
+    var_name: &str,
+) -> bool {
+    stmts.iter().any(|s| civ_stmt_contains_identifier(s, var_name))
+}
+
+fn civ_stmt_contains_identifier<'a>(stmt: &'a oxc_ast::ast::Statement<'a>, var_name: &str) -> bool {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::ExpressionStatement(e) => civ_expr_contains_identifier(&e.expression, var_name),
+        Statement::ReturnStatement(r) => r.argument.as_ref()
+            .map_or(false, |a| civ_expr_contains_identifier(a, var_name)),
+        Statement::BlockStatement(b) => civ_stmts_contain_identifier(&b.body, var_name),
+        Statement::IfStatement(i) => {
+            civ_expr_contains_identifier(&i.test, var_name)
+                || civ_stmt_contains_identifier(&i.consequent, var_name)
+                || i.alternate.as_ref().map_or(false, |a| civ_stmt_contains_identifier(a, var_name))
+        }
+        _ => false,
+    }
+}
+
+fn civ_expr_contains_identifier<'a>(expr: &'a oxc_ast::ast::Expression<'a>, var_name: &str) -> bool {
+    use oxc_ast::ast::Expression;
+    match expr {
+        Expression::Identifier(id) => id.name == var_name,
+        Expression::CallExpression(c) => {
+            civ_expr_contains_identifier(&c.callee, var_name)
+                || c.arguments.iter().any(|a| {
+                    a.as_expression().map_or(false, |e| civ_expr_contains_identifier(e, var_name))
+                })
+        }
+        Expression::StaticMemberExpression(s) => civ_expr_contains_identifier(&s.object, var_name),
+        Expression::ComputedMemberExpression(c) => {
+            civ_expr_contains_identifier(&c.object, var_name)
+                || civ_expr_contains_identifier(&c.expression, var_name)
+        }
+        Expression::BinaryExpression(b) => {
+            civ_expr_contains_identifier(&b.left, var_name)
+                || civ_expr_contains_identifier(&b.right, var_name)
+        }
+        Expression::LogicalExpression(l) => {
+            civ_expr_contains_identifier(&l.left, var_name)
+                || civ_expr_contains_identifier(&l.right, var_name)
+        }
+        Expression::ConditionalExpression(c) => {
+            civ_expr_contains_identifier(&c.test, var_name)
+                || civ_expr_contains_identifier(&c.consequent, var_name)
+                || civ_expr_contains_identifier(&c.alternate, var_name)
+        }
+        Expression::AssignmentExpression(a) => civ_expr_contains_identifier(&a.right, var_name),
+        Expression::SequenceExpression(s) => {
+            s.expressions.iter().any(|e| civ_expr_contains_identifier(e, var_name))
+        }
+        _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_update_on_captured_locals
+// ---------------------------------------------------------------------------
+
+/// Detect `++` / `--` (UpdateExpression) on `let` variables declared in a
+/// component/hook body that are captured inside a nested function (closure).
+///
+/// React Compiler cannot lower this pattern yet:
+///   `let counter = 2; const fn = () => { return counter++; };`
+///
+/// This emits a Todo error matching the TS compiler message:
+///   "(BuildHIR::lowerExpression) Handle UpdateExpression to variables captured within lambdas."
+fn validate_no_update_on_captured_locals<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+    semantic: &oxc_semantic::Semantic<'a>,
+) -> Result<()> {
+    use oxc_semantic::SymbolFlags;
+    let root_scope = semantic.scoping().root_scope_id();
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        let outer_lets = collect_let_names_shallow(stmts);
+        if outer_lets.is_empty() { continue; }
+        for stmt in stmts {
+            nucl_check_stmt(stmt, &outer_lets, false, semantic, root_scope)?;
+        }
+    }
+    Ok(())
+}
+
+fn nucl_check_stmt<'a>(
+    stmt: &oxc_ast::ast::Statement<'a>,
+    outer_lets: &std::collections::HashSet<String>,
+    in_closure: bool,
+    semantic: &oxc_semantic::Semantic<'a>,
+    root_scope: oxc_semantic::ScopeId,
+) -> Result<()> {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::ExpressionStatement(e) => nucl_check_expr(&e.expression, outer_lets, in_closure, semantic, root_scope)?,
+        Statement::ReturnStatement(r) => {
+            if let Some(a) = &r.argument { nucl_check_expr(a, outer_lets, in_closure, semantic, root_scope)?; }
+        }
+        Statement::VariableDeclaration(v) => {
+            for decl in &v.declarations {
+                if let Some(init) = &decl.init { nucl_check_expr(init, outer_lets, in_closure, semantic, root_scope)?; }
+            }
+        }
+        Statement::BlockStatement(b) => {
+            for s in &b.body { nucl_check_stmt(s, outer_lets, in_closure, semantic, root_scope)?; }
+        }
+        Statement::IfStatement(i) => {
+            nucl_check_stmt(&i.consequent, outer_lets, in_closure, semantic, root_scope)?;
+            if let Some(a) = &i.alternate { nucl_check_stmt(a, outer_lets, in_closure, semantic, root_scope)?; }
+        }
+        Statement::WhileStatement(w) => nucl_check_stmt(&w.body, outer_lets, in_closure, semantic, root_scope)?,
+        Statement::ForStatement(f) => nucl_check_stmt(&f.body, outer_lets, in_closure, semantic, root_scope)?,
+        Statement::FunctionDeclaration(f) => {
+            if let Some(body) = &f.body {
+                for s in &body.statements { nucl_check_stmt(s, outer_lets, true, semantic, root_scope)?; }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn nucl_check_expr<'a>(
+    expr: &oxc_ast::ast::Expression<'a>,
+    outer_lets: &std::collections::HashSet<String>,
+    in_closure: bool,
+    semantic: &oxc_semantic::Semantic<'a>,
+    root_scope: oxc_semantic::ScopeId,
+) -> Result<()> {
+    use oxc_ast::ast::Expression;
+    use oxc_semantic::SymbolFlags;
+    match expr {
+        Expression::UpdateExpression(u) if in_closure => {
+            if let oxc_ast::ast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) = &u.argument {
+                let name = id.name.as_str();
+                if outer_lets.contains(name) {
+                    let is_local_let = id.reference_id.get().and_then(|ref_id| {
+                        let sym_id = semantic.scoping().get_reference(ref_id).symbol_id()?;
+                        let sym_scope = semantic.scoping().symbol_scope_id(sym_id);
+                        if sym_scope == root_scope { return None; }
+                        let flags = semantic.scoping().symbol_flags(sym_id);
+                        if flags.contains(SymbolFlags::BlockScopedVariable)
+                            && !flags.contains(SymbolFlags::ConstVariable) {
+                            Some(())
+                        } else {
+                            None
+                        }
+                    }).is_some();
+                    if is_local_let {
+                        return Err(CompilerError::todo(
+                            "(BuildHIR::lowerExpression) Handle UpdateExpression to variables captured within lambdas.",
+                        ));
+                    }
+                }
+            }
+        }
+        Expression::ArrowFunctionExpression(arrow) => {
+            for s in &arrow.body.statements { nucl_check_stmt(s, outer_lets, true, semantic, root_scope)?; }
+        }
+        Expression::FunctionExpression(func) => {
+            if let Some(body) = &func.body {
+                for s in &body.statements { nucl_check_stmt(s, outer_lets, true, semantic, root_scope)?; }
+            }
+        }
+        Expression::CallExpression(c) => {
+            nucl_check_expr(&c.callee, outer_lets, in_closure, semantic, root_scope)?;
+            for arg in &c.arguments {
+                if let Some(e) = arg.as_expression() {
+                    nucl_check_expr(e, outer_lets, in_closure, semantic, root_scope)?;
+                }
+            }
+        }
+        Expression::LogicalExpression(l) => {
+            nucl_check_expr(&l.left, outer_lets, in_closure, semantic, root_scope)?;
+            nucl_check_expr(&l.right, outer_lets, in_closure, semantic, root_scope)?;
+        }
+        Expression::ConditionalExpression(c) => {
+            nucl_check_expr(&c.test, outer_lets, in_closure, semantic, root_scope)?;
+            nucl_check_expr(&c.consequent, outer_lets, in_closure, semantic, root_scope)?;
+            nucl_check_expr(&c.alternate, outer_lets, in_closure, semantic, root_scope)?;
+        }
+        Expression::SequenceExpression(s) => {
+            for e in &s.expressions { nucl_check_expr(e, outer_lets, in_closure, semantic, root_scope)?; }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// validate_self_referential_closures
+// ---------------------------------------------------------------------------
+
+/// Detect closures that reassign the variable they are stored in.
+///
+/// Pattern: `let callback = () => { callback = null; }` — the closure body
+/// directly reassigns `callback`, which is the variable holding this closure.
+/// This is always invalid because when the closure fires (e.g. in an event
+/// handler) it mutates a captured binding from the initial render.
+fn validate_self_referential_closures<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+    _semantic: &oxc_semantic::Semantic<'a>,
+) -> Result<()> {
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        for stmt in stmts {
+            check_stmt_for_self_ref_closure(stmt)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_stmt_for_self_ref_closure<'a>(
+    stmt: &oxc_ast::ast::Statement<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::{BindingPatternKind, Expression, Statement, VariableDeclarationKind};
+    if let Statement::VariableDeclaration(v) = stmt {
+        if v.kind == VariableDeclarationKind::Let {
+            for decl in &v.declarations {
+                let BindingPatternKind::BindingIdentifier(id) = &decl.id.kind else { continue };
+                let var_name = id.name.as_str();
+                let Some(init) = &decl.init else { continue };
+                // Check if the initializer is a closure that reassigns var_name
+                let body_stmts: Option<&[oxc_ast::ast::Statement<'a>]> = match init {
+                    Expression::ArrowFunctionExpression(arrow) => Some(&arrow.body.statements),
+                    Expression::FunctionExpression(func) => {
+                        func.body.as_ref().map(|b| b.statements.as_slice())
+                    }
+                    _ => None,
+                };
+                if let Some(body) = body_stmts {
+                    if closure_body_assigns_name(body, var_name) {
+                        return Err(CompilerError::invalid_react(format!(
+                            "Cannot reassign variable after render completes\n\n\
+                             Reassigning `{var_name}` after render has completed can cause \
+                             inconsistent behavior on subsequent renders. Consider using state instead."
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Check if a function body directly assigns to `name` (does not recurse
+/// into nested closures, which would have their own scope for this check).
+fn closure_body_assigns_name<'a>(
+    stmts: &[oxc_ast::ast::Statement<'a>],
+    name: &str,
+) -> bool {
+    use oxc_ast::ast::{AssignmentTarget, Expression, Statement};
+    for stmt in stmts {
+        match stmt {
+            Statement::ExpressionStatement(e) => {
+                if expr_assigns_name(&e.expression, name) { return true; }
+            }
+            Statement::VariableDeclaration(v) => {
+                for decl in &v.declarations {
+                    if let Some(init) = &decl.init {
+                        if expr_assigns_name(init, name) { return true; }
+                    }
+                }
+            }
+            Statement::IfStatement(i) => {
+                if closure_body_assigns_name(std::slice::from_ref(&i.consequent), name) { return true; }
+                if let Some(a) = &i.alternate {
+                    if closure_body_assigns_name(std::slice::from_ref(a), name) { return true; }
+                }
+            }
+            Statement::BlockStatement(b) => {
+                if closure_body_assigns_name(&b.body, name) { return true; }
+            }
+            // Do NOT recurse into nested closures (they have their own bindings)
+            _ => {}
+        }
+    }
+    false
+}
+
+fn expr_assigns_name<'a>(expr: &oxc_ast::ast::Expression<'a>, name: &str) -> bool {
+    use oxc_ast::ast::{AssignmentTarget, Expression};
+    match expr {
+        Expression::AssignmentExpression(a) => {
+            if let AssignmentTarget::AssignmentTargetIdentifier(id) = &a.left {
+                if id.name.as_str() == name { return true; }
+            }
+            expr_assigns_name(&a.right, name)
+        }
+        Expression::SequenceExpression(s) => s.expressions.iter().any(|e| expr_assigns_name(e, name)),
+        Expression::ConditionalExpression(c) => {
+            expr_assigns_name(&c.consequent, name) || expr_assigns_name(&c.alternate, name)
+        }
+        _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// validate_hook_return_closure_mutation
+// ---------------------------------------------------------------------------
+
+/// Detect hooks that directly return closures which reassign local `let` variables.
+///
+/// Pattern: `function useFoo() { let x = 0; return value => { x = value; }; }`
+/// The returned closure escapes the hook, so calling it later will mutate
+/// a captured binding from the initial render. This is always invalid.
+fn validate_hook_return_closure_mutation<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+    semantic: &oxc_semantic::Semantic<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind, Statement};
+
+    fn check_hook_fn<'a>(
+        func: &oxc_ast::ast::Function<'a>,
+        semantic: &oxc_semantic::Semantic<'a>,
+    ) -> Result<()> {
+        let name = func.id.as_ref().map(|id| id.name.as_str()).unwrap_or("");
+        if !is_hook_name(name) { return Ok(()); }
+        let Some(body) = &func.body else { return Ok(()); };
+        let stmts = &body.statements;
+        // Collect outer let names
+        let outer_lets = collect_let_names_shallow(stmts);
+        if outer_lets.is_empty() { return Ok(()); }
+        // Look for top-level return statements that return closures
+        for stmt in stmts {
+            if let Statement::ReturnStatement(r) = stmt {
+                if let Some(arg) = &r.argument {
+                    let body_stmts: Option<&[oxc_ast::ast::Statement<'a>]> = match arg {
+                        oxc_ast::ast::Expression::ArrowFunctionExpression(a) => Some(&a.body.statements),
+                        oxc_ast::ast::Expression::FunctionExpression(f) => {
+                            f.body.as_ref().map(|b| b.statements.as_slice())
+                        }
+                        _ => None,
+                    };
+                    if let Some(body) = body_stmts {
+                        // Check if the returned closure reassigns any outer let
+                        for outer_name in &outer_lets {
+                            if closure_assigns_name_semantic(body, outer_name, semantic) {
+                                return Err(CompilerError::invalid_react(format!(
+                                    "Cannot reassign variable after render completes\n\n\
+                                     Reassigning `{outer_name}` after render has completed can cause \
+                                     inconsistent behavior on subsequent renders. Consider using state instead."
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    for stmt in &program.body {
+        match stmt {
+            Statement::FunctionDeclaration(f) => { check_hook_fn(f, semantic)?; }
+            Statement::ExportDefaultDeclaration(d) => {
+                if let ExportDefaultDeclarationKind::FunctionDeclaration(f) = &d.declaration {
+                    check_hook_fn(f, semantic)?;
+                }
+            }
+            Statement::ExportNamedDeclaration(d) => {
+                if let Some(Declaration::FunctionDeclaration(f)) = &d.declaration {
+                    check_hook_fn(f, semantic)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Check if a closure body directly assigns `name` (using semantic to confirm
+/// it's a local let, not a parameter or const).
+fn closure_assigns_name_semantic<'a>(
+    stmts: &[oxc_ast::ast::Statement<'a>],
+    name: &str,
+    semantic: &oxc_semantic::Semantic<'a>,
+) -> bool {
+    use oxc_ast::ast::{AssignmentTarget, Expression, Statement};
+    use oxc_semantic::SymbolFlags;
+    let root_scope = semantic.scoping().root_scope_id();
+    for stmt in stmts {
+        match stmt {
+            Statement::ExpressionStatement(e) => {
+                if expr_assigns_name_semantic(&e.expression, name, semantic, root_scope) { return true; }
+            }
+            Statement::BlockStatement(b) => {
+                if closure_assigns_name_semantic(&b.body, name, semantic) { return true; }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn expr_assigns_name_semantic<'a>(
+    expr: &oxc_ast::ast::Expression<'a>,
+    name: &str,
+    semantic: &oxc_semantic::Semantic<'a>,
+    root_scope: oxc_semantic::ScopeId,
+) -> bool {
+    use oxc_ast::ast::{AssignmentTarget, Expression};
+    use oxc_semantic::SymbolFlags;
+    match expr {
+        Expression::AssignmentExpression(a) => {
+            if let AssignmentTarget::AssignmentTargetIdentifier(id) = &a.left {
+                if id.name.as_str() == name {
+                    // Confirm it's a local let (not global, not const)
+                    let is_local_let = id.reference_id.get().and_then(|ref_id| {
+                        let sym_id = semantic.scoping().get_reference(ref_id).symbol_id()?;
+                        if semantic.scoping().symbol_scope_id(sym_id) == root_scope { return None; }
+                        let flags = semantic.scoping().symbol_flags(sym_id);
+                        if flags.contains(SymbolFlags::BlockScopedVariable)
+                            && !flags.contains(SymbolFlags::ConstVariable) {
+                            Some(())
+                        } else { None }
+                    }).is_some();
+                    if is_local_let { return true; }
+                }
+            }
+            false
+        }
+        Expression::SequenceExpression(s) => {
+            s.expressions.iter().any(|e| expr_assigns_name_semantic(e, name, semantic, root_scope))
+        }
+        _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_use_before_declaration
+// ---------------------------------------------------------------------------
+
+/// Detect hook argument closures that reference a const variable declared AFTER the hook call.
+/// Pattern: `useEffect(() => setState(2), []); const [state, setState] = useState(0);`
+/// → `setState` is referenced before its declaration.
+fn validate_no_use_before_declaration<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    use std::collections::HashSet;
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        // Collect ALL const/let names declared anywhere in the body.
+        let all_decls = collect_all_local_decl_names(stmts);
+        if all_decls.is_empty() { continue; }
+
+        let mut declared_so_far: HashSet<String> = HashSet::new();
+        for stmt in stmts {
+            // Check hook calls in this statement before updating declared_so_far.
+            ubd_check_stmt(stmt, &all_decls, &declared_so_far)?;
+            // Now update declared_so_far with names declared by this statement.
+            ubd_collect_stmt_decls(stmt, &mut declared_so_far);
+        }
+    }
+    Ok(())
+}
+
+/// Collect all const/let variable names declared (at top level) in a statement list.
+fn collect_all_local_decl_names<'a>(
+    stmts: &[oxc_ast::ast::Statement<'a>],
+) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    for stmt in stmts {
+        if let oxc_ast::ast::Statement::VariableDeclaration(vd) = stmt {
+            for decl in &vd.declarations {
+                collect_binding_names(&decl.id, &mut names);
+            }
+        }
+    }
+    names
+}
+
+/// Update `declared` with names declared by `stmt`.
+fn ubd_collect_stmt_decls<'a>(
+    stmt: &oxc_ast::ast::Statement<'a>,
+    declared: &mut std::collections::HashSet<String>,
+) {
+    if let oxc_ast::ast::Statement::VariableDeclaration(vd) = stmt {
+        for decl in &vd.declarations {
+            collect_binding_names(&decl.id, declared);
+        }
+    }
+}
+
+/// Check if a statement contains a hook call whose closure argument references
+/// a not-yet-declared name from `all_decls`.
+fn ubd_check_stmt<'a>(
+    stmt: &oxc_ast::ast::Statement<'a>,
+    all_decls: &std::collections::HashSet<String>,
+    declared_so_far: &std::collections::HashSet<String>,
+) -> Result<()> {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::ExpressionStatement(e) => ubd_check_expr(&e.expression, all_decls, declared_so_far)?,
+        Statement::VariableDeclaration(vd) => {
+            for decl in &vd.declarations {
+                if let Some(init) = &decl.init {
+                    ubd_check_expr(init, all_decls, declared_so_far)?;
+                }
+            }
+        }
+        Statement::ReturnStatement(r) => {
+            if let Some(arg) = &r.argument {
+                ubd_check_expr(arg, all_decls, declared_so_far)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn ubd_check_expr<'a>(
+    expr: &Expression<'a>,
+    all_decls: &std::collections::HashSet<String>,
+    declared_so_far: &std::collections::HashSet<String>,
+) -> Result<()> {
+    if let Expression::CallExpression(call) = expr {
+        let is_hook = match &call.callee {
+            Expression::Identifier(id) => is_hook_name(id.name.as_str()),
+            Expression::StaticMemberExpression(m) => is_hook_name(m.property.name.as_str()),
+            _ => false,
+        };
+        if is_hook {
+            for arg in &call.arguments {
+                if let Some(e) = arg.as_expression() {
+                    let body_stmts: Option<&[oxc_ast::ast::Statement]> = match e {
+                        Expression::ArrowFunctionExpression(a) => Some(&a.body.statements),
+                        Expression::FunctionExpression(f) => f.body.as_ref().map(|b| b.statements.as_slice()),
+                        _ => None,
+                    };
+                    if let Some(body) = body_stmts {
+                        // Check if body references any name in `all_decls` that isn't `declared_so_far`.
+                        if ubd_body_refs_undeclared(body, all_decls, declared_so_far) {
+                            return Err(CompilerError::invalid_react(
+                                "Cannot access variable before it is declared",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ubd_body_refs_undeclared<'a>(
+    stmts: &[oxc_ast::ast::Statement<'a>],
+    all_decls: &std::collections::HashSet<String>,
+    declared_so_far: &std::collections::HashSet<String>,
+) -> bool {
+    use oxc_ast::ast::Statement;
+    for stmt in stmts {
+        match stmt {
+            Statement::ExpressionStatement(e) => {
+                if ubd_expr_refs_undeclared(&e.expression, all_decls, declared_so_far) { return true; }
+            }
+            Statement::ReturnStatement(r) => {
+                if let Some(arg) = &r.argument {
+                    if ubd_expr_refs_undeclared(arg, all_decls, declared_so_far) { return true; }
+                }
+            }
+            Statement::IfStatement(i) => {
+                if ubd_expr_refs_undeclared(&i.test, all_decls, declared_so_far) { return true; }
+                if ubd_body_refs_undeclared(std::slice::from_ref(&i.consequent), all_decls, declared_so_far) { return true; }
+                if let Some(alt) = &i.alternate {
+                    if ubd_body_refs_undeclared(std::slice::from_ref(alt), all_decls, declared_so_far) { return true; }
+                }
+            }
+            Statement::BlockStatement(b) => {
+                if ubd_body_refs_undeclared(&b.body, all_decls, declared_so_far) { return true; }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn ubd_expr_refs_undeclared<'a>(
+    expr: &Expression<'a>,
+    all_decls: &std::collections::HashSet<String>,
+    declared_so_far: &std::collections::HashSet<String>,
+) -> bool {
+    match expr {
+        Expression::Identifier(id) => {
+            let name = id.name.as_str();
+            // Name is in all_decls (declared somewhere in the body) but NOT yet declared
+            all_decls.contains(name) && !declared_so_far.contains(name)
+        }
+        Expression::CallExpression(call) => {
+            ubd_expr_refs_undeclared(&call.callee, all_decls, declared_so_far)
+                || call.arguments.iter().any(|a| {
+                    a.as_expression().map_or(false, |e| ubd_expr_refs_undeclared(e, all_decls, declared_so_far))
+                })
+        }
+        Expression::AssignmentExpression(a) => {
+            ubd_expr_refs_undeclared(&a.right, all_decls, declared_so_far)
+        }
+        Expression::BinaryExpression(b) => {
+            ubd_expr_refs_undeclared(&b.left, all_decls, declared_so_far)
+                || ubd_expr_refs_undeclared(&b.right, all_decls, declared_so_far)
+        }
+        Expression::LogicalExpression(l) => {
+            ubd_expr_refs_undeclared(&l.left, all_decls, declared_so_far)
+                || ubd_expr_refs_undeclared(&l.right, all_decls, declared_so_far)
+        }
+        Expression::ConditionalExpression(c) => {
+            ubd_expr_refs_undeclared(&c.test, all_decls, declared_so_far)
+                || ubd_expr_refs_undeclared(&c.consequent, all_decls, declared_so_far)
+                || ubd_expr_refs_undeclared(&c.alternate, all_decls, declared_so_far)
+        }
+        Expression::StaticMemberExpression(m) => {
+            ubd_expr_refs_undeclared(&m.object, all_decls, declared_so_far)
+        }
+        Expression::ComputedMemberExpression(m) => {
+            ubd_expr_refs_undeclared(&m.object, all_decls, declared_so_far)
+                || ubd_expr_refs_undeclared(&m.expression, all_decls, declared_so_far)
+        }
+        Expression::ArrayExpression(arr) => {
+            arr.elements.iter().any(|el| {
+                el.as_expression().map_or(false, |e| ubd_expr_refs_undeclared(e, all_decls, declared_so_far))
+            })
+        }
+        Expression::SequenceExpression(s) => {
+            s.expressions.iter().any(|e| ubd_expr_refs_undeclared(e, all_decls, declared_so_far))
+        }
+        // Don't recurse into nested closures (they have their own scope)
+        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => false,
+        _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_capturing_default_param
+// ---------------------------------------------------------------------------
+
+/// Detect component/hook functions with default parameters that are arrow functions
+/// capturing identifiers from the outer scope. The React compiler cannot safely
+/// reorder such expressions during HIR lowering.
+///
+/// Pattern: `function Component(x, y = () => { return x; })`
+fn validate_no_capturing_default_param<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind, Statement};
+
+    fn check_fn_params<'a>(func: &oxc_ast::ast::Function<'a>, name: &str) -> Result<()> {
+        if !is_component_or_hook_name_for_default_param(name) { return Ok(()); }
+        for param in &func.params.items {
+            if let Some(default_expr) = get_param_default(param) {
+                let body_stmts: Option<&[oxc_ast::ast::Statement]> = match default_expr {
+                    Expression::ArrowFunctionExpression(a) => Some(&a.body.statements),
+                    Expression::FunctionExpression(f) => f.body.as_ref().map(|b| b.statements.as_slice()),
+                    _ => None,
+                };
+                if let Some(body) = body_stmts {
+                    if closure_body_has_any_identifier(body) {
+                        return Err(CompilerError::todo(
+                            "(BuildHIR::node.lowerReorderableExpression) Expression type \
+                             `ArrowFunctionExpression` cannot be safely reordered",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    for stmt in &program.body {
+        match stmt {
+            Statement::FunctionDeclaration(f) => {
+                let name = f.id.as_ref().map(|id| id.name.as_str()).unwrap_or("");
+                check_fn_params(f, name)?;
+            }
+            Statement::ExportDefaultDeclaration(d) => {
+                if let ExportDefaultDeclarationKind::FunctionDeclaration(f) = &d.declaration {
+                    let name = f.id.as_ref().map(|id| id.name.as_str()).unwrap_or("");
+                    check_fn_params(f, name)?;
+                }
+            }
+            Statement::ExportNamedDeclaration(d) => {
+                if let Some(Declaration::FunctionDeclaration(f)) = &d.declaration {
+                    let name = f.id.as_ref().map(|id| id.name.as_str()).unwrap_or("");
+                    check_fn_params(f, name)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn is_component_or_hook_name_for_default_param(name: &str) -> bool {
+    let first = name.chars().next();
+    first.map_or(false, |c| c.is_uppercase()) || is_hook_name(name)
+}
+
+fn get_param_default<'a>(
+    param: &'a oxc_ast::ast::FormalParameter<'a>,
+) -> Option<&'a Expression<'a>> {
+    use oxc_ast::ast::BindingPatternKind;
+    if let BindingPatternKind::AssignmentPattern(ap) = &param.pattern.kind {
+        return Some(&ap.right);
+    }
+    None
+}
+
+/// Returns true if any statement in `stmts` contains an IdentifierReference
+/// (excluding `undefined`, `null`, `true`, `false`, `NaN`, `Infinity`).
+fn closure_body_has_any_identifier<'a>(stmts: &[oxc_ast::ast::Statement<'a>]) -> bool {
+    use oxc_ast::ast::Statement;
+    const WELL_KNOWN: &[&str] = &["undefined", "null", "true", "false", "NaN", "Infinity"];
+    for stmt in stmts {
+        match stmt {
+            Statement::ReturnStatement(r) => {
+                if let Some(arg) = &r.argument {
+                    if expr_has_identifier(arg, WELL_KNOWN) { return true; }
+                }
+            }
+            Statement::ExpressionStatement(e) => {
+                if expr_has_identifier(&e.expression, WELL_KNOWN) { return true; }
+            }
+            Statement::IfStatement(i) => {
+                if expr_has_identifier(&i.test, WELL_KNOWN) { return true; }
+                if closure_body_has_any_identifier(std::slice::from_ref(&i.consequent)) { return true; }
+                if let Some(alt) = &i.alternate {
+                    if closure_body_has_any_identifier(std::slice::from_ref(alt)) { return true; }
+                }
+            }
+            Statement::BlockStatement(b) => {
+                if closure_body_has_any_identifier(&b.body) { return true; }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn expr_has_identifier<'a>(expr: &Expression<'a>, well_known: &[&str]) -> bool {
+    match expr {
+        Expression::Identifier(id) => !well_known.contains(&id.name.as_str()),
+        Expression::CallExpression(call) => {
+            expr_has_identifier(&call.callee, well_known)
+                || call.arguments.iter().any(|a| {
+                    a.as_expression().map_or(false, |e| expr_has_identifier(e, well_known))
+                })
+        }
+        Expression::BinaryExpression(b) => {
+            expr_has_identifier(&b.left, well_known) || expr_has_identifier(&b.right, well_known)
+        }
+        Expression::UnaryExpression(u) => expr_has_identifier(&u.argument, well_known),
+        Expression::StaticMemberExpression(_) | Expression::ComputedMemberExpression(_) => {
+            // Accessing properties of identifiers = has identifier
+            true
+        }
+        Expression::TemplateLiteral(t) => {
+            t.expressions.iter().any(|e| expr_has_identifier(e, well_known))
+        }
+        Expression::LogicalExpression(l) => {
+            expr_has_identifier(&l.left, well_known) || expr_has_identifier(&l.right, well_known)
+        }
+        Expression::ConditionalExpression(c) => {
+            expr_has_identifier(&c.test, well_known)
+                || expr_has_identifier(&c.consequent, well_known)
+                || expr_has_identifier(&c.alternate, well_known)
+        }
+        Expression::ArrayExpression(arr) => {
+            arr.elements.iter().any(|el| {
+                if let Some(e) = el.as_expression() { expr_has_identifier(e, well_known) } else { false }
+            })
+        }
+        Expression::ObjectExpression(obj) => {
+            obj.properties.iter().any(|p| {
+                if let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(prop) = p {
+                    expr_has_identifier(&prop.value, well_known)
+                } else { false }
+            })
+        }
+        Expression::SequenceExpression(s) => {
+            s.expressions.iter().any(|e| expr_has_identifier(e, well_known))
+        }
+        // Arrow/fn bodies — recurse into them (they capture outer scope)
+        Expression::ArrowFunctionExpression(a) => closure_body_has_any_identifier(&a.body.statements),
+        Expression::FunctionExpression(f) => {
+            f.body.as_ref().map_or(false, |b| closure_body_has_any_identifier(&b.statements))
+        }
+        // Literals — don't contain identifiers
+        Expression::NumericLiteral(_) | Expression::StringLiteral(_)
+        | Expression::BooleanLiteral(_) | Expression::NullLiteral(_)
+        | Expression::BigIntLiteral(_) | Expression::RegExpLiteral(_) => false,
+        _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_escaping_let_assigner
+// ---------------------------------------------------------------------------
+
+/// Returns true if the closure body directly assigns any name in `set`
+/// (does NOT recurse into nested closures — they have their own scope).
+fn closure_body_assigns_any_in_set<'a>(
+    stmts: &[oxc_ast::ast::Statement<'a>],
+    set: &std::collections::HashSet<String>,
+) -> bool {
+    use oxc_ast::ast::{Expression, Statement};
+    for stmt in stmts {
+        match stmt {
+            Statement::ExpressionStatement(e) => {
+                if expr_assigns_any_in_set(&e.expression, set) { return true; }
+            }
+            Statement::ReturnStatement(r) => {
+                if let Some(a) = &r.argument {
+                    if expr_assigns_any_in_set(a, set) { return true; }
+                }
+            }
+            Statement::VariableDeclaration(v) => {
+                // Catch `const copy = (x = 3)` — assignment in VariableDecl initializer
+                for decl in &v.declarations {
+                    if let Some(init) = &decl.init {
+                        // Don't descend into nested function/arrow inits
+                        if !matches!(init, Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)) {
+                            if expr_assigns_any_in_set(init, set) { return true; }
+                        }
+                    }
+                }
+            }
+            Statement::IfStatement(i) => {
+                if closure_body_assigns_any_in_set(std::slice::from_ref(&i.consequent), set) { return true; }
+                if let Some(alt) = &i.alternate {
+                    if closure_body_assigns_any_in_set(std::slice::from_ref(alt), set) { return true; }
+                }
+            }
+            Statement::BlockStatement(b) => {
+                if closure_body_assigns_any_in_set(&b.body, set) { return true; }
+            }
+            // Do NOT recurse into nested closures
+            _ => {}
+        }
+    }
+    false
+}
+
+fn expr_assigns_any_in_set<'a>(
+    expr: &Expression<'a>,
+    set: &std::collections::HashSet<String>,
+) -> bool {
+    use oxc_ast::ast::AssignmentTarget;
+    match expr {
+        Expression::AssignmentExpression(a) => {
+            if let AssignmentTarget::AssignmentTargetIdentifier(id) = &a.left {
+                if set.contains(id.name.as_str()) { return true; }
+            }
+            expr_assigns_any_in_set(&a.right, set)
+        }
+        Expression::SequenceExpression(s) => s.expressions.iter().any(|e| expr_assigns_any_in_set(e, set)),
+        // Transparent wrapper: (x = 3) is ParenthesizedExpression(AssignmentExpression)
+        Expression::ParenthesizedExpression(p) => expr_assigns_any_in_set(&p.expression, set),
+        // Do NOT recurse into nested closures
+        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => false,
+        _ => false,
+    }
+}
+
+/// Collect named closures (const/let arrow/fn) whose body directly assigns any outer let.
+fn collect_direct_let_assigning_closures_from_set<'a>(
+    stmts: &[oxc_ast::ast::Statement<'a>],
+    outer_lets: &std::collections::HashSet<String>,
+) -> std::collections::HashSet<String> {
+    use oxc_ast::ast::{BindingPatternKind, Statement};
+    let mut result = std::collections::HashSet::new();
+    for stmt in stmts {
+        if let Statement::VariableDeclaration(v) = stmt {
+            for decl in &v.declarations {
+                if let Some(init) = &decl.init {
+                    let body_stmts: Option<&[oxc_ast::ast::Statement]> = match init {
+                        Expression::ArrowFunctionExpression(a) => Some(&a.body.statements),
+                        Expression::FunctionExpression(f) => f.body.as_ref().map(|b| b.statements.as_slice()),
+                        _ => None,
+                    };
+                    if let Some(body) = body_stmts {
+                        if closure_body_assigns_any_in_set(body, outer_lets) {
+                            if let BindingPatternKind::BindingIdentifier(id) = &decl.id.kind {
+                                result.insert(id.name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
+/// Detect named let-assigning closures that "escape" the component by being
+/// passed as JSX prop values or by being called inside hook-argument closures.
+///
+/// Pattern A (JSX prop): `let local; const setLocal = v => { local = v; };
+///   const onClick = v => { setLocal(v); }; return <Foo onClick={onClick} />`
+///   → `onClick` is a transitive let assigner passed as JSX prop.
+///
+/// Pattern B (hook arg): `const onMount = v => { setLocal(v); };
+///   useEffect(() => { onMount(); }, [onMount])`
+///   → The useEffect callback (anonymous) calls `onMount`, a transitive assigner.
+fn validate_no_escaping_let_assigner<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        let outer_lets = collect_let_names_shallow(stmts);
+        if outer_lets.is_empty() { continue; }
+
+        // Build the set of closures that directly or transitively assign an outer let.
+        let mut let_assigners = collect_direct_let_assigning_closures_from_set(stmts, &outer_lets);
+        if let_assigners.is_empty() { continue; }
+        // Reuse the existing transitive expansion (same logic regardless of global vs local).
+        expand_transitive_global_assigners(stmts, &mut let_assigners);
+
+        // Pattern A: named let-assigner appears as a JSX prop value.
+        check_stmts_jsx_let_assigners(stmts, &let_assigners)?;
+
+        // Pattern B: anonymous hook-argument closure calls a let assigner.
+        check_stmts_hook_arg_let_assigners(stmts, &let_assigners)?;
+    }
+    Ok(())
+}
+
+fn check_stmts_jsx_let_assigners<'a>(
+    stmts: &[oxc_ast::ast::Statement<'a>],
+    let_assigners: &std::collections::HashSet<String>,
+) -> Result<()> {
+    use oxc_ast::ast::Statement;
+    for stmt in stmts {
+        match stmt {
+            Statement::ReturnStatement(r) => {
+                if let Some(expr) = &r.argument {
+                    check_expr_jsx_let_assigners(expr, let_assigners)?;
+                }
+            }
+            Statement::ExpressionStatement(e) => {
+                check_expr_jsx_let_assigners(&e.expression, let_assigners)?;
+            }
+            Statement::VariableDeclaration(v) => {
+                for decl in &v.declarations {
+                    if let Some(init) = &decl.init {
+                        check_expr_jsx_let_assigners(init, let_assigners)?;
+                    }
+                }
+            }
+            Statement::IfStatement(i) => {
+                check_stmts_jsx_let_assigners(std::slice::from_ref(&i.consequent), let_assigners)?;
+                if let Some(alt) = &i.alternate {
+                    check_stmts_jsx_let_assigners(std::slice::from_ref(alt), let_assigners)?;
+                }
+            }
+            Statement::BlockStatement(b) => {
+                check_stmts_jsx_let_assigners(&b.body, let_assigners)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn check_expr_jsx_let_assigners<'a>(
+    expr: &Expression<'a>,
+    let_assigners: &std::collections::HashSet<String>,
+) -> Result<()> {
+    match expr {
+        Expression::JSXElement(jsx) => {
+            for attr_item in &jsx.opening_element.attributes {
+                if let oxc_ast::ast::JSXAttributeItem::Attribute(attr) = attr_item {
+                    if let Some(oxc_ast::ast::JSXAttributeValue::ExpressionContainer(c)) = &attr.value {
+                        if let Some(e) = c.expression.as_expression() {
+                            if let Expression::Identifier(id) = e {
+                                if let_assigners.contains(id.name.as_str()) {
+                                    return Err(CompilerError::invalid_react(
+                                        "Cannot reassign a variable after render completes. \
+                                         Consider using state instead.",
+                                    ));
+                                }
+                            }
+                            check_expr_jsx_let_assigners(e, let_assigners)?;
+                        }
+                    }
+                }
+            }
+            for child in &jsx.children {
+                if let oxc_ast::ast::JSXChild::ExpressionContainer(c) = child {
+                    if let Some(e) = c.expression.as_expression() {
+                        check_expr_jsx_let_assigners(e, let_assigners)?;
+                    }
+                }
+            }
+        }
+        Expression::JSXFragment(frag) => {
+            for child in &frag.children {
+                if let oxc_ast::ast::JSXChild::ExpressionContainer(c) = child {
+                    if let Some(e) = c.expression.as_expression() {
+                        check_expr_jsx_let_assigners(e, let_assigners)?;
+                    }
+                }
+            }
+        }
+        Expression::ConditionalExpression(c) => {
+            check_expr_jsx_let_assigners(&c.test, let_assigners)?;
+            check_expr_jsx_let_assigners(&c.consequent, let_assigners)?;
+            check_expr_jsx_let_assigners(&c.alternate, let_assigners)?;
+        }
+        Expression::LogicalExpression(l) => {
+            check_expr_jsx_let_assigners(&l.left, let_assigners)?;
+            check_expr_jsx_let_assigners(&l.right, let_assigners)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Pattern B: walk statements looking for hook call expressions whose
+/// closure arguments call a member of `let_assigners`.
+fn check_stmts_hook_arg_let_assigners<'a>(
+    stmts: &[oxc_ast::ast::Statement<'a>],
+    let_assigners: &std::collections::HashSet<String>,
+) -> Result<()> {
+    use oxc_ast::ast::Statement;
+    for stmt in stmts {
+        match stmt {
+            Statement::ExpressionStatement(e) => {
+                check_expr_hook_arg_let_assigners(&e.expression, let_assigners)?;
+            }
+            Statement::VariableDeclaration(v) => {
+                for decl in &v.declarations {
+                    if let Some(init) = &decl.init {
+                        check_expr_hook_arg_let_assigners(init, let_assigners)?;
+                    }
+                }
+            }
+            Statement::ReturnStatement(r) => {
+                if let Some(arg) = &r.argument {
+                    check_expr_hook_arg_let_assigners(arg, let_assigners)?;
+                }
+            }
+            Statement::IfStatement(i) => {
+                check_stmts_hook_arg_let_assigners(std::slice::from_ref(&i.consequent), let_assigners)?;
+                if let Some(alt) = &i.alternate {
+                    check_stmts_hook_arg_let_assigners(std::slice::from_ref(alt), let_assigners)?;
+                }
+            }
+            Statement::BlockStatement(b) => {
+                check_stmts_hook_arg_let_assigners(&b.body, let_assigners)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn check_expr_hook_arg_let_assigners<'a>(
+    expr: &Expression<'a>,
+    let_assigners: &std::collections::HashSet<String>,
+) -> Result<()> {
+    if let Expression::CallExpression(call) = expr {
+        // Check if this is a hook call
+        let is_hook_call = match &call.callee {
+            Expression::Identifier(id) => is_hook_name(id.name.as_str()),
+            Expression::StaticMemberExpression(m) => is_hook_name(m.property.name.as_str()),
+            _ => false,
+        };
+        if is_hook_call {
+            for arg in &call.arguments {
+                if let Some(e) = arg.as_expression() {
+                    // For arrow/function arguments, check if their body calls any let_assigner
+                    let body_stmts: Option<&[oxc_ast::ast::Statement]> = match e {
+                        Expression::ArrowFunctionExpression(a) => Some(&a.body.statements),
+                        Expression::FunctionExpression(f) => f.body.as_ref().map(|b| b.statements.as_slice()),
+                        _ => None,
+                    };
+                    if let Some(body) = body_stmts {
+                        if closure_body_calls_any(body, let_assigners) {
+                            return Err(CompilerError::invalid_react(
+                                "Cannot reassign a variable after render completes. \
+                                 Consider using state instead.",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        // Also recurse into non-hook call expressions (e.g. nested calls in JSX)
+        for arg in &call.arguments {
+            if let Some(e) = arg.as_expression() {
+                check_expr_hook_arg_let_assigners(e, let_assigners)?;
+            }
+        }
+        check_expr_hook_arg_let_assigners(&call.callee, let_assigners)?;
     }
     Ok(())
 }
@@ -3842,6 +6813,12 @@ fn collect_ref_names_from_stmt<'a>(
                             refs.insert(id.name.to_string());
                         }
                     }
+                    // `const aliasedRef = ref` — direct identifier alias of a known ref
+                    if let Expression::Identifier(src) = init {
+                        if refs.contains(src.name.as_str()) {
+                            refs.insert(id.name.to_string());
+                        }
+                    }
                 }
             }
         }
@@ -4046,6 +7023,11 @@ fn check_expr_for_ref_access<'a>(
             let is_deferred_hook = matches!(callee_name,
                 Some("useEffect" | "useLayoutEffect" | "useInsertionEffect" | "useCallback")
             );
+            // Synchronous hooks whose callbacks run during render: always recurse
+            // into their callback bodies regardless of `deep` mode.
+            let is_synchronous_hook = matches!(callee_name,
+                Some("useState" | "useReducer" | "useMemo" | "useImperativeHandle")
+            );
             check_expr_for_ref_access(&call.callee, refs, deep)?;
             for (i, arg) in call.arguments.iter().enumerate() {
                 // Skip the callback (first arg) for deferred hooks
@@ -4053,6 +7035,22 @@ fn check_expr_for_ref_access<'a>(
                     continue;
                 }
                 if let Some(e) = arg.as_expression() {
+                    // For synchronous hooks, always recurse into function bodies
+                    if is_synchronous_hook {
+                        match e {
+                            Expression::ArrowFunctionExpression(arrow) => {
+                                check_stmts_for_ref_access(&arrow.body.statements, refs, deep)?;
+                                continue;
+                            }
+                            Expression::FunctionExpression(func) => {
+                                if let Some(body) = &func.body {
+                                    check_stmts_for_ref_access(&body.statements, refs, deep)?;
+                                }
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
                     check_expr_for_ref_access(e, refs, deep)?;
                 }
             }
@@ -4069,13 +7067,22 @@ fn check_expr_for_ref_access<'a>(
         // Recurse into nested closures only in deep mode
         Expression::ArrowFunctionExpression(arrow) => {
             if deep {
-                check_stmts_for_ref_access(&arrow.body.statements, refs, deep)?;
+                // Collect any ref aliases declared inside this closure before checking
+                let mut inner_refs = refs.clone();
+                for stmt in &arrow.body.statements {
+                    collect_ref_names_from_stmt(stmt, &mut inner_refs);
+                }
+                check_stmts_for_ref_access(&arrow.body.statements, &inner_refs, deep)?;
             }
         }
         Expression::FunctionExpression(func) => {
             if deep {
                 if let Some(body) = &func.body {
-                    check_stmts_for_ref_access(&body.statements, refs, deep)?;
+                    let mut inner_refs = refs.clone();
+                    for stmt in &body.statements {
+                        collect_ref_names_from_stmt(stmt, &mut inner_refs);
+                    }
+                    check_stmts_for_ref_access(&body.statements, &inner_refs, deep)?;
                 }
             }
         }
@@ -4104,6 +7111,24 @@ fn check_expr_for_ref_access<'a>(
                     if let Some(e) = c.expression.as_expression() {
                         check_expr_for_ref_access(e, refs, deep)?;
                     }
+                }
+            }
+        }
+        // Object literals — recurse into property values (catches `{val: ref.current}`)
+        Expression::ObjectExpression(obj) => {
+            for prop in &obj.properties {
+                if let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(p) = prop {
+                    check_expr_for_ref_access(&p.value, refs, deep)?;
+                }
+            }
+        }
+        // Array literals — recurse into elements
+        Expression::ArrayExpression(arr) => {
+            for elem in &arr.elements {
+                if let oxc_ast::ast::ArrayExpressionElement::SpreadElement(s) = elem {
+                    check_expr_for_ref_access(&s.argument, refs, deep)?;
+                } else if let Some(e) = elem.as_expression() {
+                    check_expr_for_ref_access(e, refs, deep)?;
                 }
             }
         }
@@ -4235,11 +7260,34 @@ fn collect_component_hook_bodies<'a>(
                 _ => {}
             },
             Statement::ExportNamedDeclaration(d) => {
-                if let Some(Declaration::FunctionDeclaration(f)) = &d.declaration {
-                    let name = f.id.as_ref().map(|id| id.name.as_str()).unwrap_or("");
-                    if is_component_or_hook(name) {
-                        if let Some(body) = &f.body { bodies.push(&body.statements); }
+                match &d.declaration {
+                    Some(Declaration::FunctionDeclaration(f)) => {
+                        let name = f.id.as_ref().map(|id| id.name.as_str()).unwrap_or("");
+                        if is_component_or_hook(name) {
+                            if let Some(body) = &f.body { bodies.push(&body.statements); }
+                        }
                     }
+                    Some(Declaration::VariableDeclaration(v)) => {
+                        for decl in &v.declarations {
+                            let name = match &decl.id.kind {
+                                oxc_ast::ast::BindingPatternKind::BindingIdentifier(id) => id.name.as_str(),
+                                _ => "",
+                            };
+                            if !is_component_or_hook(name) { continue; }
+                            if let Some(init) = &decl.init {
+                                match init {
+                                    Expression::ArrowFunctionExpression(a) => {
+                                        bodies.push(&a.body.statements);
+                                    }
+                                    Expression::FunctionExpression(f) => {
+                                        if let Some(body) = &f.body { bodies.push(&body.statements); }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             Statement::VariableDeclaration(v) => {
@@ -4266,4 +7314,2360 @@ fn collect_component_hook_bodies<'a>(
         }
     }
     bodies
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_passing_ref_to_function
+// ---------------------------------------------------------------------------
+
+/// When @validateRefAccessDuringRender is explicitly enabled and
+/// @enableTreatRefLikeIdentifiersAsRefs is not set, passing a ref object
+/// (not ref.current) to a non-hook bare identifier function is an error.
+fn validate_no_passing_ref_to_function<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind, Statement};
+
+    fn check_fn_body<'a>(
+        stmts: &[Statement<'a>],
+        params: &oxc_ast::ast::FormalParameters<'a>,
+    ) -> Result<()> {
+        let mut refs: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for stmt in stmts {
+            collect_ref_names_from_stmt(stmt, &mut refs);
+        }
+        for param in &params.items {
+            collect_ref_names_from_binding_pattern(&param.pattern, &mut refs);
+        }
+        if refs.is_empty() {
+            return Ok(());
+        }
+        check_stmts_no_ref_pass(stmts, &refs)
+    }
+
+    for stmt in &program.body {
+        match stmt {
+            Statement::FunctionDeclaration(f) => {
+                if let Some(body) = &f.body {
+                    if !has_use_no_memo_directive(body) {
+                        check_fn_body(&body.statements, &f.params)?;
+                    }
+                }
+            }
+            Statement::ExportDefaultDeclaration(d) => match &d.declaration {
+                ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
+                    if let Some(body) = &f.body {
+                        if !has_use_no_memo_directive(body) {
+                            check_fn_body(&body.statements, &f.params)?;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            Statement::ExportNamedDeclaration(d) => {
+                if let Some(Declaration::FunctionDeclaration(f)) = &d.declaration {
+                    if let Some(body) = &f.body {
+                        if !has_use_no_memo_directive(body) {
+                            check_fn_body(&body.statements, &f.params)?;
+                        }
+                    }
+                }
+            }
+            Statement::VariableDeclaration(v) => {
+                for decl in &v.declarations {
+                    if let Some(init) = &decl.init {
+                        match init {
+                            Expression::FunctionExpression(f) => {
+                                if let Some(body) = &f.body {
+                                    if !has_use_no_memo_directive(body) {
+                                        check_fn_body(&body.statements, &f.params)?;
+                                    }
+                                }
+                            }
+                            Expression::ArrowFunctionExpression(a) => {
+                                if !has_use_no_memo_directive(&a.body) {
+                                    let mut refs = std::collections::HashSet::new();
+                                    for stmt in &a.body.statements {
+                                        collect_ref_names_from_stmt(stmt, &mut refs);
+                                    }
+                                    check_stmts_no_ref_pass(&a.body.statements, &refs)?;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn check_stmts_no_ref_pass<'a>(
+    stmts: &[oxc_ast::ast::Statement<'a>],
+    refs: &std::collections::HashSet<String>,
+) -> Result<()> {
+    for stmt in stmts {
+        check_stmt_no_ref_pass(stmt, refs)?;
+    }
+    Ok(())
+}
+
+fn check_stmt_no_ref_pass<'a>(
+    stmt: &oxc_ast::ast::Statement<'a>,
+    refs: &std::collections::HashSet<String>,
+) -> Result<()> {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::ExpressionStatement(e) => check_expr_no_ref_pass(&e.expression, refs)?,
+        Statement::VariableDeclaration(v) => {
+            for d in &v.declarations {
+                if let Some(init) = &d.init {
+                    check_expr_no_ref_pass(init, refs)?;
+                }
+            }
+        }
+        Statement::ReturnStatement(r) => {
+            if let Some(a) = &r.argument {
+                check_expr_no_ref_pass(a, refs)?;
+            }
+        }
+        Statement::IfStatement(i) => {
+            check_expr_no_ref_pass(&i.test, refs)?;
+            check_stmt_no_ref_pass(&i.consequent, refs)?;
+            if let Some(alt) = &i.alternate {
+                check_stmt_no_ref_pass(alt, refs)?;
+            }
+        }
+        Statement::BlockStatement(b) => check_stmts_no_ref_pass(&b.body, refs)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn check_expr_no_ref_pass<'a>(
+    expr: &Expression<'a>,
+    refs: &std::collections::HashSet<String>,
+) -> Result<()> {
+    match expr {
+        Expression::CallExpression(call) => {
+            // Only check calls where callee is a bare identifier (not a method call).
+            // Method calls like props.render(ref) are intentional render helpers.
+            if let Expression::Identifier(callee_id) = &call.callee {
+                let callee_name = callee_id.name.as_str();
+                // Skip hooks (they accept refs intentionally: useImperativeHandle, etc.)
+                let is_hook = callee_name.starts_with("use")
+                    && callee_name.chars().next().map_or(false, |c| c == 'u');
+                if !is_hook {
+                    for arg in &call.arguments {
+                        if let Some(Expression::Identifier(arg_id)) = arg.as_expression() {
+                            if refs.contains(arg_id.name.as_str()) {
+                                return Err(CompilerError::invalid_react(
+                                    "Passing a ref to a function may read its value during render\n\nReact refs are values that are not needed for rendering. Refs should only be accessed outside of render, such as in event handlers or effects.",
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            // Recurse into arguments and callee
+            check_expr_no_ref_pass(&call.callee, refs)?;
+            for arg in &call.arguments {
+                if let Some(e) = arg.as_expression() {
+                    check_expr_no_ref_pass(e, refs)?;
+                }
+            }
+        }
+        Expression::LogicalExpression(l) => {
+            check_expr_no_ref_pass(&l.left, refs)?;
+            check_expr_no_ref_pass(&l.right, refs)?;
+        }
+        Expression::ConditionalExpression(c) => {
+            check_expr_no_ref_pass(&c.test, refs)?;
+            check_expr_no_ref_pass(&c.consequent, refs)?;
+            check_expr_no_ref_pass(&c.alternate, refs)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_freezing_known_mutable_functions
+// ---------------------------------------------------------------------------
+
+/// @validateNoFreezingKnownMutableFunctions: detect when a function that
+/// captures and mutates a locally-created mutable (Map/Set/WeakMap/WeakSet)
+/// is passed to a hook as an argument, passed as a JSX attribute, or returned.
+fn validate_no_freezing_known_mutable_functions<'a>(
+    source: &str,
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    let first = source.lines().next().unwrap_or("");
+    if !first.contains("@validateNoFreezingKnownMutableFunctions") {
+        return Ok(());
+    }
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        check_stmts_for_mutable_fn_freeze(stmts)?;
+    }
+    Ok(())
+}
+
+fn check_stmts_for_mutable_fn_freeze<'a>(
+    stmts: &[oxc_ast::ast::Statement<'a>],
+) -> Result<()> {
+    use oxc_ast::ast::{BindingPatternKind, Statement};
+
+    // Step 1: Collect variables initialized with mutable constructors.
+    let mut mutable_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for stmt in stmts {
+        if let Statement::VariableDeclaration(v) = stmt {
+            for decl in &v.declarations {
+                if let Some(init) = &decl.init {
+                    if is_mutable_constructor_call(init) {
+                        if let BindingPatternKind::BindingIdentifier(id) = &decl.id.kind {
+                            mutable_vars.insert(id.name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if mutable_vars.is_empty() {
+        return Ok(());
+    }
+
+    // Step 2: Collect variable names that point to mutating functions.
+    let mut mutating_fn_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for stmt in stmts {
+        if let Statement::VariableDeclaration(v) = stmt {
+            for decl in &v.declarations {
+                if let Some(init) = &decl.init {
+                    let is_mutating = match init {
+                        Expression::ArrowFunctionExpression(arrow) => {
+                            fn_stmts_mutate_vars(&arrow.body.statements, &mutable_vars)
+                        }
+                        Expression::FunctionExpression(func) => {
+                            func.body.as_ref().map_or(false, |b| {
+                                fn_stmts_mutate_vars(&b.statements, &mutable_vars)
+                            })
+                        }
+                        _ => false,
+                    };
+                    if is_mutating {
+                        if let BindingPatternKind::BindingIdentifier(id) = &decl.id.kind {
+                            mutating_fn_vars.insert(id.name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Step 3: Check for violations.
+    for stmt in stmts {
+        check_stmt_for_mutable_fn_escape(stmt, &mutable_vars, &mutating_fn_vars)?;
+    }
+    Ok(())
+}
+
+fn is_mutable_constructor_call(expr: &Expression) -> bool {
+    if let Expression::NewExpression(n) = expr {
+        if let Expression::Identifier(callee) = &n.callee {
+            return matches!(callee.name.as_str(), "Map" | "Set" | "WeakMap" | "WeakSet");
+        }
+    }
+    false
+}
+
+/// Returns true if any statement in `stmts` calls a mutating method on a variable
+/// in `mutable_vars` (e.g., cache.set(...), cache.add(...)).
+fn fn_stmts_mutate_vars<'a>(
+    stmts: &[oxc_ast::ast::Statement<'a>],
+    mutable_vars: &std::collections::HashSet<String>,
+) -> bool {
+    fn expr_mutates(expr: &Expression, mutable_vars: &std::collections::HashSet<String>) -> bool {
+        match expr {
+            Expression::CallExpression(call) => {
+                if let Expression::StaticMemberExpression(m) = &call.callee {
+                    if let Expression::Identifier(obj) = &m.object {
+                        if mutable_vars.contains(obj.name.as_str()) {
+                            let method = m.property.name.as_str();
+                            if matches!(method, "set" | "add" | "delete" | "clear"
+                                | "push" | "pop" | "splice" | "shift" | "unshift") {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                for arg in &call.arguments {
+                    if let Some(e) = arg.as_expression() {
+                        if expr_mutates(e, mutable_vars) {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+            Expression::AssignmentExpression(a) => {
+                if let oxc_ast::ast::AssignmentTarget::StaticMemberExpression(m) = &a.left {
+                    if let Expression::Identifier(obj) = &m.object {
+                        if mutable_vars.contains(obj.name.as_str()) {
+                            return true;
+                        }
+                    }
+                }
+                expr_mutates(&a.right, mutable_vars)
+            }
+            _ => false,
+        }
+    }
+    for stmt in stmts {
+        match stmt {
+            oxc_ast::ast::Statement::ExpressionStatement(e) => {
+                if expr_mutates(&e.expression, mutable_vars) {
+                    return true;
+                }
+            }
+            oxc_ast::ast::Statement::VariableDeclaration(v) => {
+                for decl in &v.declarations {
+                    if let Some(init) = &decl.init {
+                        if expr_mutates(init, mutable_vars) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            oxc_ast::ast::Statement::ReturnStatement(r) => {
+                if let Some(a) = &r.argument {
+                    if expr_mutates(a, mutable_vars) {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn check_stmt_for_mutable_fn_escape<'a>(
+    stmt: &oxc_ast::ast::Statement<'a>,
+    mutable_vars: &std::collections::HashSet<String>,
+    mutating_fn_vars: &std::collections::HashSet<String>,
+) -> Result<()> {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::ReturnStatement(r) => {
+            if let Some(arg) = &r.argument {
+                // Check for direct function return (arrow/function expr/identifier)
+                check_return_expr_for_mutable_fn_escape(arg, mutable_vars, mutating_fn_vars)?;
+                // Also check JSX expressions returned (e.g., return <Foo fn={fn} />)
+                check_expr_for_mutable_fn_escape(arg, mutable_vars, mutating_fn_vars)?;
+            }
+        }
+        Statement::ExpressionStatement(e) => {
+            check_expr_for_mutable_fn_escape(&e.expression, mutable_vars, mutating_fn_vars)?;
+        }
+        Statement::VariableDeclaration(v) => {
+            for decl in &v.declarations {
+                if let Some(init) = &decl.init {
+                    check_expr_for_mutable_fn_escape(init, mutable_vars, mutating_fn_vars)?;
+                }
+            }
+        }
+        Statement::IfStatement(i) => {
+            check_stmt_for_mutable_fn_escape(&i.consequent, mutable_vars, mutating_fn_vars)?;
+            if let Some(alt) = &i.alternate {
+                check_stmt_for_mutable_fn_escape(alt, mutable_vars, mutating_fn_vars)?;
+            }
+        }
+        Statement::BlockStatement(b) => {
+            for s in &b.body {
+                check_stmt_for_mutable_fn_escape(s, mutable_vars, mutating_fn_vars)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn mutable_fn_freeze_error() -> crate::error::CompilerError {
+    CompilerError::invalid_react(
+        "Cannot modify local variables after render completes\n\nThis argument is a function which may reassign or mutate a local variable after render, which can cause inconsistent behavior on subsequent renders. Consider using state instead.",
+    )
+}
+
+fn check_expr_for_mutable_fn_escape<'a>(
+    expr: &Expression<'a>,
+    mutable_vars: &std::collections::HashSet<String>,
+    mutating_fn_vars: &std::collections::HashSet<String>,
+) -> Result<()> {
+    match expr {
+        // Hook call: check if any argument is a mutating function
+        Expression::CallExpression(call) => {
+            let callee_name = match &call.callee {
+                Expression::Identifier(id) => Some(id.name.as_str()),
+                Expression::StaticMemberExpression(m) => Some(m.property.name.as_str()),
+                _ => None,
+            };
+            let is_hook = callee_name.map_or(false, |n| {
+                n.starts_with("use") && n.chars().next().map_or(false, |c| c == 'u')
+            });
+            if is_hook {
+                for arg in &call.arguments {
+                    if let Some(e) = arg.as_expression() {
+                        match e {
+                            Expression::ArrowFunctionExpression(arrow) => {
+                                if fn_stmts_mutate_vars(&arrow.body.statements, mutable_vars) {
+                                    return Err(mutable_fn_freeze_error());
+                                }
+                            }
+                            Expression::FunctionExpression(func) => {
+                                if let Some(body) = &func.body {
+                                    if fn_stmts_mutate_vars(&body.statements, mutable_vars) {
+                                        return Err(mutable_fn_freeze_error());
+                                    }
+                                }
+                            }
+                            Expression::Identifier(id) => {
+                                if mutating_fn_vars.contains(id.name.as_str()) {
+                                    return Err(mutable_fn_freeze_error());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        // JSX: check if any attribute value is a mutating function (named or inline)
+        Expression::JSXElement(jsx) => {
+            for attr in &jsx.opening_element.attributes {
+                if let oxc_ast::ast::JSXAttributeItem::Attribute(a) = attr {
+                    if let Some(oxc_ast::ast::JSXAttributeValue::ExpressionContainer(c)) = &a.value {
+                        if let Some(e) = c.expression.as_expression() {
+                            match e {
+                                Expression::Identifier(id) => {
+                                    if mutating_fn_vars.contains(id.name.as_str()) {
+                                        return Err(mutable_fn_freeze_error());
+                                    }
+                                }
+                                Expression::ArrowFunctionExpression(arrow) => {
+                                    if fn_stmts_mutate_vars(&arrow.body.statements, mutable_vars) {
+                                        return Err(mutable_fn_freeze_error());
+                                    }
+                                }
+                                Expression::FunctionExpression(func) => {
+                                    if let Some(body) = &func.body {
+                                        if fn_stmts_mutate_vars(&body.statements, mutable_vars) {
+                                            return Err(mutable_fn_freeze_error());
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Check a return expression for mutating function escape.
+fn check_return_expr_for_mutable_fn_escape<'a>(
+    expr: &Expression<'a>,
+    mutable_vars: &std::collections::HashSet<String>,
+    mutating_fn_vars: &std::collections::HashSet<String>,
+) -> Result<()> {
+    match expr {
+        Expression::ArrowFunctionExpression(arrow) => {
+            if fn_stmts_mutate_vars(&arrow.body.statements, mutable_vars) {
+                return Err(mutable_fn_freeze_error());
+            }
+        }
+        Expression::FunctionExpression(func) => {
+            if let Some(body) = &func.body {
+                if fn_stmts_mutate_vars(&body.statements, mutable_vars) {
+                    return Err(mutable_fn_freeze_error());
+                }
+            }
+        }
+        Expression::Identifier(id) => {
+            if mutating_fn_vars.contains(id.name.as_str()) {
+                return Err(mutable_fn_freeze_error());
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_destructured_catch
+// ---------------------------------------------------------------------------
+/// Detect `catch` clauses with destructuring patterns (object/array).
+/// e.g., `catch ({ status }) { ... }` — our HIR lowering can't handle this.
+fn validate_no_destructured_catch<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::{BindingPatternKind, Statement};
+
+    fn check_stmts<'a>(stmts: &[oxc_ast::ast::Statement<'a>]) -> Result<()> {
+        for stmt in stmts {
+            check_stmt(stmt)?;
+        }
+        Ok(())
+    }
+
+    fn check_stmt<'a>(stmt: &oxc_ast::ast::Statement<'a>) -> Result<()> {
+        match stmt {
+            Statement::TryStatement(ts) => {
+                if let Some(handler) = &ts.handler {
+                    if let Some(param) = &handler.param {
+                        match &param.pattern.kind {
+                            BindingPatternKind::ObjectPattern(_)
+                            | BindingPatternKind::ArrayPattern(_) => {
+                                return Err(CompilerError::todo(
+                                    "Destructuring patterns in catch clauses are not yet supported",
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+                    check_stmts(&handler.body.body)?;
+                }
+                check_stmts(&ts.block.body)?;
+                if let Some(fin) = &ts.finalizer {
+                    check_stmts(&fin.body)?;
+                }
+            }
+            Statement::BlockStatement(b) => check_stmts(&b.body)?,
+            Statement::IfStatement(i) => {
+                check_stmt(&i.consequent)?;
+                if let Some(a) = &i.alternate { check_stmt(a)?; }
+            }
+            Statement::WhileStatement(w) => check_stmt(&w.body)?,
+            Statement::ForStatement(f) => check_stmt(&f.body)?,
+            Statement::ForInStatement(f) => check_stmt(&f.body)?,
+            Statement::ForOfStatement(f) => check_stmt(&f.body)?,
+            Statement::FunctionDeclaration(f) => {
+                if let Some(body) = &f.body { check_stmts(&body.statements)?; }
+            }
+            Statement::VariableDeclaration(vd) => {
+                for decl in &vd.declarations {
+                    if let Some(init) = &decl.init {
+                        check_expr_for_catch(init)?;
+                    }
+                }
+            }
+            Statement::ReturnStatement(r) => {
+                if let Some(a) = &r.argument { check_expr_for_catch(a)?; }
+            }
+            Statement::ExpressionStatement(e) => check_expr_for_catch(&e.expression)?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn check_expr_for_catch<'a>(expr: &oxc_ast::ast::Expression<'a>) -> Result<()> {
+        use oxc_ast::ast::Expression;
+        match expr {
+            Expression::ArrowFunctionExpression(a) => check_stmts(&a.body.statements),
+            Expression::FunctionExpression(f) => {
+                if let Some(b) = &f.body { check_stmts(&b.statements) } else { Ok(()) }
+            }
+            Expression::CallExpression(call) => {
+                for arg in &call.arguments {
+                    if let Some(e) = arg.as_expression() {
+                        check_expr_for_catch(e)?;
+                    }
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        check_stmts(stmts)?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_catch_binding_captured_by_closure
+// ---------------------------------------------------------------------------
+/// Detect catch bindings (simple identifiers) that are referenced inside
+/// a nested closure (arrow function / function expression) within the catch body.
+/// e.g., `catch (err) { setState(() => ({ error: err })) }`
+fn validate_no_catch_binding_captured_by_closure<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::Statement;
+
+    fn check_stmts<'a>(stmts: &[oxc_ast::ast::Statement<'a>]) -> Result<()> {
+        for stmt in stmts {
+            check_stmt(stmt)?;
+        }
+        Ok(())
+    }
+
+    fn check_stmt<'a>(stmt: &oxc_ast::ast::Statement<'a>) -> Result<()> {
+        match stmt {
+            Statement::TryStatement(ts) => {
+                check_stmts(&ts.block.body)?;
+                if let Some(handler) = &ts.handler {
+                    // Only flag simple identifier catch bindings
+                    if let Some(param) = &handler.param {
+                        use oxc_ast::ast::BindingPatternKind;
+                        if let BindingPatternKind::BindingIdentifier(id) = &param.pattern.kind {
+                            let catch_name = id.name.as_str();
+                            // Check if any closure in the catch body captures catch_name
+                            if catch_body_closure_captures(&handler.body.body, catch_name) {
+                                return Err(CompilerError::todo(
+                                    "Catch binding captured by nested closure is not yet supported",
+                                ));
+                            }
+                        }
+                    }
+                    check_stmts(&handler.body.body)?;
+                }
+                if let Some(fin) = &ts.finalizer {
+                    check_stmts(&fin.body)?;
+                }
+            }
+            Statement::BlockStatement(b) => check_stmts(&b.body)?,
+            Statement::IfStatement(i) => {
+                check_stmt(&i.consequent)?;
+                if let Some(a) = &i.alternate { check_stmt(a)?; }
+            }
+            Statement::WhileStatement(w) => check_stmt(&w.body)?,
+            Statement::ForStatement(f) => check_stmt(&f.body)?,
+            Statement::FunctionDeclaration(f) => {
+                if let Some(body) = &f.body { check_stmts(&body.statements)?; }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Check if any DIRECT closure in `stmts` (not deeply nested) references `name`
+    fn catch_body_closure_captures<'a>(
+        stmts: &[oxc_ast::ast::Statement<'a>],
+        name: &str,
+    ) -> bool {
+        use oxc_ast::ast::Statement;
+        for stmt in stmts {
+            match stmt {
+                Statement::ExpressionStatement(e) => {
+                    if expr_contains_closure_capturing(& e.expression, name) { return true; }
+                }
+                Statement::VariableDeclaration(vd) => {
+                    for decl in &vd.declarations {
+                        if let Some(init) = &decl.init {
+                            if expr_contains_closure_capturing(init, name) { return true; }
+                        }
+                    }
+                }
+                Statement::ReturnStatement(r) => {
+                    if let Some(a) = &r.argument {
+                        if expr_contains_closure_capturing(a, name) { return true; }
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Check if `expr` contains (or IS) a closure that directly references `name`
+    fn expr_contains_closure_capturing<'a>(
+        expr: &oxc_ast::ast::Expression<'a>,
+        name: &str,
+    ) -> bool {
+        use oxc_ast::ast::Expression;
+        match expr {
+            Expression::ParenthesizedExpression(p) => {
+                expr_contains_closure_capturing(&p.expression, name)
+            }
+            Expression::ArrowFunctionExpression(a) => {
+                // Only flag if `name` isn't shadowed by this arrow's own params
+                let shadowed = a.params.items.iter().any(|p| {
+                    use oxc_ast::ast::BindingPatternKind;
+                    matches!(&p.pattern.kind, BindingPatternKind::BindingIdentifier(id) if id.name.as_str() == name)
+                });
+                if shadowed { false } else { closure_stmts_reference_name(&a.body.statements, name) }
+            }
+            Expression::FunctionExpression(f) => {
+                let shadowed = f.params.items.iter().any(|p| {
+                    use oxc_ast::ast::BindingPatternKind;
+                    matches!(&p.pattern.kind, BindingPatternKind::BindingIdentifier(id) if id.name.as_str() == name)
+                });
+                if shadowed { false } else {
+                    f.body.as_ref().map_or(false, |b| closure_stmts_reference_name(&b.statements, name))
+                }
+            }
+            Expression::CallExpression(call) => {
+                // Check closure arguments
+                for arg in &call.arguments {
+                    if let Some(e) = arg.as_expression() {
+                        if expr_contains_closure_capturing(e, name) { return true; }
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if `stmts` (closure body) contains a direct identifier reference to `name`
+    fn closure_stmts_reference_name<'a>(
+        stmts: &[oxc_ast::ast::Statement<'a>],
+        name: &str,
+    ) -> bool {
+        use oxc_ast::ast::Statement;
+        for stmt in stmts {
+            match stmt {
+                Statement::ReturnStatement(r) => {
+                    if let Some(a) = &r.argument {
+                        if expr_references_name(a, name) { return true; }
+                    }
+                }
+                Statement::ExpressionStatement(e) => {
+                    if expr_references_name(&e.expression, name) { return true; }
+                }
+                Statement::VariableDeclaration(vd) => {
+                    for decl in &vd.declarations {
+                        if let Some(init) = &decl.init {
+                            if expr_references_name(init, name) { return true; }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn expr_references_name<'a>(expr: &oxc_ast::ast::Expression<'a>, name: &str) -> bool {
+        use oxc_ast::ast::Expression;
+        match expr {
+            Expression::Identifier(id) => id.name.as_str() == name,
+            // Parenthesized expressions are transparent — recurse into inner
+            Expression::ParenthesizedExpression(p) => expr_references_name(&p.expression, name),
+            Expression::ObjectExpression(obj) => {
+                use oxc_ast::ast::ObjectPropertyKind;
+                obj.properties.iter().any(|p| match p {
+                    ObjectPropertyKind::ObjectProperty(op) => {
+                        expr_references_name(&op.value, name)
+                    }
+                    _ => false,
+                })
+            }
+            Expression::ArrayExpression(arr) => {
+                arr.elements.iter().any(|el| {
+                    match el {
+                        oxc_ast::ast::ArrayExpressionElement::SpreadElement(s) => expr_references_name(&s.argument, name),
+                        _ => el.as_expression().map_or(false, |e| expr_references_name(e, name)),
+                    }
+                })
+            }
+            Expression::CallExpression(call) => {
+                expr_references_name(&call.callee, name)
+                    || call.arguments.iter().any(|a| {
+                        a.as_expression().map_or(false, |e| expr_references_name(e, name))
+                    })
+            }
+            Expression::BinaryExpression(b) => {
+                expr_references_name(&b.left, name) || expr_references_name(&b.right, name)
+            }
+            Expression::LogicalExpression(l) => {
+                expr_references_name(&l.left, name) || expr_references_name(&l.right, name)
+            }
+            Expression::ConditionalExpression(c) => {
+                expr_references_name(&c.test, name)
+                    || expr_references_name(&c.consequent, name)
+                    || expr_references_name(&c.alternate, name)
+            }
+            Expression::AssignmentExpression(a) => expr_references_name(&a.right, name),
+            Expression::ArrowFunctionExpression(a) => {
+                // Don't cross into nested closures — they create their own scope.
+                // But if `name` is not shadowed by the arrow's params, check the body.
+                let shadowed = a.params.items.iter().any(|p| {
+                    use oxc_ast::ast::BindingPatternKind;
+                    matches!(&p.pattern.kind, BindingPatternKind::BindingIdentifier(id) if id.name.as_str() == name)
+                });
+                if shadowed { false } else { closure_stmts_reference_name(&a.body.statements, name) }
+            }
+            Expression::FunctionExpression(f) => {
+                // Same: check if `name` is shadowed by params
+                let shadowed = f.params.items.iter().any(|p| {
+                    use oxc_ast::ast::BindingPatternKind;
+                    matches!(&p.pattern.kind, BindingPatternKind::BindingIdentifier(id) if id.name.as_str() == name)
+                });
+                if shadowed { false } else {
+                    f.body.as_ref().map_or(false, |b| closure_stmts_reference_name(&b.statements, name))
+                }
+            }
+            _ => false,
+        }
+    }
+
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        check_stmts(stmts)?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_function_self_shadow
+// ---------------------------------------------------------------------------
+/// Detect FunctionDeclarations inside a component/hook body where the function's
+/// own body declares a local `let`/`const` variable with the SAME name as the function.
+/// e.g., `function hasErrors() { let hasErrors = false; ... }` — this causes
+/// invariant failures in the TS compiler's HIR analysis.
+fn validate_no_function_self_shadow<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::{BindingPatternKind, Statement, VariableDeclarationKind};
+
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        for stmt in stmts {
+            if let Statement::FunctionDeclaration(f) = stmt {
+                let fn_name = match &f.id {
+                    Some(id) => id.name.as_str(),
+                    None => continue,
+                };
+                if let Some(body) = &f.body {
+                    for inner in &body.statements {
+                        if let Statement::VariableDeclaration(vd) = inner {
+                            if vd.kind == VariableDeclarationKind::Let
+                                || vd.kind == VariableDeclarationKind::Const
+                            {
+                                for decl in &vd.declarations {
+                                    if let BindingPatternKind::BindingIdentifier(id) = &decl.id.kind {
+                                        if id.name.as_str() == fn_name {
+                                            return Err(CompilerError::todo(
+                                                "Cannot compile a function where a nested function \
+                                                 declaration has the same name as a local variable",
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_functiondecl_forward_call
+// ---------------------------------------------------------------------------
+/// Detect direct (top-level, not inside a closure) calls to a FunctionDeclaration
+/// that appears LATER in the component/hook body.
+/// e.g., `const result = bar(); function bar() { ... }` — hoisted function
+/// call pattern that causes incorrect code generation in the TS compiler.
+fn validate_no_functiondecl_forward_call<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::{Expression, Statement};
+    use std::collections::{HashMap, HashSet};
+
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        // Collect FunctionDeclaration name → (statement index, has_outer_refs)
+        let mut fn_decl_pos: HashMap<&str, usize> = HashMap::new();
+        let mut fn_has_outer: HashSet<&str> = HashSet::new();
+
+        for (i, stmt) in stmts.iter().enumerate() {
+            if let Statement::FunctionDeclaration(f) = stmt {
+                if let Some(id) = &f.id {
+                    let name = id.name.as_str();
+                    fn_decl_pos.insert(name, i);
+                    if fn_decl_references_outer(f) {
+                        fn_has_outer.insert(name);
+                    }
+                }
+            }
+        }
+        if fn_decl_pos.is_empty() { continue; }
+
+        // Walk each statement at the top level; check for calls to later-declared FunctionDecls
+        // Only flag if the called FunctionDeclaration has outer references (captures context)
+        for (stmt_idx, stmt) in stmts.iter().enumerate() {
+            check_stmt_for_forward_call(stmt, stmt_idx, &fn_decl_pos, &fn_has_outer, false)?;
+        }
+    }
+    Ok(())
+}
+
+/// Returns true if the FunctionDeclaration body references any identifier
+/// that is NOT one of its own parameter names and NOT its own function name.
+/// This indicates it captures from the outer scope.
+fn fn_decl_references_outer<'a>(f: &oxc_ast::ast::Function<'a>) -> bool {
+    use oxc_ast::ast::{BindingPatternKind, Expression, FormalParameterKind, Statement};
+    use std::collections::HashSet;
+
+    let fn_name = f.id.as_ref().map(|id| id.name.as_str()).unwrap_or("");
+
+    // Collect param names
+    let mut param_names: HashSet<&str> = HashSet::new();
+    for param in &f.params.items {
+        if let BindingPatternKind::BindingIdentifier(id) = &param.pattern.kind {
+            param_names.insert(id.name.as_str());
+        }
+    }
+
+    // Walk body looking for identifier references to outer scope
+    let body = match &f.body {
+        Some(b) => &b.statements,
+        None => return false,
+    };
+
+    fn stmt_refs_outer<'a>(
+        stmt: &oxc_ast::ast::Statement<'a>,
+        params: &std::collections::HashSet<&str>,
+        fn_name: &str,
+    ) -> bool {
+        match stmt {
+            Statement::ReturnStatement(r) => {
+                r.argument.as_ref().map_or(false, |a| expr_refs_outer(a, params, fn_name))
+            }
+            Statement::ExpressionStatement(e) => expr_refs_outer(&e.expression, params, fn_name),
+            Statement::VariableDeclaration(vd) => {
+                vd.declarations.iter().any(|d| {
+                    d.init.as_ref().map_or(false, |i| expr_refs_outer(i, params, fn_name))
+                })
+            }
+            Statement::IfStatement(i) => {
+                expr_refs_outer(&i.test, params, fn_name)
+                    || stmt_refs_outer(&i.consequent, params, fn_name)
+                    || i.alternate.as_ref().map_or(false, |a| stmt_refs_outer(a, params, fn_name))
+            }
+            Statement::BlockStatement(b) => {
+                b.body.iter().any(|s| stmt_refs_outer(s, params, fn_name))
+            }
+            _ => false,
+        }
+    }
+
+    fn expr_refs_outer<'a>(
+        expr: &oxc_ast::ast::Expression<'a>,
+        params: &std::collections::HashSet<&str>,
+        fn_name: &str,
+    ) -> bool {
+        match expr {
+            Expression::Identifier(id) => {
+                let name = id.name.as_str();
+                name != fn_name && !params.contains(name)
+            }
+            Expression::CallExpression(call) => {
+                expr_refs_outer(&call.callee, params, fn_name)
+                    || call.arguments.iter().any(|a| {
+                        a.as_expression().map_or(false, |e| expr_refs_outer(e, params, fn_name))
+                    })
+            }
+            Expression::BinaryExpression(b) => {
+                expr_refs_outer(&b.left, params, fn_name)
+                    || expr_refs_outer(&b.right, params, fn_name)
+            }
+            Expression::UnaryExpression(u) => expr_refs_outer(&u.argument, params, fn_name),
+            Expression::ConditionalExpression(c) => {
+                expr_refs_outer(&c.test, params, fn_name)
+                    || expr_refs_outer(&c.consequent, params, fn_name)
+                    || expr_refs_outer(&c.alternate, params, fn_name)
+            }
+            Expression::ObjectExpression(o) => {
+                use oxc_ast::ast::ObjectPropertyKind;
+                o.properties.iter().any(|p| match p {
+                    ObjectPropertyKind::ObjectProperty(op) => expr_refs_outer(&op.value, params, fn_name),
+                    _ => false,
+                })
+            }
+            Expression::ArrayExpression(a) => {
+                use oxc_ast::ast::ArrayExpressionElement;
+                a.elements.iter().any(|e| match e {
+                    ArrayExpressionElement::SpreadElement(s) => expr_refs_outer(&s.argument, params, fn_name),
+                    _ => e.as_expression().map_or(false, |ex| expr_refs_outer(ex, params, fn_name)),
+                })
+            }
+            Expression::StaticMemberExpression(s) => expr_refs_outer(&s.object, params, fn_name),
+            Expression::ComputedMemberExpression(c) => expr_refs_outer(&c.object, params, fn_name),
+            // Don't recurse into nested closures (they have their own scope)
+            Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => false,
+            _ => false,
+        }
+    }
+
+    body.iter().any(|s| stmt_refs_outer(s, &param_names, fn_name))
+}
+
+/// `inside_fn_decl`: true if we are INSIDE a FunctionDeclaration body.
+fn check_stmt_for_forward_call<'a>(
+    stmt: &oxc_ast::ast::Statement<'a>,
+    current_pos: usize,
+    fn_decl_pos: &std::collections::HashMap<&str, usize>,
+    fn_has_outer: &std::collections::HashSet<&str>,
+    inside_fn_decl: bool,
+) -> Result<()> {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::ExpressionStatement(e) => {
+            check_expr_for_forward_call(&e.expression, current_pos, fn_decl_pos, fn_has_outer, inside_fn_decl)?;
+        }
+        Statement::VariableDeclaration(vd) => {
+            for decl in &vd.declarations {
+                if let Some(init) = &decl.init {
+                    check_expr_for_forward_call(init, current_pos, fn_decl_pos, fn_has_outer, inside_fn_decl)?;
+                }
+            }
+        }
+        Statement::ReturnStatement(r) => {
+            if let Some(arg) = &r.argument {
+                check_expr_for_forward_call(arg, current_pos, fn_decl_pos, fn_has_outer, inside_fn_decl)?;
+            }
+        }
+        Statement::BlockStatement(b) => {
+            for s in &b.body {
+                check_stmt_for_forward_call(s, current_pos, fn_decl_pos, fn_has_outer, inside_fn_decl)?;
+            }
+        }
+        Statement::IfStatement(i) => {
+            check_expr_for_forward_call(&i.test, current_pos, fn_decl_pos, fn_has_outer, inside_fn_decl)?;
+            check_stmt_for_forward_call(&i.consequent, current_pos, fn_decl_pos, fn_has_outer, inside_fn_decl)?;
+            if let Some(a) = &i.alternate {
+                check_stmt_for_forward_call(a, current_pos, fn_decl_pos, fn_has_outer, inside_fn_decl)?;
+            }
+        }
+        Statement::FunctionDeclaration(f) => {
+            // The body of a FunctionDeclaration at position current_pos
+            // can forward-reference other FunctionDeclarations declared later.
+            if let Some(body) = &f.body {
+                for s in &body.statements {
+                    check_stmt_for_forward_call(s, current_pos, fn_decl_pos, fn_has_outer, true)?;
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn check_expr_for_forward_call<'a>(
+    expr: &oxc_ast::ast::Expression<'a>,
+    current_pos: usize,
+    fn_decl_pos: &std::collections::HashMap<&str, usize>,
+    fn_has_outer: &std::collections::HashSet<&str>,
+    inside_fn_decl: bool,
+) -> Result<()> {
+    use oxc_ast::ast::Expression;
+    match expr {
+        Expression::CallExpression(call) => {
+            // Check if callee is a forward-referenced FunctionDeclaration name
+            // that also captures outer scope variables (or is inside another fn decl)
+            if let Expression::Identifier(id) = &call.callee {
+                let name = id.name.as_str();
+                if let Some(&decl_pos) = fn_decl_pos.get(name) {
+                    if decl_pos > current_pos && (fn_has_outer.contains(name) || inside_fn_decl) {
+                        return Err(CompilerError::todo(
+                            "Rewrite hoisted function references",
+                        ));
+                    }
+                }
+            }
+            // Check callee and args
+            check_expr_for_forward_call(&call.callee, current_pos, fn_decl_pos, fn_has_outer, inside_fn_decl)?;
+            for arg in &call.arguments {
+                if let Some(e) = arg.as_expression() {
+                    check_expr_for_forward_call(e, current_pos, fn_decl_pos, fn_has_outer, inside_fn_decl)?;
+                }
+            }
+        }
+        // Don't recurse into nested closures for the top-level check
+        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => {}
+        Expression::BinaryExpression(b) => {
+            check_expr_for_forward_call(&b.left, current_pos, fn_decl_pos, fn_has_outer, inside_fn_decl)?;
+            check_expr_for_forward_call(&b.right, current_pos, fn_decl_pos, fn_has_outer, inside_fn_decl)?;
+        }
+        Expression::ConditionalExpression(c) => {
+            check_expr_for_forward_call(&c.test, current_pos, fn_decl_pos, fn_has_outer, inside_fn_decl)?;
+            check_expr_for_forward_call(&c.consequent, current_pos, fn_decl_pos, fn_has_outer, inside_fn_decl)?;
+            check_expr_for_forward_call(&c.alternate, current_pos, fn_decl_pos, fn_has_outer, inside_fn_decl)?;
+        }
+        Expression::LogicalExpression(l) => {
+            check_expr_for_forward_call(&l.left, current_pos, fn_decl_pos, fn_has_outer, inside_fn_decl)?;
+            check_expr_for_forward_call(&l.right, current_pos, fn_decl_pos, fn_has_outer, inside_fn_decl)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_funcdecl_outer_let_reassign
+// ---------------------------------------------------------------------------
+/// Detect `FunctionDeclaration` statements inside a component/hook body whose
+/// body directly assigns to an outer `let` variable declared in the component.
+/// e.g., `function foo() { x = 9; }` where `let x` is in the enclosing body.
+fn validate_no_funcdecl_outer_let_reassign<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::{BindingPatternKind, Expression, Statement};
+
+    /// Deep variant of closure_body_assigns_any_in_set that also recurses
+    /// into nested arrow/fn expressions to catch multi-level closures.
+    fn assigns_deep<'a>(
+        stmts: &[Statement<'a>],
+        set: &std::collections::HashSet<String>,
+    ) -> bool {
+        for stmt in stmts {
+            match stmt {
+                Statement::ExpressionStatement(e) => {
+                    if expr_assigns_any_in_set(&e.expression, set) { return true; }
+                }
+                Statement::ReturnStatement(r) => {
+                    if let Some(a) = &r.argument {
+                        if expr_assigns_any_in_set(a, set) { return true; }
+                    }
+                }
+                Statement::VariableDeclaration(v) => {
+                    for decl in &v.declarations {
+                        if let Some(init) = &decl.init {
+                            match init {
+                                Expression::ArrowFunctionExpression(a) => {
+                                    if assigns_deep(&a.body.statements, set) { return true; }
+                                }
+                                Expression::FunctionExpression(f) => {
+                                    if let Some(b) = &f.body {
+                                        if assigns_deep(&b.statements, set) { return true; }
+                                    }
+                                }
+                                _ => {
+                                    if expr_assigns_any_in_set(init, set) { return true; }
+                                }
+                            }
+                        }
+                    }
+                }
+                Statement::IfStatement(i) => {
+                    if assigns_deep(std::slice::from_ref(&i.consequent), set) { return true; }
+                    if let Some(alt) = &i.alternate {
+                        if assigns_deep(std::slice::from_ref(alt), set) { return true; }
+                    }
+                }
+                Statement::BlockStatement(b) => {
+                    if assigns_deep(&b.body, set) { return true; }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn params_contain(params: &oxc_ast::ast::FormalParameters, name: &str) -> bool {
+        params.items.iter().any(|p| {
+            matches!(&p.pattern.kind, BindingPatternKind::BindingIdentifier(id) if id.name.as_str() == name)
+        })
+    }
+
+    // Use collect_all_function_bodies to also catch non-component/hook functions.
+    let bodies = collect_all_function_bodies(program);
+    for stmts in bodies {
+        let outer_lets = collect_let_names_shallow(stmts);
+        if outer_lets.is_empty() { continue; }
+        for stmt in stmts {
+            match stmt {
+                // Function declarations: `function foo() { x = ... }`
+                Statement::FunctionDeclaration(f) => {
+                    let effective_lets: std::collections::HashSet<String> = outer_lets.iter()
+                        .filter(|name| !params_contain(&f.params, name))
+                        .cloned()
+                        .collect();
+                    if effective_lets.is_empty() { continue; }
+                    if let Some(body) = &f.body {
+                        if assigns_deep(&body.statements, &effective_lets) {
+                            return Err(CompilerError::invalid_react(
+                                "Cannot reassign variable after render completes. Consider using state instead.",
+                            ));
+                        }
+                    }
+                }
+                // Variable declarations: `const fn1 = () => { x = ... }`
+                Statement::VariableDeclaration(v) => {
+                    for decl in &v.declarations {
+                        if let Some(init) = &decl.init {
+                            let (params_opt, body_stmts): (Option<&oxc_ast::ast::FormalParameters>, Option<&[Statement]>) = match init {
+                                Expression::ArrowFunctionExpression(a) => (Some(&a.params), Some(&a.body.statements)),
+                                Expression::FunctionExpression(f) => (
+                                    Some(&f.params),
+                                    f.body.as_ref().map(|b| b.statements.as_slice()),
+                                ),
+                                _ => (None, None),
+                            };
+                            if let Some(body) = body_stmts {
+                                let effective_lets: std::collections::HashSet<String> = if let Some(params) = params_opt {
+                                    outer_lets.iter()
+                                        .filter(|name| !params_contain(params, name))
+                                        .cloned()
+                                        .collect()
+                                } else {
+                                    outer_lets.clone()
+                                };
+                                if effective_lets.is_empty() { continue; }
+                                if assigns_deep(body, &effective_lets) {
+                                    return Err(CompilerError::invalid_react(
+                                        "Cannot reassign variable after render completes. Consider using state instead.",
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_nested_array_destructure_assign
+// ---------------------------------------------------------------------------
+/// Detect nested array destructuring assignments like `[[x]] = expr`.
+/// e.g., `x.foo([[x]] = makeObject())` — invariant-triggers the TS compiler.
+fn validate_no_nested_array_destructure_assign<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::{AssignmentTarget, Statement};
+
+    fn check_stmts<'a>(stmts: &[Statement<'a>]) -> Result<()> {
+        for stmt in stmts { check_stmt(stmt)?; }
+        Ok(())
+    }
+
+    fn check_stmt<'a>(stmt: &Statement<'a>) -> Result<()> {
+        match stmt {
+            Statement::ExpressionStatement(e) => check_expr(&e.expression)?,
+            Statement::VariableDeclaration(v) => {
+                for decl in &v.declarations {
+                    if let Some(init) = &decl.init { check_expr(init)?; }
+                }
+            }
+            Statement::ReturnStatement(r) => {
+                if let Some(a) = &r.argument { check_expr(a)?; }
+            }
+            Statement::IfStatement(i) => {
+                check_stmt(&i.consequent)?;
+                if let Some(a) = &i.alternate { check_stmt(a)?; }
+            }
+            Statement::BlockStatement(b) => check_stmts(&b.body)?,
+            Statement::FunctionDeclaration(f) => {
+                if let Some(b) = &f.body { check_stmts(&b.statements)?; }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn check_expr<'a>(expr: &oxc_ast::ast::Expression<'a>) -> Result<()> {
+        use oxc_ast::ast::Expression;
+        match expr {
+            Expression::AssignmentExpression(a) => {
+                if let AssignmentTarget::ArrayAssignmentTarget(outer) = &a.left {
+                    for el in &outer.elements {
+                        if let Some(el) = el {
+                            if matches!(el, oxc_ast::ast::AssignmentTargetMaybeDefault::ArrayAssignmentTarget(_)) {
+                                return Err(CompilerError::todo(
+                                    "Nested array destructuring assignment is not supported",
+                                ));
+                            }
+                        }
+                    }
+                }
+                check_expr(&a.right)?;
+            }
+            Expression::ParenthesizedExpression(p) => check_expr(&p.expression)?,
+            Expression::CallExpression(call) => {
+                check_expr(&call.callee)?;
+                for arg in &call.arguments {
+                    if let Some(e) = arg.as_expression() { check_expr(e)?; }
+                }
+            }
+            Expression::ArrowFunctionExpression(a) => check_stmts(&a.body.statements)?,
+            Expression::FunctionExpression(f) => {
+                if let Some(b) = &f.body { check_stmts(&b.statements)?; }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        check_stmts(stmts)?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_nested_method_call_args
+// ---------------------------------------------------------------------------
+/// Detect method calls where an argument is itself a method call.
+/// e.g., `Math.floor(diff.bar())` or `Math.max(2, items.push(5))`.
+/// This triggers a codegen invariant in our HIR because the property load
+/// gets promoted/memoized, violating the "unpromoted MemberExpression" constraint.
+fn validate_no_nested_method_call_args<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::{Expression, Statement};
+
+    fn is_method_call<'a>(expr: &Expression<'a>) -> bool {
+        if let Expression::CallExpression(call) = expr {
+            matches!(
+                &call.callee,
+                Expression::StaticMemberExpression(_) | Expression::ComputedMemberExpression(_)
+            )
+        } else {
+            false
+        }
+    }
+
+    fn check_stmts<'a>(stmts: &[Statement<'a>]) -> Result<()> {
+        for stmt in stmts { check_stmt(stmt)?; }
+        Ok(())
+    }
+
+    fn check_stmt<'a>(stmt: &Statement<'a>) -> Result<()> {
+        match stmt {
+            Statement::ExpressionStatement(e) => check_expr(&e.expression)?,
+            Statement::VariableDeclaration(v) => {
+                for decl in &v.declarations {
+                    if let Some(init) = &decl.init { check_expr(init)?; }
+                }
+            }
+            Statement::ReturnStatement(r) => {
+                if let Some(a) = &r.argument { check_expr(a)?; }
+            }
+            Statement::IfStatement(i) => {
+                check_stmt(&i.consequent)?;
+                if let Some(a) = &i.alternate { check_stmt(a)?; }
+            }
+            Statement::BlockStatement(b) => check_stmts(&b.body)?,
+            Statement::FunctionDeclaration(f) => {
+                if let Some(b) = &f.body { check_stmts(&b.statements)?; }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn check_expr<'a>(expr: &Expression<'a>) -> Result<()> {
+        if let Expression::CallExpression(call) = expr {
+            // If this call is a method call, check if any argument is also a method call
+            if matches!(&call.callee, Expression::StaticMemberExpression(_)) {
+                for arg in &call.arguments {
+                    if let Some(e) = arg.as_expression() {
+                        if is_method_call(e) {
+                            return Err(CompilerError::todo(
+                                "Nested method calls in call arguments are not yet supported",
+                            ));
+                        }
+                        check_expr(e)?;
+                    }
+                }
+                check_expr(&call.callee)?;
+                return Ok(());
+            }
+            // For non-method calls, just recurse
+            check_expr(&call.callee)?;
+            for arg in &call.arguments {
+                if let Some(e) = arg.as_expression() { check_expr(e)?; }
+            }
+        } else {
+            match expr {
+                Expression::ParenthesizedExpression(p) => check_expr(&p.expression)?,
+                Expression::ArrowFunctionExpression(a) => check_stmts(&a.body.statements)?,
+                Expression::FunctionExpression(f) => {
+                    if let Some(b) = &f.body { check_stmts(&b.statements)?; }
+                }
+                Expression::LogicalExpression(l) => {
+                    check_expr(&l.left)?;
+                    check_expr(&l.right)?;
+                }
+                Expression::ConditionalExpression(c) => {
+                    check_expr(&c.test)?;
+                    check_expr(&c.consequent)?;
+                    check_expr(&c.alternate)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        check_stmts(stmts)?;
+    }
+    Ok(())
+}
+
+/// Detect property mutation on a locally-declared const function/arrow within
+/// a component or hook body. Example:
+///   const renderIcon = () => <Icon />;
+///   renderIcon.displayName = 'Icon';  // ← error
+fn validate_no_local_function_property_mutation<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> crate::error::Result<()> {
+    use oxc_ast::ast::{AssignmentTarget, BindingPatternKind, Expression, Statement, VariableDeclarationKind};
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        // Collect names of const-declared arrow/function expressions in this body
+        let mut local_fns: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for stmt in stmts.iter() {
+            if let Statement::VariableDeclaration(v) = stmt {
+                if v.kind == VariableDeclarationKind::Const {
+                    for decl in &v.declarations {
+                        if let Some(init) = &decl.init {
+                            if matches!(
+                                init,
+                                Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
+                            ) {
+                                if let BindingPatternKind::BindingIdentifier(id) = &decl.id.kind {
+                                    local_fns.insert(id.name.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if local_fns.is_empty() {
+            continue;
+        }
+        // Check for X.prop = value where X is a local const function
+        for stmt in stmts.iter() {
+            if let Statement::ExpressionStatement(e) = stmt {
+                if let Expression::AssignmentExpression(a) = &e.expression {
+                    if let AssignmentTarget::StaticMemberExpression(m) = &a.left {
+                        if let Expression::Identifier(id) = &m.object {
+                            if local_fns.contains(id.name.as_str()) {
+                                return Err(crate::error::CompilerError::invalid_react(
+                                    "This value cannot be modified",
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_post_jsx_mutation
+// ---------------------------------------------------------------------------
+/// Detect mutations of variables that were previously passed to JSX.
+/// Once a variable is used as a JSX child or prop, it is "frozen" and any
+/// subsequent mutation (method call, property assignment, delete) is invalid.
+fn validate_no_post_jsx_mutation<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::{
+        AssignmentTarget, Expression, JSXAttributeItem, JSXAttributeValue, JSXChild,
+        Statement, UnaryOperator,
+    };
+    use std::collections::{HashMap, HashSet};
+
+    fn collect_frozen<'a>(stmt: &Statement<'a>, frozen: &mut HashSet<String>, aliases: &HashMap<String, String>) {
+        let exprs: Vec<&Expression<'a>> = match stmt {
+            Statement::ExpressionStatement(e) => vec![&e.expression],
+            Statement::VariableDeclaration(v) => {
+                v.declarations.iter().filter_map(|d| d.init.as_ref()).collect()
+            }
+            Statement::ReturnStatement(r) => r.argument.iter().collect(),
+            _ => return,
+        };
+        for expr in exprs {
+            let before_len = frozen.len();
+            collect_frozen_in_expr(expr, frozen);
+            // If new identifiers were frozen, also freeze their aliases (transitive)
+            if frozen.len() > before_len {
+                let newly_frozen: Vec<String> = frozen.iter().cloned().collect();
+                let mut to_add: Vec<String> = Vec::new();
+                for name in &newly_frozen {
+                    for (alias, original) in aliases {
+                        if original == name {
+                            to_add.push(alias.clone());
+                        }
+                    }
+                }
+                for alias in to_add {
+                    frozen.insert(alias);
+                }
+            }
+        }
+    }
+
+    fn collect_frozen_in_expr<'a>(expr: &Expression<'a>, frozen: &mut HashSet<String>) {
+        match expr {
+            Expression::JSXElement(jsx) => {
+                for attr in &jsx.opening_element.attributes {
+                    match attr {
+                        JSXAttributeItem::Attribute(a) => {
+                            if let Some(JSXAttributeValue::ExpressionContainer(ec)) = &a.value {
+                                if let Some(Expression::Identifier(id)) =
+                                    ec.expression.as_expression()
+                                {
+                                    frozen.insert(id.name.to_string());
+                                }
+                            }
+                        }
+                        JSXAttributeItem::SpreadAttribute(s) => {
+                            if let Expression::Identifier(id) = &s.argument {
+                                frozen.insert(id.name.to_string());
+                            }
+                        }
+                    }
+                }
+                for child in &jsx.children {
+                    if let JSXChild::ExpressionContainer(ec) = child {
+                        if let Some(Expression::Identifier(id)) = ec.expression.as_expression() {
+                            frozen.insert(id.name.to_string());
+                        }
+                    }
+                }
+            }
+            Expression::JSXFragment(frag) => {
+                for child in &frag.children {
+                    if let JSXChild::ExpressionContainer(ec) = child {
+                        if let Some(Expression::Identifier(id)) = ec.expression.as_expression() {
+                            frozen.insert(id.name.to_string());
+                        }
+                    }
+                }
+            }
+            Expression::ParenthesizedExpression(p) => {
+                collect_frozen_in_expr(&p.expression, frozen);
+            }
+            Expression::SequenceExpression(seq) => {
+                for e in &seq.expressions {
+                    collect_frozen_in_expr(e, frozen);
+                }
+            }
+            // Recurse into call arguments to find JSX (e.g. items.push(<JSX/>))
+            Expression::CallExpression(call) => {
+                for arg in &call.arguments {
+                    if let Some(arg_expr) = arg.as_expression() {
+                        collect_frozen_in_expr(arg_expr, frozen);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn check_mutation<'a>(stmt: &Statement<'a>, frozen: &HashSet<String>) -> Result<()> {
+        if frozen.is_empty() {
+            return Ok(());
+        }
+        let expr = match stmt {
+            Statement::ExpressionStatement(e) => &e.expression,
+            _ => return Ok(()),
+        };
+        match expr {
+            Expression::CallExpression(call) => {
+                if let Expression::StaticMemberExpression(m) = &call.callee {
+                    if let Expression::Identifier(id) = &m.object {
+                        if frozen.contains(id.name.as_str()) {
+                            return Err(CompilerError::invalid_react(
+                                "This value cannot be modified",
+                            ));
+                        }
+                    }
+                }
+            }
+            Expression::AssignmentExpression(a) => match &a.left {
+                AssignmentTarget::StaticMemberExpression(m) => {
+                    if let Expression::Identifier(id) = &m.object {
+                        if frozen.contains(id.name.as_str()) {
+                            return Err(CompilerError::invalid_react(
+                                "This value cannot be modified",
+                            ));
+                        }
+                    }
+                }
+                AssignmentTarget::ComputedMemberExpression(m) => {
+                    if let Expression::Identifier(id) = &m.object {
+                        if frozen.contains(id.name.as_str()) {
+                            return Err(CompilerError::invalid_react(
+                                "This value cannot be modified",
+                            ));
+                        }
+                    }
+                }
+                // Detect plain identifier reassignment: `i = i + 1` when `i` is frozen
+                AssignmentTarget::AssignmentTargetIdentifier(id) => {
+                    if frozen.contains(id.name.as_str()) {
+                        return Err(CompilerError::invalid_react(
+                            "This value cannot be modified",
+                        ));
+                    }
+                }
+                _ => {}
+            },
+            Expression::UnaryExpression(u) if u.operator == UnaryOperator::Delete => {
+                match &u.argument {
+                    Expression::StaticMemberExpression(m) => {
+                        if let Expression::Identifier(id) = &m.object {
+                            if frozen.contains(id.name.as_str()) {
+                                return Err(CompilerError::invalid_react(
+                                    "This value cannot be modified",
+                                ));
+                            }
+                        }
+                    }
+                    Expression::ComputedMemberExpression(m) => {
+                        if let Expression::Identifier(id) = &m.object {
+                            if frozen.contains(id.name.as_str()) {
+                                return Err(CompilerError::invalid_react(
+                                    "This value cannot be modified",
+                                ));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Build an alias map from sequential statements: `let y = x` → `y → x`.
+    fn collect_aliases<'a>(stmts: &[Statement<'a>]) -> HashMap<String, String> {
+        let mut aliases: HashMap<String, String> = HashMap::new();
+        for stmt in stmts {
+            if let Statement::VariableDeclaration(v) = stmt {
+                for decl in &v.declarations {
+                    if let Some(Expression::Identifier(id)) = &decl.init {
+                        if let oxc_ast::ast::BindingPatternKind::BindingIdentifier(bind) = &decl.id.kind {
+                            aliases.insert(bind.name.to_string(), id.name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        aliases
+    }
+
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        let aliases = collect_aliases(stmts);
+        let mut frozen: HashSet<String> = HashSet::new();
+        for stmt in stmts.iter() {
+            check_mutation(stmt, &frozen)?;
+            collect_frozen(stmt, &mut frozen, &aliases);
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_method_call_with_method_arg
+// ---------------------------------------------------------------------------
+/// Detect a method call where any argument is also a method call.
+/// e.g., `Math.floor(diff.bar())` or `Math.max(2, items.push(5), ...other)`.
+/// These trigger a codegen invariant in the TS compiler.
+fn validate_no_method_call_with_method_arg<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::{Expression, Statement};
+
+    fn check_expr<'a>(expr: &Expression<'a>) -> Result<()> {
+        if let Expression::CallExpression(call) = expr {
+            // Outer call is a method call (obj.method(...))
+            if matches!(&call.callee, Expression::StaticMemberExpression(_)) {
+                for arg in &call.arguments {
+                    if let Some(arg_expr) = arg.as_expression() {
+                        // Any arg is also a method call
+                        if let Expression::CallExpression(inner) = arg_expr {
+                            if matches!(&inner.callee, Expression::StaticMemberExpression(_)) {
+                                return Err(CompilerError::todo(
+                                    "Nested method calls as arguments are not supported",
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            // Recurse
+            check_expr(&call.callee)?;
+            for arg in &call.arguments {
+                if let Some(e) = arg.as_expression() {
+                    check_expr(e)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_stmt<'a>(stmt: &Statement<'a>) -> Result<()> {
+        use oxc_ast::ast::Statement;
+        match stmt {
+            Statement::ExpressionStatement(e) => check_expr(&e.expression)?,
+            Statement::VariableDeclaration(v) => {
+                for decl in &v.declarations {
+                    if let Some(init) = &decl.init {
+                        check_expr(init)?;
+                    }
+                }
+            }
+            Statement::ReturnStatement(r) => {
+                if let Some(a) = &r.argument {
+                    check_expr(a)?;
+                }
+            }
+            Statement::IfStatement(i) => {
+                check_stmt(&i.consequent)?;
+                if let Some(alt) = &i.alternate {
+                    check_stmt(alt)?;
+                }
+            }
+            Statement::BlockStatement(b) => {
+                for s in &b.body {
+                    check_stmt(s)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        for stmt in stmts {
+            check_stmt(stmt)?;
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// validate_no_jsx_rest_param_callback
+// ---------------------------------------------------------------------------
+/// Detect JSX attribute values that are arrow functions with rest parameters.
+/// e.g., `renderer={(...props) => <span {...props} />}`.
+/// This triggers a "unnamed temporary" invariant in the TS compiler.
+fn validate_no_jsx_rest_param_callback<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::{
+        BindingPatternKind, Expression, JSXAttributeItem, JSXAttributeValue, Statement,
+    };
+
+    fn check_jsx_attr<'a>(
+        attr: &oxc_ast::ast::JSXAttributeItem<'a>,
+    ) -> Result<()> {
+        if let JSXAttributeItem::Attribute(a) = attr {
+            if let Some(JSXAttributeValue::ExpressionContainer(ec)) = &a.value {
+                if let Some(Expression::ArrowFunctionExpression(arrow)) =
+                    ec.expression.as_expression()
+                {
+                    // Check for rest parameter
+                    if arrow.params.items.iter().any(|p| {
+                        false  // not in items
+                    }) || arrow.params.rest.is_some() {
+                        return Err(CompilerError::todo(
+                            "Rest parameters in JSX callback props are not supported",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_expr<'a>(expr: &Expression<'a>) -> Result<()> {
+        match expr {
+            Expression::JSXElement(jsx) => {
+                for attr in &jsx.opening_element.attributes {
+                    check_jsx_attr(attr)?;
+                }
+                // Recurse into children
+                for child in &jsx.children {
+                    if let oxc_ast::ast::JSXChild::ExpressionContainer(ec) = child {
+                        if let Some(e) = ec.expression.as_expression() {
+                            check_expr(e)?;
+                        }
+                    }
+                }
+            }
+            Expression::JSXFragment(frag) => {
+                for child in &frag.children {
+                    if let oxc_ast::ast::JSXChild::ExpressionContainer(ec) = child {
+                        if let Some(e) = ec.expression.as_expression() {
+                            check_expr(e)?;
+                        }
+                    }
+                }
+            }
+            Expression::CallExpression(call) => {
+                check_expr(&call.callee)?;
+                for arg in &call.arguments {
+                    if let Some(e) = arg.as_expression() {
+                        check_expr(e)?;
+                    }
+                }
+            }
+            Expression::ParenthesizedExpression(p) => check_expr(&p.expression)?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn check_stmt<'a>(stmt: &Statement<'a>) -> Result<()> {
+        use oxc_ast::ast::Statement;
+        match stmt {
+            Statement::ExpressionStatement(e) => check_expr(&e.expression)?,
+            Statement::VariableDeclaration(v) => {
+                for decl in &v.declarations {
+                    if let Some(init) = &decl.init {
+                        check_expr(init)?;
+                    }
+                }
+            }
+            Statement::ReturnStatement(r) => {
+                if let Some(a) = &r.argument {
+                    check_expr(a)?;
+                }
+            }
+            Statement::IfStatement(i) => {
+                check_stmt(&i.consequent)?;
+                if let Some(alt) = &i.alternate {
+                    check_stmt(alt)?;
+                }
+            }
+            Statement::BlockStatement(b) => {
+                for s in &b.body {
+                    check_stmt(s)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    // Check ALL function bodies (including plain functions) since Foo() is exported
+    let bodies = collect_all_function_bodies(program);
+    for stmts in bodies {
+        for stmt in stmts {
+            check_stmt(stmt)?;
+        }
+    }
+    Ok(())
+}
+// ---------------------------------------------------------------------------
+// collect_all_function_bodies
+// ---------------------------------------------------------------------------
+/// Like collect_component_hook_bodies but includes ALL top-level function
+/// declarations (not just components and hooks). Used for validators that
+/// the TS compiler applies to all functions.
+fn collect_all_function_bodies<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Vec<&'a [oxc_ast::ast::Statement<'a>]> {
+    use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind, Expression, Statement};
+
+    let mut bodies: Vec<&'a [oxc_ast::ast::Statement<'a>]> = Vec::new();
+    for stmt in &program.body {
+        match stmt {
+            Statement::FunctionDeclaration(f) => {
+                if let Some(body) = &f.body {
+                    bodies.push(&body.statements);
+                }
+            }
+            Statement::ExportDefaultDeclaration(d) => match &d.declaration {
+                ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
+                    if let Some(body) = &f.body {
+                        bodies.push(&body.statements);
+                    }
+                }
+                ExportDefaultDeclarationKind::ArrowFunctionExpression(a) => {
+                    bodies.push(&a.body.statements);
+                }
+                _ => {}
+            },
+            Statement::ExportNamedDeclaration(d) => match &d.declaration {
+                Some(Declaration::FunctionDeclaration(f)) => {
+                    if let Some(body) = &f.body {
+                        bodies.push(&body.statements);
+                    }
+                }
+                Some(Declaration::VariableDeclaration(v)) => {
+                    for decl in &v.declarations {
+                        if let Some(init) = &decl.init {
+                            match init {
+                                Expression::ArrowFunctionExpression(a) => {
+                                    bodies.push(&a.body.statements);
+                                }
+                                Expression::FunctionExpression(f) => {
+                                    if let Some(body) = &f.body {
+                                        bodies.push(&body.statements);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            },
+            Statement::VariableDeclaration(v) => {
+                for decl in &v.declarations {
+                    if let Some(init) = &decl.init {
+                        match init {
+                            Expression::ArrowFunctionExpression(a) => {
+                                bodies.push(&a.body.statements);
+                            }
+                            Expression::FunctionExpression(f) => {
+                                if let Some(body) = &f.body {
+                                    bodies.push(&body.statements);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    bodies
+}
+
+// ---------------------------------------------------------------------------
+// validate_hook_call_freezes_captured
+// ---------------------------------------------------------------------------
+
+/// @enableTransitivelyFreezeFunctionExpressions: if a hook is called with a
+/// callback that captures a locally-created variable, subsequent mutations of
+/// that variable (property assignments) are errors.
+fn validate_hook_call_freezes_captured<'a>(
+    source: &str,
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    let first = source.lines().next().unwrap_or("");
+    if !first.contains("@enableTransitivelyFreezeFunctionExpressions")
+        || first.contains("@enableTransitivelyFreezeFunctionExpressions:false")
+        || first.contains("@enableTransitivelyFreezeFunctionExpressions false")
+    {
+        return Ok(());
+    }
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        check_stmts_for_hook_freeze(stmts)?;
+    }
+    Ok(())
+}
+
+fn check_stmts_for_hook_freeze<'a>(
+    stmts: &[oxc_ast::ast::Statement<'a>],
+) -> Result<()> {
+    let mut frozen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for stmt in stmts {
+        // First: check if this statement mutates any already-frozen variable.
+        check_stmt_for_frozen_mutation(stmt, &frozen)?;
+        // Then: if this is a hook call with a callback, freeze captured identifiers.
+        collect_frozen_from_stmt(stmt, &mut frozen);
+    }
+    Ok(())
+}
+
+/// Checks if `stmt` contains a property mutation of a variable in `frozen`.
+/// Only checks outer scope (not recursing into closures).
+fn check_stmt_for_frozen_mutation<'a>(
+    stmt: &oxc_ast::ast::Statement<'a>,
+    frozen: &std::collections::HashSet<String>,
+) -> Result<()> {
+    use oxc_ast::ast::Statement;
+    if frozen.is_empty() {
+        return Ok(());
+    }
+    match stmt {
+        Statement::ExpressionStatement(e) => {
+            check_expr_for_frozen_mutation(&e.expression, frozen)?;
+        }
+        Statement::VariableDeclaration(v) => {
+            for decl in &v.declarations {
+                if let Some(init) = &decl.init {
+                    check_expr_for_frozen_mutation(init, frozen)?;
+                }
+            }
+        }
+        Statement::IfStatement(i) => {
+            check_expr_for_frozen_mutation(&i.test, frozen)?;
+            check_stmt_for_frozen_mutation(&i.consequent, frozen)?;
+            if let Some(alt) = &i.alternate {
+                check_stmt_for_frozen_mutation(alt, frozen)?;
+            }
+        }
+        Statement::BlockStatement(b) => {
+            for s in &b.body {
+                check_stmt_for_frozen_mutation(s, frozen)?;
+            }
+        }
+        Statement::ReturnStatement(r) => {
+            if let Some(a) = &r.argument {
+                check_expr_for_frozen_mutation(a, frozen)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn check_expr_for_frozen_mutation<'a>(
+    expr: &Expression<'a>,
+    frozen: &std::collections::HashSet<String>,
+) -> Result<()> {
+    match expr {
+        // x.prop = value or x.prop += value
+        Expression::AssignmentExpression(a) => {
+            match &a.left {
+                oxc_ast::ast::AssignmentTarget::StaticMemberExpression(m) => {
+                    if let Expression::Identifier(obj) = &m.object {
+                        if frozen.contains(obj.name.as_str()) {
+                            return Err(CompilerError::invalid_react(
+                                "This value cannot be modified\n\nModifying a value previously passed as an argument to a hook is not allowed. Consider moving the modification before calling the hook.",
+                            ));
+                        }
+                    }
+                }
+                oxc_ast::ast::AssignmentTarget::ComputedMemberExpression(m) => {
+                    if let Expression::Identifier(obj) = &m.object {
+                        if frozen.contains(obj.name.as_str()) {
+                            return Err(CompilerError::invalid_react(
+                                "This value cannot be modified\n\nModifying a value previously passed as an argument to a hook is not allowed. Consider moving the modification before calling the hook.",
+                            ));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            check_expr_for_frozen_mutation(&a.right, frozen)?;
+        }
+        // x.prop++ / --x.prop (UpdateExpression on member)
+        Expression::UpdateExpression(u) => {
+            if let oxc_ast::ast::SimpleAssignmentTarget::StaticMemberExpression(m) = &u.argument {
+                if let Expression::Identifier(obj) = &m.object {
+                    if frozen.contains(obj.name.as_str()) {
+                        return Err(CompilerError::invalid_react(
+                            "This value cannot be modified\n\nModifying a value previously passed as an argument to a hook is not allowed. Consider moving the modification before calling the hook.",
+                        ));
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Collect identifiers from hook-call callbacks and add them to `frozen`.
+fn collect_frozen_from_stmt<'a>(
+    stmt: &oxc_ast::ast::Statement<'a>,
+    frozen: &mut std::collections::HashSet<String>,
+) {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::ExpressionStatement(e) => {
+            collect_frozen_from_expr(&e.expression, frozen);
+        }
+        Statement::VariableDeclaration(v) => {
+            for decl in &v.declarations {
+                if let Some(init) = &decl.init {
+                    collect_frozen_from_expr(init, frozen);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_frozen_from_expr<'a>(
+    expr: &Expression<'a>,
+    frozen: &mut std::collections::HashSet<String>,
+) {
+    if let Expression::CallExpression(call) = expr {
+        let callee_name = match &call.callee {
+            Expression::Identifier(id) => Some(id.name.as_str()),
+            Expression::StaticMemberExpression(m) => Some(m.property.name.as_str()),
+            _ => None,
+        };
+        let is_hook = callee_name.map_or(false, |n| {
+            n.starts_with("use") && n.chars().next().map_or(false, |c| c == 'u')
+        });
+        if is_hook {
+            for arg in &call.arguments {
+                if let Some(e) = arg.as_expression() {
+                    match e {
+                        Expression::ArrowFunctionExpression(arrow) => {
+                            collect_identifiers_in_stmts(&arrow.body.statements, frozen);
+                        }
+                        Expression::FunctionExpression(func) => {
+                            if let Some(body) = &func.body {
+                                collect_identifiers_in_stmts(&body.statements, frozen);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Collect all simple identifier references in a list of statements.
+fn collect_identifiers_in_stmts<'a>(
+    stmts: &[oxc_ast::ast::Statement<'a>],
+    out: &mut std::collections::HashSet<String>,
+) {
+    for stmt in stmts {
+        collect_identifiers_in_stmt(stmt, out);
+    }
+}
+
+fn collect_identifiers_in_stmt<'a>(
+    stmt: &oxc_ast::ast::Statement<'a>,
+    out: &mut std::collections::HashSet<String>,
+) {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::ExpressionStatement(e) => collect_identifiers_in_expr(&e.expression, out),
+        Statement::ReturnStatement(r) => {
+            if let Some(a) = &r.argument {
+                collect_identifiers_in_expr(a, out);
+            }
+        }
+        Statement::VariableDeclaration(v) => {
+            for decl in &v.declarations {
+                if let Some(init) = &decl.init {
+                    collect_identifiers_in_expr(init, out);
+                }
+            }
+        }
+        Statement::IfStatement(i) => {
+            collect_identifiers_in_expr(&i.test, out);
+            collect_identifiers_in_stmt(&i.consequent, out);
+            if let Some(alt) = &i.alternate {
+                collect_identifiers_in_stmt(alt, out);
+            }
+        }
+        Statement::BlockStatement(b) => collect_identifiers_in_stmts(&b.body, out),
+        _ => {}
+    }
+}
+
+fn collect_identifiers_in_expr<'a>(
+    expr: &Expression<'a>,
+    out: &mut std::collections::HashSet<String>,
+) {
+    match expr {
+        Expression::Identifier(id) => {
+            out.insert(id.name.to_string());
+        }
+        Expression::CallExpression(call) => {
+            collect_identifiers_in_expr(&call.callee, out);
+            for arg in &call.arguments {
+                if let Some(e) = arg.as_expression() {
+                    collect_identifiers_in_expr(e, out);
+                }
+            }
+        }
+        Expression::StaticMemberExpression(m) => {
+            collect_identifiers_in_expr(&m.object, out);
+        }
+        Expression::AssignmentExpression(a) => {
+            collect_identifiers_in_expr(&a.right, out);
+        }
+        Expression::UpdateExpression(u) => {
+            if let oxc_ast::ast::SimpleAssignmentTarget::StaticMemberExpression(m) = &u.argument {
+                collect_identifiers_in_expr(&m.object, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// validate_reanimated_non_imported_shared_value_writes
+// ---------------------------------------------------------------------------
+
+/// @enableCustomTypeDefinitionForReanimated: when useSharedValue is called
+/// WITHOUT being imported from react-native-reanimated, any assignment to
+/// .value of its return in a callback is an error.
+fn validate_reanimated_non_imported_shared_value_writes<'a>(
+    source: &str,
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    let first = source.lines().next().unwrap_or("");
+    if !first.contains("@enableCustomTypeDefinitionForReanimated") {
+        return Ok(());
+    }
+    // If useSharedValue is imported from react-native-reanimated, it's
+    // a known Reanimated hook and .value writes are intentional (allowed).
+    let is_imported = program.body.iter().any(|stmt| {
+        if let oxc_ast::ast::Statement::ImportDeclaration(import) = stmt {
+            if import.source.value.as_str() == "react-native-reanimated" {
+                if let Some(specifiers) = &import.specifiers {
+                    return specifiers.iter().any(|spec| {
+                        if let oxc_ast::ast::ImportDeclarationSpecifier::ImportSpecifier(s) = spec {
+                            s.local.name.as_str() == "useSharedValue"
+                        } else {
+                            false
+                        }
+                    });
+                }
+            }
+        }
+        false
+    });
+    if is_imported {
+        return Ok(());
+    }
+
+    // useSharedValue is NOT imported → check for .value = ... in callbacks.
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        let mut shared_val_vars: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for stmt in stmts {
+            collect_use_shared_value_vars(stmt, &mut shared_val_vars);
+        }
+        if shared_val_vars.is_empty() {
+            continue;
+        }
+        for stmt in stmts {
+            check_stmt_for_shared_val_write(stmt, &shared_val_vars)?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_use_shared_value_vars<'a>(
+    stmt: &oxc_ast::ast::Statement<'a>,
+    out: &mut std::collections::HashSet<String>,
+) {
+    if let oxc_ast::ast::Statement::VariableDeclaration(v) = stmt {
+        for decl in &v.declarations {
+            if let Some(init) = &decl.init {
+                if let Expression::CallExpression(call) = init {
+                    if let Expression::Identifier(callee) = &call.callee {
+                        if callee.name.as_str() == "useSharedValue" {
+                            if let oxc_ast::ast::BindingPatternKind::BindingIdentifier(id) =
+                                &decl.id.kind
+                            {
+                                out.insert(id.name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn check_stmt_for_shared_val_write<'a>(
+    stmt: &oxc_ast::ast::Statement<'a>,
+    shared_val_vars: &std::collections::HashSet<String>,
+) -> Result<()> {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::ExpressionStatement(e) => {
+            check_expr_for_shared_val_write(&e.expression, shared_val_vars)?;
+        }
+        Statement::ReturnStatement(r) => {
+            if let Some(a) = &r.argument {
+                check_expr_for_shared_val_write(a, shared_val_vars)?;
+            }
+        }
+        Statement::VariableDeclaration(v) => {
+            for decl in &v.declarations {
+                if let Some(init) = &decl.init {
+                    check_expr_for_shared_val_write(init, shared_val_vars)?;
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn check_expr_for_shared_val_write<'a>(
+    expr: &Expression<'a>,
+    shared_val_vars: &std::collections::HashSet<String>,
+) -> Result<()> {
+    match expr {
+        // sharedVal.value = ...
+        Expression::AssignmentExpression(a) => {
+            if let oxc_ast::ast::AssignmentTarget::StaticMemberExpression(m) = &a.left {
+                if m.property.name.as_str() == "value" {
+                    if let Expression::Identifier(obj) = &m.object {
+                        if shared_val_vars.contains(obj.name.as_str()) {
+                            return Err(CompilerError::invalid_react(
+                                "This value cannot be modified\n\nModifying a value returned from a hook is not allowed. Consider moving the modification into the hook where the value is constructed.",
+                            ));
+                        }
+                    }
+                }
+            }
+            check_expr_for_shared_val_write(&a.right, shared_val_vars)?;
+        }
+        // Arrow function: recurse into body (oxc parses `() => expr` as `() => { return expr; }`)
+        Expression::ArrowFunctionExpression(arrow) => {
+            for s in &arrow.body.statements {
+                check_stmt_for_shared_val_write(s, shared_val_vars)?;
+            }
+        }
+        // Function expression: recurse into body
+        Expression::FunctionExpression(func) => {
+            if let Some(body) = &func.body {
+                for s in &body.statements {
+                    check_stmt_for_shared_val_write(s, shared_val_vars)?;
+                }
+            }
+        }
+        // Parenthesized expression: unwrap and check
+        Expression::ParenthesizedExpression(p) => {
+            check_expr_for_shared_val_write(&p.expression, shared_val_vars)?;
+        }
+        // JSX: check attribute values
+        Expression::JSXElement(jsx) => {
+            for attr in &jsx.opening_element.attributes {
+                if let oxc_ast::ast::JSXAttributeItem::Attribute(a) = attr {
+                    if let Some(oxc_ast::ast::JSXAttributeValue::ExpressionContainer(c)) = &a.value {
+                        if let Some(e) = c.expression.as_expression() {
+                            check_expr_for_shared_val_write(e, shared_val_vars)?;
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
