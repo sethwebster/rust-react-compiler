@@ -1442,9 +1442,121 @@ fn parse_blocklisted_imports_pragma(line: &str) -> Vec<String> {
 /// Called when `@validateNoCapitalizedCalls` pragma is present.
 fn validate_no_capitalized_calls(program: &oxc_ast::ast::Program) -> Result<()> {
     for stmt in &program.body {
-        if let Err(e) = check_stmt_capitalized_calls(stmt) {
+        if let Err(e) = check_stmt_capitalized_calls_with_aliases(stmt) {
             return Err(e);
         }
+    }
+    Ok(())
+}
+
+/// Entry point for checking capitalized calls with alias tracking in function bodies.
+fn check_stmt_capitalized_calls_with_aliases(stmt: &oxc_ast::ast::Statement) -> Result<()> {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::FunctionDeclaration(f) => {
+            if let Some(body) = &f.body {
+                let aliases = collect_capitalized_aliases(&body.statements);
+                check_stmts_cap_calls_aliased(&body.statements, &aliases)?;
+            }
+        }
+        Statement::ExpressionStatement(e) => check_expr_capitalized_calls(&e.expression)?,
+        Statement::ReturnStatement(r) => {
+            if let Some(arg) = &r.argument { check_expr_capitalized_calls(arg)?; }
+        }
+        Statement::VariableDeclaration(v) => {
+            for d in &v.declarations {
+                if let Some(Expression::ArrowFunctionExpression(a)) = &d.init {
+                    let aliases = collect_capitalized_aliases(&a.body.statements);
+                    check_stmts_cap_calls_aliased(&a.body.statements, &aliases)?;
+                } else if let Some(Expression::FunctionExpression(f)) = &d.init {
+                    if let Some(body) = &f.body {
+                        let aliases = collect_capitalized_aliases(&body.statements);
+                        check_stmts_cap_calls_aliased(&body.statements, &aliases)?;
+                    }
+                } else if let Some(init) = &d.init {
+                    check_expr_capitalized_calls(init)?;
+                }
+            }
+        }
+        Statement::BlockStatement(b) => {
+            for s in &b.body { check_stmt_capitalized_calls_with_aliases(s)?; }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Collect aliases: `let x = Bar` or `const x = Bar` where Bar is capitalized.
+fn collect_capitalized_aliases(stmts: &[oxc_ast::ast::Statement]) -> std::collections::HashSet<String> {
+    let mut aliases = std::collections::HashSet::new();
+    for stmt in stmts {
+        if let oxc_ast::ast::Statement::VariableDeclaration(v) = stmt {
+            for decl in &v.declarations {
+                if let Some(Expression::Identifier(id)) = &decl.init {
+                    if id.name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                        if let BindingPatternKind::BindingIdentifier(b) = &decl.id.kind {
+                            aliases.insert(b.name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    aliases
+}
+
+fn check_stmts_cap_calls_aliased(
+    stmts: &[oxc_ast::ast::Statement],
+    aliases: &std::collections::HashSet<String>,
+) -> Result<()> {
+    for stmt in stmts {
+        check_stmt_cap_calls_aliased(stmt, aliases)?;
+    }
+    Ok(())
+}
+
+fn check_stmt_cap_calls_aliased(
+    stmt: &oxc_ast::ast::Statement,
+    aliases: &std::collections::HashSet<String>,
+) -> Result<()> {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::ExpressionStatement(e) => check_expr_cap_calls_aliased(&e.expression, aliases)?,
+        Statement::ReturnStatement(r) => {
+            if let Some(a) = &r.argument { check_expr_cap_calls_aliased(a, aliases)?; }
+        }
+        Statement::VariableDeclaration(v) => {
+            for d in &v.declarations {
+                if let Some(init) = &d.init { check_expr_cap_calls_aliased(init, aliases)?; }
+            }
+        }
+        Statement::IfStatement(i) => {
+            check_stmt_cap_calls_aliased(&i.consequent, aliases)?;
+            if let Some(alt) = &i.alternate { check_stmt_cap_calls_aliased(alt, aliases)?; }
+        }
+        Statement::BlockStatement(b) => check_stmts_cap_calls_aliased(&b.body, aliases)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn check_expr_cap_calls_aliased(
+    expr: &Expression,
+    aliases: &std::collections::HashSet<String>,
+) -> Result<()> {
+    if let Expression::CallExpression(call) = expr {
+        // Check direct alias call: `x()` where `x` aliases a capitalized identifier
+        if let Expression::Identifier(id) = &call.callee {
+            if aliases.contains(id.name.as_str()) {
+                return Err(CompilerError::invalid_react(
+                    "Capitalized functions are reserved for components, which must be invoked with JSX.",
+                ));
+            }
+        }
+        // Also check normal capitalized calls
+        check_expr_capitalized_calls(expr)?;
+    } else {
+        check_expr_capitalized_calls(expr)?;
     }
     Ok(())
 }
@@ -2369,6 +2481,172 @@ fn validate_no_incompatible_libraries(program: &oxc_ast::ast::Program) -> Result
 }
 
 /// Validate that global/module-scope variables are not reassigned inside component/hook functions.
+/// Collect local variable names in `stmts` whose closure bodies directly assign to globals.
+fn collect_direct_global_assigning_closures<'a, F>(
+    stmts: &[oxc_ast::ast::Statement<'a>],
+    is_global: &F,
+) -> std::collections::HashSet<String>
+where F: Fn(&oxc_ast::ast::IdentifierReference) -> bool
+{
+    use oxc_ast::ast::{Statement, BindingPatternKind};
+    let mut result = std::collections::HashSet::new();
+    for stmt in stmts {
+        if let Statement::VariableDeclaration(v) = stmt {
+            for decl in &v.declarations {
+                if let Some(init) = &decl.init {
+                    let body_stmts: Option<&[oxc_ast::ast::Statement]> = match init {
+                        Expression::ArrowFunctionExpression(a) => Some(&a.body.statements),
+                        Expression::FunctionExpression(f) => f.body.as_ref().map(|b| b.statements.as_slice()),
+                        _ => None,
+                    };
+                    if let Some(body) = body_stmts {
+                        if closure_body_assigns_global_directly(body, is_global) {
+                            if let BindingPatternKind::BindingIdentifier(id) = &decl.id.kind {
+                                result.insert(id.name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
+/// Returns true if any statement in `stmts` directly assigns to a global (no recursion into nested closures).
+fn closure_body_assigns_global_directly<'a, F>(
+    stmts: &[oxc_ast::ast::Statement<'a>],
+    is_global: &F,
+) -> bool
+where F: Fn(&oxc_ast::ast::IdentifierReference) -> bool
+{
+    use oxc_ast::ast::Statement;
+    for stmt in stmts {
+        match stmt {
+            Statement::ExpressionStatement(e) => {
+                if expr_assigns_global_directly(&e.expression, is_global) { return true; }
+            }
+            Statement::ReturnStatement(r) => {
+                if let Some(a) = &r.argument {
+                    if expr_assigns_global_directly(a, is_global) { return true; }
+                }
+            }
+            Statement::IfStatement(i) => {
+                if closure_body_assigns_global_directly(
+                    std::slice::from_ref(&i.consequent), is_global) { return true; }
+                if let Some(alt) = &i.alternate {
+                    if closure_body_assigns_global_directly(std::slice::from_ref(alt), is_global) { return true; }
+                }
+            }
+            Statement::BlockStatement(b) => {
+                if closure_body_assigns_global_directly(&b.body, is_global) { return true; }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn expr_assigns_global_directly<'a, F>(expr: &Expression<'a>, is_global: &F) -> bool
+where F: Fn(&oxc_ast::ast::IdentifierReference) -> bool
+{
+    use oxc_ast::ast::AssignmentTarget;
+    match expr {
+        Expression::AssignmentExpression(a) => {
+            match &a.left {
+                AssignmentTarget::AssignmentTargetIdentifier(id) => is_global(id),
+                AssignmentTarget::StaticMemberExpression(m) => {
+                    if let Expression::Identifier(id) = &m.object { is_global(id) } else { false }
+                }
+                _ => false,
+            }
+        }
+        Expression::SequenceExpression(s) => s.expressions.iter().any(|e| expr_assigns_global_directly(e, is_global)),
+        // Don't recurse into nested closures
+        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => false,
+        _ => false,
+    }
+}
+
+/// Expand `assigners` by adding closures that call any name already in the set (transitive).
+fn expand_transitive_global_assigners<'a>(
+    stmts: &[oxc_ast::ast::Statement<'a>],
+    assigners: &mut std::collections::HashSet<String>,
+) {
+    use oxc_ast::ast::{Statement, BindingPatternKind};
+    loop {
+        let before = assigners.len();
+        for stmt in stmts {
+            if let Statement::VariableDeclaration(v) = stmt {
+                for decl in &v.declarations {
+                    if let Some(init) = &decl.init {
+                        let body_stmts: Option<&[oxc_ast::ast::Statement]> = match init {
+                            Expression::ArrowFunctionExpression(a) => Some(&a.body.statements),
+                            Expression::FunctionExpression(f) => f.body.as_ref().map(|b| b.statements.as_slice()),
+                            _ => None,
+                        };
+                        if let Some(body) = body_stmts {
+                            if closure_body_calls_any(body, assigners) {
+                                if let BindingPatternKind::BindingIdentifier(id) = &decl.id.kind {
+                                    assigners.insert(id.name.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if assigners.len() == before { break; }
+    }
+}
+
+fn closure_body_calls_any<'a>(
+    stmts: &[oxc_ast::ast::Statement<'a>],
+    names: &std::collections::HashSet<String>,
+) -> bool {
+    use oxc_ast::ast::Statement;
+    for stmt in stmts {
+        match stmt {
+            Statement::ExpressionStatement(e) => {
+                if expr_calls_any(&e.expression, names) { return true; }
+            }
+            Statement::ReturnStatement(r) => {
+                if let Some(a) = &r.argument { if expr_calls_any(a, names) { return true; } }
+            }
+            Statement::BlockStatement(b) => {
+                if closure_body_calls_any(&b.body, names) { return true; }
+            }
+            Statement::IfStatement(i) => {
+                if closure_body_calls_any(std::slice::from_ref(&i.consequent), names) { return true; }
+                if let Some(alt) = &i.alternate {
+                    if closure_body_calls_any(std::slice::from_ref(alt), names) { return true; }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn expr_calls_any<'a>(expr: &Expression<'a>, names: &std::collections::HashSet<String>) -> bool {
+    match expr {
+        Expression::CallExpression(call) => {
+            if let Expression::Identifier(id) = &call.callee {
+                if names.contains(id.name.as_str()) { return true; }
+            }
+            for arg in &call.arguments {
+                if let Some(e) = arg.as_expression() {
+                    if expr_calls_any(e, names) { return true; }
+                }
+            }
+            false
+        }
+        Expression::SequenceExpression(s) => s.expressions.iter().any(|e| expr_calls_any(e, names)),
+        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => false,
+        _ => false,
+    }
+}
+
 fn validate_no_global_reassignment<'a>(
     program: &'a oxc_ast::ast::Program<'a>,
     semantic: &oxc_semantic::Semantic<'a>,
@@ -2432,62 +2710,64 @@ fn validate_no_global_reassignment<'a>(
     }
 
     for stmts in &bodies {
-        global_check_stmts(stmts, &is_global_or_module_ref)?;
+        let mut local_assigners = collect_direct_global_assigning_closures(stmts, &is_global_or_module_ref);
+        expand_transitive_global_assigners(stmts, &mut local_assigners);
+        global_check_stmts(stmts, &is_global_or_module_ref, &local_assigners)?;
     }
     Ok(())
 }
 
-fn global_check_stmts<'a, F>(stmts: &[oxc_ast::ast::Statement<'a>], is_global: &F) -> Result<()>
+fn global_check_stmts<'a, F>(stmts: &[oxc_ast::ast::Statement<'a>], is_global: &F, local_assigners: &std::collections::HashSet<String>) -> Result<()>
 where F: Fn(&oxc_ast::ast::IdentifierReference) -> bool
 {
-    for stmt in stmts { global_check_stmt(stmt, is_global)?; }
+    for stmt in stmts { global_check_stmt(stmt, is_global, local_assigners)?; }
     Ok(())
 }
 
-fn global_check_stmt<'a, F>(stmt: &oxc_ast::ast::Statement<'a>, is_global: &F) -> Result<()>
+fn global_check_stmt<'a, F>(stmt: &oxc_ast::ast::Statement<'a>, is_global: &F, local_assigners: &std::collections::HashSet<String>) -> Result<()>
 where F: Fn(&oxc_ast::ast::IdentifierReference) -> bool
 {
     use oxc_ast::ast::Statement;
     match stmt {
-        Statement::ExpressionStatement(e) => global_check_expr(&e.expression, is_global)?,
+        Statement::ExpressionStatement(e) => global_check_expr(&e.expression, is_global, local_assigners)?,
         Statement::VariableDeclaration(v) => {
             for decl in &v.declarations {
-                if let Some(init) = &decl.init { global_check_expr(init, is_global)?; }
+                if let Some(init) = &decl.init { global_check_expr(init, is_global, local_assigners)?; }
             }
         }
         Statement::ReturnStatement(r) => {
-            if let Some(a) = &r.argument { global_check_expr(a, is_global)?; }
+            if let Some(a) = &r.argument { global_check_expr(a, is_global, local_assigners)?; }
         }
         Statement::IfStatement(i) => {
-            global_check_expr(&i.test, is_global)?;
-            global_check_stmt(&i.consequent, is_global)?;
-            if let Some(alt) = &i.alternate { global_check_stmt(alt, is_global)?; }
+            global_check_expr(&i.test, is_global, local_assigners)?;
+            global_check_stmt(&i.consequent, is_global, local_assigners)?;
+            if let Some(alt) = &i.alternate { global_check_stmt(alt, is_global, local_assigners)?; }
         }
-        Statement::BlockStatement(b) => global_check_stmts(&b.body, is_global)?,
+        Statement::BlockStatement(b) => global_check_stmts(&b.body, is_global, local_assigners)?,
         Statement::WhileStatement(w) => {
-            global_check_expr(&w.test, is_global)?;
-            global_check_stmt(&w.body, is_global)?;
+            global_check_expr(&w.test, is_global, local_assigners)?;
+            global_check_stmt(&w.body, is_global, local_assigners)?;
         }
         Statement::ForStatement(f) => {
             if let Some(init) = &f.init {
-                if let Some(e) = init.as_expression() { global_check_expr(e, is_global)?; }
+                if let Some(e) = init.as_expression() { global_check_expr(e, is_global, local_assigners)?; }
             }
-            if let Some(t) = &f.test { global_check_expr(t, is_global)?; }
-            if let Some(u) = &f.update { global_check_expr(u, is_global)?; }
-            global_check_stmt(&f.body, is_global)?;
+            if let Some(t) = &f.test { global_check_expr(t, is_global, local_assigners)?; }
+            if let Some(u) = &f.update { global_check_expr(u, is_global, local_assigners)?; }
+            global_check_stmt(&f.body, is_global, local_assigners)?;
         }
         _ => {}
     }
     Ok(())
 }
 
-fn global_check_expr<'a, F>(expr: &Expression<'a>, is_global: &F) -> Result<()>
+fn global_check_expr<'a, F>(expr: &Expression<'a>, is_global: &F, local_assigners: &std::collections::HashSet<String>) -> Result<()>
 where F: Fn(&oxc_ast::ast::IdentifierReference) -> bool
 {
     match expr {
         Expression::AssignmentExpression(a) => {
             global_check_assignment_target(&a.left, is_global)?;
-            global_check_expr(&a.right, is_global)?;
+            global_check_expr(&a.right, is_global, local_assigners)?;
         }
         Expression::UpdateExpression(u) => {
             if let oxc_ast::ast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) = &u.argument {
@@ -2499,16 +2779,16 @@ where F: Fn(&oxc_ast::ast::IdentifierReference) -> bool
             }
         }
         Expression::LogicalExpression(l) => {
-            global_check_expr(&l.left, is_global)?;
-            global_check_expr(&l.right, is_global)?;
+            global_check_expr(&l.left, is_global, local_assigners)?;
+            global_check_expr(&l.right, is_global, local_assigners)?;
         }
         Expression::ConditionalExpression(c) => {
-            global_check_expr(&c.test, is_global)?;
-            global_check_expr(&c.consequent, is_global)?;
-            global_check_expr(&c.alternate, is_global)?;
+            global_check_expr(&c.test, is_global, local_assigners)?;
+            global_check_expr(&c.consequent, is_global, local_assigners)?;
+            global_check_expr(&c.alternate, is_global, local_assigners)?;
         }
         Expression::SequenceExpression(s) => {
-            for e in &s.expressions { global_check_expr(e, is_global)?; }
+            for e in &s.expressions { global_check_expr(e, is_global, local_assigners)?; }
         }
         Expression::UnaryExpression(u) => {
             if u.operator == oxc_ast::ast::UnaryOperator::Delete {
@@ -2524,10 +2804,61 @@ where F: Fn(&oxc_ast::ast::IdentifierReference) -> bool
             }
         }
         Expression::CallExpression(call) => {
-            global_check_expr(&call.callee, is_global)?;
+            // Check if calling a local closure that assigns globals.
+            if let Expression::Identifier(id) = &call.callee {
+                if local_assigners.contains(id.name.as_str()) {
+                    return Err(CompilerError::invalid_react(
+                        "Cannot reassign variables declared outside of the component/hook\n\nReassigning this value during render is a form of side effect.",
+                    ));
+                }
+            }
+            global_check_expr(&call.callee, is_global, local_assigners)?;
+            // Detect deferred hooks: don't flag closures passed as args to hooks (useX)
+            let callee_name = match &call.callee {
+                Expression::Identifier(id) => Some(id.name.as_str()),
+                Expression::StaticMemberExpression(m) => Some(m.property.name.as_str()),
+                _ => None,
+            };
+            let is_deferred_hook = callee_name.map_or(false, |n| is_hook_name(n));
+            // Check args: if an arg is a reference to a local global-assigning closure, flag it
+            // (e.g. `foo(fn)` where fn = () => { global = x }) — but not for hook calls
             for arg in &call.arguments {
                 if let Some(e) = arg.as_expression() {
-                    global_check_expr(e, is_global)?;
+                    if !is_deferred_hook {
+                        if let Expression::Identifier(id) = e {
+                            if local_assigners.contains(id.name.as_str()) {
+                                return Err(CompilerError::invalid_react(
+                                    "Cannot reassign variables declared outside of the component/hook\n\nReassigning this value during render is a form of side effect.",
+                                ));
+                            }
+                        }
+                    }
+                    global_check_expr(e, is_global, local_assigners)?;
+                }
+            }
+        }
+        Expression::JSXElement(jsx) => {
+            // JSX component tag: <Foo /> where Foo is a local global-assigning closure
+            if let oxc_ast::ast::JSXElementName::Identifier(id) = &jsx.opening_element.name {
+                if local_assigners.contains(id.name.as_str()) {
+                    return Err(CompilerError::invalid_react(
+                        "Cannot reassign variables declared outside of the component/hook\n\nReassigning this value during render is a form of side effect.",
+                    ));
+                }
+            }
+            // JSX children expression containers
+            for child in &jsx.children {
+                if let oxc_ast::ast::JSXChild::ExpressionContainer(c) = child {
+                    if let Some(e) = c.expression.as_expression() {
+                        if let Expression::Identifier(id) = e {
+                            if local_assigners.contains(id.name.as_str()) {
+                                return Err(CompilerError::invalid_react(
+                                    "Cannot reassign variables declared outside of the component/hook\n\nReassigning this value during render is a form of side effect.",
+                                ));
+                            }
+                        }
+                        global_check_expr(e, is_global, local_assigners)?;
+                    }
                 }
             }
         }
