@@ -285,6 +285,13 @@ pub fn lower_for_of<'a>(
 ) -> Result<()> {
     let loc = SourceLocation::source(stmt.span.start, stmt.span.end);
 
+    // `for await` loops are not yet supported.
+    if stmt.r#await {
+        return Err(crate::error::CompilerError::todo(
+            "for-await-of loops are not yet supported",
+        ));
+    }
+
     // Lower the iterable (right-hand side).
     let collection_place = lower_expr(&stmt.right, ctx)?;
 

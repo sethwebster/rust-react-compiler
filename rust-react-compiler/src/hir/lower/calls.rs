@@ -16,6 +16,15 @@ pub fn lower_call<'a>(
     expr: &CallExpression<'a>,
     lower_expr: &mut dyn FnMut(&Expression<'a>, &mut LoweringContext) -> Result<Place>,
 ) -> Result<Place> {
+    // eval() is not supported.
+    if let Expression::Identifier(ident) = &expr.callee {
+        if ident.name == "eval" {
+            return Err(CompilerError::compilation_skipped(
+                "The 'eval' function is not supported",
+            ));
+        }
+    }
+
     // Static member expression: obj.method(args)
     if let Expression::StaticMemberExpression(s) = &expr.callee {
         let receiver = lower_expr(&s.object, ctx)?;

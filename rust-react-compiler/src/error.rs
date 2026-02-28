@@ -67,6 +67,10 @@ impl CompilerError {
         Self(vec![CompilerDiagnostic::new(ErrorCategory::InvalidReact, message)])
     }
 
+    pub fn compilation_skipped(message: impl Into<String>) -> Self {
+        Self(vec![CompilerDiagnostic::new(ErrorCategory::InvalidReact, message)])
+    }
+
     pub fn from_diagnostics(diags: Vec<CompilerDiagnostic>) -> Self {
         Self(diags)
     }
