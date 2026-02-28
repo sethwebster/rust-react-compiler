@@ -163,7 +163,13 @@ pub fn lower_program(
     validate_no_hook_as_value(&program)?;
 
     // Check for setState called during render (always checked, not just with pragma).
-    validate_no_setstate_in_render(&program)?;
+    {
+        let first = source.lines().next().unwrap_or("");
+        let treat_set_as_setter = first.contains("@enableTreatSetIdentifiersAsStateSetters")
+            && !first.contains("@enableTreatSetIdentifiersAsStateSetters:false")
+            && !first.contains("@enableTreatSetIdentifiersAsStateSetters false");
+        validate_no_setstate_in_render(&program, treat_set_as_setter)?;
+    }
 
     // Check for @validateBlocklistedImports pragma and validate imports.
     validate_blocklisted_imports(source, &program)?;
@@ -1943,11 +1949,12 @@ fn check_expr_hook_value(expr: &Expression, is_callee: bool) -> Result<()> {
 
 /// Validate that state setter functions from useState() are not called during render.
 /// Applies when `@validateNoSetStateInRender` pragma is present.
-fn validate_no_setstate_in_render(program: &oxc_ast::ast::Program) -> Result<()> {
+fn validate_no_setstate_in_render(program: &oxc_ast::ast::Program, treat_set_as_setter: bool) -> Result<()> {
     use std::collections::{HashMap, HashSet};
+    use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind, Statement};
 
-    // Find the first component/hook function body in the program.
-    let body_stmts = find_first_fn_body(program);
+    // Find the first component/hook function body AND params in the program.
+    let (body_stmts, maybe_params) = find_first_fn_body_and_params(program);
     if body_stmts.is_empty() {
         return Ok(());
     }
@@ -1958,8 +1965,36 @@ fn validate_no_setstate_in_render(program: &oxc_ast::ast::Program) -> Result<()>
         collect_state_setters_from_stmt(stmt, &mut setters);
     }
 
+    // Also collect prop-based setters when @enableTreatSetIdentifiersAsStateSetters is active.
+    if treat_set_as_setter {
+        if let Some(params) = maybe_params {
+            collect_set_params(params, &mut setters);
+        }
+    }
+
     if setters.is_empty() {
         return Ok(());
+    }
+
+    // Also expand setters with direct aliases: `const aliased = setter` → aliased is a setter.
+    let mut aliases_added = true;
+    while aliases_added {
+        aliases_added = false;
+        for stmt in body_stmts {
+            if let Statement::VariableDeclaration(v) = stmt {
+                for decl in &v.declarations {
+                    if let Some(Expression::Identifier(rhs)) = &decl.init {
+                        if setters.contains(rhs.name.as_str()) {
+                            if let BindingPatternKind::BindingIdentifier(lhs) = &decl.id.kind {
+                                if setters.insert(lhs.name.to_string()) {
+                                    aliases_added = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Step 2: Collect a map of local function name → set of function names it calls.
@@ -2096,6 +2131,83 @@ fn collect_called_names_in_expr<'a>(
 }
 
 /// Find the statements of the first function body in the program.
+/// Like `find_first_fn_body` but also returns the function params.
+fn find_first_fn_body_and_params<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> (&'a [oxc_ast::ast::Statement<'a>], Option<&'a oxc_ast::ast::FormalParameters<'a>>) {
+    for stmt in &program.body {
+        match stmt {
+            oxc_ast::ast::Statement::FunctionDeclaration(f) => {
+                if let Some(body) = &f.body {
+                    return (&body.statements, Some(&f.params));
+                }
+            }
+            oxc_ast::ast::Statement::ExportDefaultDeclaration(d) => {
+                match &d.declaration {
+                    ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
+                        if let Some(body) = &f.body {
+                            return (&body.statements, Some(&f.params));
+                        }
+                    }
+                    ExportDefaultDeclarationKind::ArrowFunctionExpression(a) => {
+                        return (&a.body.statements, Some(&a.params));
+                    }
+                    _ => {}
+                }
+            }
+            oxc_ast::ast::Statement::ExportNamedDeclaration(d) => {
+                if let Some(Declaration::FunctionDeclaration(f)) = &d.declaration {
+                    if let Some(body) = &f.body {
+                        return (&body.statements, Some(&f.params));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (&[], None)
+}
+
+/// Collect identifiers starting with `set` from function parameters (for @enableTreatSetIdentifiersAsStateSetters).
+fn collect_set_params(
+    params: &oxc_ast::ast::FormalParameters,
+    setters: &mut std::collections::HashSet<String>,
+) {
+    use oxc_ast::ast::BindingPatternKind;
+    for param in &params.items {
+        collect_set_from_binding_pattern(&param.pattern, setters);
+    }
+}
+
+fn collect_set_from_binding_pattern(
+    pat: &oxc_ast::ast::BindingPattern,
+    setters: &mut std::collections::HashSet<String>,
+) {
+    use oxc_ast::ast::BindingPatternKind;
+    match &pat.kind {
+        BindingPatternKind::BindingIdentifier(id) => {
+            let name = id.name.as_str();
+            if name.starts_with("set") && name.len() > 3 {
+                let fourth = name.chars().nth(3);
+                if fourth.map_or(false, |c| c.is_uppercase() || c == '_') {
+                    setters.insert(name.to_string());
+                }
+            }
+        }
+        BindingPatternKind::ObjectPattern(obj) => {
+            for prop in &obj.properties {
+                collect_set_from_binding_pattern(&prop.value, setters);
+            }
+        }
+        BindingPatternKind::ArrayPattern(arr) => {
+            for item in arr.elements.iter().flatten() {
+                collect_set_from_binding_pattern(item, setters);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn find_first_fn_body<'a>(program: &'a oxc_ast::ast::Program<'a>) -> &'a [oxc_ast::ast::Statement<'a>] {
     for stmt in &program.body {
         match stmt {
@@ -2411,8 +2523,16 @@ where F: Fn(&oxc_ast::ast::IdentifierReference) -> bool
                 }
             }
         }
-        // Do NOT recurse into nested arrow/function expressions — those are
-        // event handlers or effects, not render-time code.
+        Expression::CallExpression(call) => {
+            global_check_expr(&call.callee, is_global)?;
+            for arg in &call.arguments {
+                if let Some(e) = arg.as_expression() {
+                    global_check_expr(e, is_global)?;
+                }
+            }
+        }
+        // Do NOT recurse into arrow/function expressions — closures passed to hooks
+        // or used as event handlers are allowed to modify globals.
         Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => {}
         _ => {}
     }
