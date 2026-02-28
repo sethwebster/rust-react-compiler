@@ -246,6 +246,10 @@ pub fn lower_program(
     //   `obj.prop = () => ref.current; ... obj.prop()` → error.
     validate_no_object_method_ref_call(&program)?;
 
+    // Detect indirect ref access via curried call:
+    //   `const f = x => () => ref.current; ... f(args)()` → error.
+    validate_no_curried_ref_factory_call(&program)?;
+
     // Unsupported validation pragmas: flag any file that requests a validation
     // pass that we haven't implemented yet.
     {
@@ -10025,6 +10029,200 @@ fn validate_no_object_method_ref_call<'a>(
                     }
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+// validate_no_curried_ref_factory_call
+// ---------------------------------------------------------------------------
+//
+// Detect: `const f = x => () => ref.current; ... f(args)()` — a curried
+// "ref-factory" closure whose result is immediately called during render.
+fn validate_no_curried_ref_factory_call<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    use std::collections::HashSet;
+
+    /// Check if expr contains `ref.current` for any ref in `refs` (recursing into closures).
+    fn expr_has_ref_current<'a>(expr: &Expression<'a>, refs: &HashSet<String>) -> bool {
+        match expr {
+            Expression::StaticMemberExpression(m) => {
+                if m.property.name == "current" {
+                    if let Expression::Identifier(obj) = &m.object {
+                        if refs.contains(obj.name.as_str()) { return true; }
+                    }
+                }
+                expr_has_ref_current(&m.object, refs)
+            }
+            Expression::ArrowFunctionExpression(arrow) => {
+                arrow.body.statements.iter().any(|s| stmt_has_ref_current(s, refs))
+            }
+            Expression::FunctionExpression(func) => {
+                func.body.as_ref().map_or(false, |b| {
+                    b.statements.iter().any(|s| stmt_has_ref_current(s, refs))
+                })
+            }
+            Expression::CallExpression(call) => {
+                expr_has_ref_current(&call.callee, refs)
+                    || call.arguments.iter().any(|a| {
+                        a.as_expression().map_or(false, |e| expr_has_ref_current(e, refs))
+                    })
+            }
+            Expression::LogicalExpression(l) => {
+                expr_has_ref_current(&l.left, refs) || expr_has_ref_current(&l.right, refs)
+            }
+            Expression::ConditionalExpression(c) => {
+                expr_has_ref_current(&c.test, refs)
+                    || expr_has_ref_current(&c.consequent, refs)
+                    || expr_has_ref_current(&c.alternate, refs)
+            }
+            _ => false,
+        }
+    }
+
+    fn stmt_has_ref_current<'a>(stmt: &Statement<'a>, refs: &HashSet<String>) -> bool {
+        match stmt {
+            Statement::ExpressionStatement(e) => expr_has_ref_current(&e.expression, refs),
+            Statement::ReturnStatement(r) => {
+                r.argument.as_ref().map_or(false, |a| expr_has_ref_current(a, refs))
+            }
+            Statement::VariableDeclaration(v) => v.declarations.iter().any(|d| {
+                d.init.as_ref().map_or(false, |init| expr_has_ref_current(init, refs))
+            }),
+            Statement::IfStatement(i) => {
+                stmt_has_ref_current(&i.consequent, refs)
+                    || i.alternate.as_ref().map_or(false, |a| stmt_has_ref_current(a, refs))
+            }
+            Statement::BlockStatement(b) => b.body.iter().any(|s| stmt_has_ref_current(s, refs)),
+            _ => false,
+        }
+    }
+
+    /// Returns true if `expr` is a closure that returns (or directly is) a ref-accessing closure.
+    /// Handles: `x => () => ref.current` (concise outer returning concise inner)
+    ///          `x => () => { ref.current; ... }` (concise outer returning block inner)
+    fn is_ref_factory_closure<'a>(expr: &Expression<'a>, refs: &HashSet<String>) -> bool {
+        let stmts = match expr {
+            Expression::ArrowFunctionExpression(a) => &a.body.statements[..],
+            Expression::FunctionExpression(f) => match &f.body {
+                Some(b) => &b.statements[..],
+                None => return false,
+            },
+            _ => return false,
+        };
+        // Check if the body (concise or block) returns/is a ref-accessing closure.
+        for stmt in stmts {
+            match stmt {
+                Statement::ExpressionStatement(e) => {
+                    // Concise body: the expression IS the returned value
+                    if matches!(&e.expression, Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)) {
+                        if expr_has_ref_current(&e.expression, refs) { return true; }
+                    }
+                }
+                Statement::ReturnStatement(r) => {
+                    if let Some(ret) = &r.argument {
+                        if matches!(ret, Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)) {
+                            if expr_has_ref_current(ret, refs) { return true; }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Scan `expr` for `factory(args)()` pattern where `factory` is in `ref_factories`.
+    fn expr_has_curried_factory_call<'a>(
+        expr: &Expression<'a>,
+        ref_factories: &HashSet<String>,
+    ) -> bool {
+        if let Expression::CallExpression(outer_call) = expr {
+            // Is the callee itself a call expression?
+            if let Expression::CallExpression(inner_call) = &outer_call.callee {
+                if let Expression::Identifier(id) = &inner_call.callee {
+                    if ref_factories.contains(id.name.as_str()) {
+                        return true;
+                    }
+                }
+            }
+            // Recurse into arguments and callee
+            if expr_has_curried_factory_call(&outer_call.callee, ref_factories) { return true; }
+            for arg in &outer_call.arguments {
+                if let Some(e) = arg.as_expression() {
+                    if expr_has_curried_factory_call(e, ref_factories) { return true; }
+                }
+            }
+        }
+        // Also recurse into object expressions (e.g. `{ handler: f(args)() }`)
+        if let Expression::ObjectExpression(obj) = expr {
+            for prop in &obj.properties {
+                if let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(p) = prop {
+                    if expr_has_curried_factory_call(&p.value, ref_factories) { return true; }
+                }
+            }
+        }
+        false
+    }
+
+    fn stmts_have_curried_factory_call<'a>(
+        stmts: &[Statement<'a>],
+        ref_factories: &HashSet<String>,
+    ) -> bool {
+        for stmt in stmts {
+            match stmt {
+                Statement::ExpressionStatement(e) => {
+                    if expr_has_curried_factory_call(&e.expression, ref_factories) { return true; }
+                }
+                Statement::VariableDeclaration(v) => {
+                    for decl in &v.declarations {
+                        if let Some(init) = &decl.init {
+                            if expr_has_curried_factory_call(init, ref_factories) { return true; }
+                        }
+                    }
+                }
+                Statement::ReturnStatement(r) => {
+                    if let Some(a) = &r.argument {
+                        if expr_has_curried_factory_call(a, ref_factories) { return true; }
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        let mut refs: HashSet<String> = HashSet::new();
+        for stmt in stmts.iter() {
+            collect_ref_names_from_stmt(stmt, &mut refs);
+        }
+        if refs.is_empty() { continue; }
+
+        // Collect "ref-factory" variables: `const f = x => () => ref.current`
+        let mut ref_factories: HashSet<String> = HashSet::new();
+        for stmt in stmts.iter() {
+            if let Statement::VariableDeclaration(v) = stmt {
+                for decl in &v.declarations {
+                    if let Some(init) = &decl.init {
+                        if is_ref_factory_closure(init, &refs) {
+                            if let oxc_ast::ast::BindingPatternKind::BindingIdentifier(id) = &decl.id.kind {
+                                ref_factories.insert(id.name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if ref_factories.is_empty() { continue; }
+
+        // Check for `factory(args)()` calls in the render body.
+        if stmts_have_curried_factory_call(stmts, &ref_factories) {
+            return Err(CompilerError::invalid_react(
+                "Cannot access refs during render\n\nReact refs are values that are not needed for rendering. Refs should only be accessed outside of render, such as in event handlers or effects. Accessing a ref value (the `current` property) during render can cause your component not to update as expected (https://react.dev/reference/react/useRef)."
+            ));
         }
     }
     Ok(())
