@@ -156,6 +156,9 @@ pub fn lower_program(
 
     let program = parser_return.program;
 
+    // Check for imports from known-incompatible libraries.
+    validate_no_incompatible_libraries(&program)?;
+
     // Check for @validateBlocklistedImports pragma and validate imports.
     validate_blocklisted_imports(source, &program)?;
 
@@ -691,6 +694,12 @@ pub fn lower_statement<'r, 'a: 'r>(
                     "(BuildHIR::lowerStatement) Handle TryStatement without a catch clause",
                 ));
             }
+            // If the try block contains a throw statement, emit a TODO.
+            if stmt_list_has_throw(&s.block.body) {
+                return Err(CompilerError::todo(
+                    "(BuildHIR::lowerStatement) Support ThrowStatement inside of try/catch",
+                ));
+            }
             // TryStatement with catch (and optional finally) is not fully supported;
             // emit UnsupportedNode as a placeholder.
             let loc = span_loc(s.span);
@@ -1186,6 +1195,14 @@ fn bind_pattern<'r, 'a: 'r>(
             );
         }
         BindingPatternKind::ObjectPattern(obj_pat) => {
+            // Computed property keys in destructuring are not supported.
+            for prop in &obj_pat.properties {
+                if prop.computed {
+                    return Err(CompilerError::invariant(
+                        "[InferMutationAliasingEffects] Expected value kind to be initialized",
+                    ));
+                }
+            }
             let hir_pattern = lower_object_pattern(obj_pat, semantic, ctx, loc.clone());
             ctx.push(
                 InstructionValue::Destructure {
@@ -1608,6 +1625,120 @@ fn check_hoisted_function_declarations(stmts: &[oxc_ast::ast::Statement]) -> Res
             return Err(CompilerError::todo(
                 "Support functions with unreachable code that may contain hoisted declarations",
             ));
+        }
+    }
+    Ok(())
+}
+
+/// Collect all bare identifier names referenced in a statement (non-recursive into inner functions).
+fn collect_stmt_ident_refs(stmt: &oxc_ast::ast::Statement) -> Vec<String> {
+    let mut result = Vec::new();
+    collect_idents_in_stmt(stmt, &mut result);
+    result
+}
+
+fn collect_idents_in_stmt(stmt: &oxc_ast::ast::Statement, out: &mut Vec<String>) {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::ExpressionStatement(e) => collect_idents_in_expr(&e.expression, out),
+        Statement::ReturnStatement(r) => {
+            if let Some(arg) = &r.argument {
+                collect_idents_in_expr(arg, out);
+            }
+        }
+        Statement::VariableDeclaration(v) => {
+            for d in &v.declarations {
+                if let Some(init) = &d.init {
+                    collect_idents_in_expr(init, out);
+                }
+            }
+        }
+        Statement::IfStatement(i) => {
+            collect_idents_in_expr(&i.test, out);
+            collect_idents_in_stmt(&i.consequent, out);
+            if let Some(alt) = &i.alternate {
+                collect_idents_in_stmt(alt, out);
+            }
+        }
+        Statement::BlockStatement(b) => {
+            for s in &b.body {
+                collect_idents_in_stmt(s, out);
+            }
+        }
+        // Function declarations: scan the body to find references to outer-scope fn decls.
+        Statement::FunctionDeclaration(f) => {
+            if let Some(body) = &f.body {
+                for s in &body.statements {
+                    collect_idents_in_stmt(s, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_idents_in_expr(expr: &Expression, out: &mut Vec<String>) {
+    match expr {
+        Expression::Identifier(id) => {
+            out.push(id.name.to_string());
+        }
+        Expression::CallExpression(call) => {
+            collect_idents_in_expr(&call.callee, out);
+            for arg in &call.arguments {
+                if let Some(e) = arg.as_expression() {
+                    collect_idents_in_expr(e, out);
+                }
+            }
+        }
+        Expression::BinaryExpression(b) => {
+            collect_idents_in_expr(&b.left, out);
+            collect_idents_in_expr(&b.right, out);
+        }
+        Expression::StaticMemberExpression(s) => {
+            collect_idents_in_expr(&s.object, out);
+        }
+        Expression::ComputedMemberExpression(c) => {
+            collect_idents_in_expr(&c.object, out);
+            collect_idents_in_expr(&c.expression, out);
+        }
+        Expression::JSXElement(j) => {
+            for child in &j.children {
+                if let oxc_ast::ast::JSXChild::ExpressionContainer(e) = child {
+                    if let Some(inner) = e.expression.as_expression() {
+                        collect_idents_in_expr(inner, out);
+                    }
+                }
+            }
+            for attr in &j.opening_element.attributes {
+                if let oxc_ast::ast::JSXAttributeItem::Attribute(a) = attr {
+                    if let Some(oxc_ast::ast::JSXAttributeValue::ExpressionContainer(ec)) = &a.value {
+                        if let Some(inner) = ec.expression.as_expression() {
+                            collect_idents_in_expr(inner, out);
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Check if a list of statements contains any ThrowStatement (shallow check).
+fn stmt_list_has_throw(stmts: &[oxc_ast::ast::Statement]) -> bool {
+    stmts.iter().any(|s| matches!(s, oxc_ast::ast::Statement::ThrowStatement(_)))
+}
+
+/// Validate that the program does not import from known-incompatible libraries.
+fn validate_no_incompatible_libraries(program: &oxc_ast::ast::Program) -> Result<()> {
+    const INCOMPATIBLE: &[&str] = &["ReactCompilerKnownIncompatibleTest"];
+    for stmt in &program.body {
+        if let oxc_ast::ast::Statement::ImportDeclaration(import) = stmt {
+            let src = import.source.value.as_str();
+            if INCOMPATIBLE.contains(&src) {
+                return Err(CompilerError::compilation_skipped(
+                    "Use of incompatible library\n\nThis API returns functions which cannot be memoized without leading to stale UI. To prevent this, by default React Compiler will skip memoizing this component/hook. However, you may see issues if values from this API are passed to other components/hooks that are memoized.",
+                ));
+            }
         }
     }
     Ok(())

@@ -31,10 +31,18 @@ fn source_type_for(path: &Path) -> SourceType {
 }
 
 fn is_error_fixture(path: &Path) -> bool {
-    path.file_name()
+    let name = path.file_name()
         .and_then(|n| n.to_str())
-        .map(|n| n.starts_with("error."))
-        .unwrap_or(false)
+        .unwrap_or("");
+    // Primary convention: filename starts with "error."
+    if name.starts_with("error.") {
+        return true;
+    }
+    // Secondary convention: "todo.error." prefix — also expects an error.
+    if name.starts_with("todo.error.") {
+        return true;
+    }
+    false
 }
 
 /// Run a single fixture. Returns Ok(output_js) or Err(error_message).
