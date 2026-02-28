@@ -271,6 +271,17 @@ pub fn lower_program(
         }
     }
 
+    // When @validatePreserveExistingMemoizationGuarantees is active, detect
+    // optional-chain deps (e.g. `props?.items`) where the callback body accesses
+    // the same path non-optionally — indicating the inferred dep would be the
+    // non-optional form, causing a mismatch with the specified optional dep.
+    {
+        let first = source.lines().next().unwrap_or("");
+        if first.contains("@validatePreserveExistingMemoizationGuarantees") {
+            validate_optional_dep_mismatch(source, &program)?;
+        }
+    }
+
     // Unsupported validation pragmas: flag any file that requests a validation
     // pass that we haven't implemented yet.
     {
@@ -10589,4 +10600,192 @@ fn validate_no_non_ref_custom_hook_current_in_empty_deps_callback<'a>(
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// validate_optional_dep_mismatch
+// ---------------------------------------------------------------------------
+// Detects useMemo/useCallback calls where a dep uses optional chaining (`?.`)
+// but the callback body accesses the same path non-optionally — indicating the
+// compiler would infer a non-optional dep, causing a mismatch with the specified
+// optional dep under @validatePreserveExistingMemoizationGuarantees.
+//
+// Catches three patterns:
+//  1. Dep `a.b?.c.d`, body has `a.b.c.d` (fully non-optional same path).
+//  2. Dep `a?.b`, body has `a.b` somewhere (e.g. inside an `if` block).
+//  3. Dep `a?.b`, body has `a.X` (accesses `a` non-optionally via any property)
+//     AND body also contains `a?.b` (the dep text itself, accessed optionally
+//     inside a conditional) — compiler infers `a.b` because `a` is known non-null.
+fn validate_optional_dep_mismatch<'a>(
+    source: &str,
+    program: &'a oxc_ast::ast::Program<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::Statement;
+
+    let bodies = collect_component_hook_bodies(program);
+    for stmts in bodies {
+        for stmt in stmts {
+            check_stmt_for_optional_dep_mismatch(source, stmt)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_stmt_for_optional_dep_mismatch<'a>(
+    source: &str,
+    stmt: &oxc_ast::ast::Statement<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::{Expression, Statement};
+    match stmt {
+        Statement::VariableDeclaration(v) => {
+            for decl in &v.declarations {
+                if let Some(init) = &decl.init {
+                    check_expr_for_optional_dep_mismatch(source, init)?;
+                }
+            }
+        }
+        Statement::ExpressionStatement(e) => {
+            check_expr_for_optional_dep_mismatch(source, &e.expression)?;
+        }
+        Statement::ReturnStatement(r) => {
+            if let Some(arg) = &r.argument {
+                check_expr_for_optional_dep_mismatch(source, arg)?;
+            }
+        }
+        Statement::BlockStatement(b) => {
+            for s in &b.body {
+                check_stmt_for_optional_dep_mismatch(source, s)?;
+            }
+        }
+        Statement::IfStatement(if_stmt) => {
+            check_stmt_for_optional_dep_mismatch(source, &if_stmt.consequent)?;
+            if let Some(alt) = &if_stmt.alternate {
+                check_stmt_for_optional_dep_mismatch(source, alt)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn check_expr_for_optional_dep_mismatch<'a>(
+    source: &str,
+    expr: &oxc_ast::ast::Expression<'a>,
+) -> Result<()> {
+    use oxc_ast::ast::{ArrayExpressionElement, Expression};
+    use oxc_span::GetSpan;
+
+    let Expression::CallExpression(call) = expr else { return Ok(()); };
+
+    let callee_name = match &call.callee {
+        Expression::Identifier(id) => id.name.as_str(),
+        _ => return Ok(()),
+    };
+    if !matches!(callee_name, "useMemo" | "useCallback") {
+        return Ok(());
+    }
+    if call.arguments.len() < 2 {
+        return Ok(());
+    }
+
+    let callback = call.arguments.first().and_then(|a| a.as_expression());
+    let deps_expr = call.arguments.get(1).and_then(|a| a.as_expression());
+
+    let (Some(callback), Some(Expression::ArrayExpression(deps_arr))) = (callback, deps_expr) else {
+        return Ok(());
+    };
+
+    // Get the callback body source text
+    let cb_body_src: &str = match callback {
+        Expression::ArrowFunctionExpression(a) => {
+            let s = a.body.span.start as usize;
+            let e = a.body.span.end as usize;
+            if s <= e && e <= source.len() { &source[s..e] } else { return Ok(()); }
+        }
+        Expression::FunctionExpression(f) => {
+            if let Some(body) = &f.body {
+                let s = body.span.start as usize;
+                let e = body.span.end as usize;
+                if s <= e && e <= source.len() { &source[s..e] } else { return Ok(()); }
+            } else { return Ok(()); }
+        }
+        _ => return Ok(()),
+    };
+
+    for dep_elem in &deps_arr.elements {
+        let dep_expr = match dep_elem {
+            ArrayExpressionElement::SpreadElement(_) => continue,
+            ArrayExpressionElement::Elision(_) => continue,
+            other => match other.as_expression() {
+                Some(e) => e,
+                None => continue,
+            },
+        };
+
+        let dep_span = dep_expr.span();
+        let ds = dep_span.start as usize;
+        let de = dep_span.end as usize;
+        if ds > de || de > source.len() { continue; }
+        let dep_src = &source[ds..de];
+
+        // Only process deps that contain optional chain `?.`
+        if !dep_src.contains("?.") { continue; }
+
+        // Non-optional version: strip all `?.` → `.`
+        let non_optional = dep_src.replace("?.", ".");
+
+        // Case 1 & 2: body contains the non-optional version of the dep
+        if contains_as_word(cb_body_src, &non_optional) {
+            return Err(CompilerError::compilation_skipped(
+                "Existing memoization could not be preserved\n\nReact Compiler has skipped \
+                 optimizing this component because the existing manual memoization could not \
+                 be preserved. The inferred dependencies did not match the manually specified \
+                 dependencies, which could cause the value to change more or less frequently \
+                 than expected.",
+            ));
+        }
+
+        // Case 3: root of dep (before first `?.`) is accessed non-optionally
+        // somewhere in body (e.g. `props.cond`) AND the dep text appears in body.
+        // This indicates `root` is known non-null in that context, so the compiler
+        // would infer the non-optional form of the dep.
+        if let Some(opt_pos) = dep_src.find("?.") {
+            let root = &dep_src[..opt_pos];
+            if !root.is_empty() {
+                let root_dot = format!("{}.", root);
+                if contains_as_word(cb_body_src, &root_dot)
+                    && contains_as_word(cb_body_src, dep_src)
+                {
+                    return Err(CompilerError::compilation_skipped(
+                        "Existing memoization could not be preserved\n\nReact Compiler has skipped \
+                         optimizing this component because the existing manual memoization could not \
+                         be preserved. The inferred dependencies did not match the manually specified \
+                         dependencies, which could cause the value to change more or less frequently \
+                         than expected.",
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Check whether `s` contains `pattern` as a whole-word match (not preceded
+/// by an identifier character: alphanumeric, `_`, or `$`).
+fn contains_as_word(s: &str, pattern: &str) -> bool {
+    if pattern.is_empty() { return false; }
+    let mut start = 0;
+    while let Some(rel_pos) = s[start..].find(pattern) {
+        let pos = start + rel_pos;
+        let before_ok = pos == 0 || {
+            let c = s[..pos].chars().next_back().unwrap_or('\0');
+            !(c.is_alphanumeric() || c == '_' || c == '$')
+        };
+        if before_ok {
+            return true;
+        }
+        start = pos + 1;
+    }
+    false
 }
