@@ -3252,14 +3252,9 @@ fn validate_ref_access_during_render<'a>(
         for stmt in stmts {
             collect_ref_names_from_stmt(stmt, &mut refs);
         }
-        // Collect ref params (bare `ref` or *Ref named)
+        // Collect ref params (bare `ref`/`*Ref` or destructured `{ref, fooRef}`)
         for param in &params.items {
-            if let oxc_ast::ast::BindingPatternKind::BindingIdentifier(id) = &param.pattern.kind {
-                let name = id.name.as_str();
-                if name == "ref" || name.ends_with("Ref") {
-                    refs.insert(name.to_string());
-                }
-            }
+            collect_ref_names_from_binding_pattern(&param.pattern, &mut refs);
         }
         if !refs.is_empty() {
             check_stmts_for_ref_access(stmts, &refs)?;
@@ -3273,23 +3268,29 @@ fn validate_ref_access_during_render<'a>(
                 let name = f.id.as_ref().map(|id| id.name.as_str()).unwrap_or("");
                 if !name.is_empty() {
                     if let Some(body) = &f.body {
-                        check_fn_stmts_with_params(&body.statements, &f.params)?;
+                        if !has_use_no_memo_directive(body) {
+                            check_fn_stmts_with_params(&body.statements, &f.params)?;
+                        }
                     }
                 }
             }
             Statement::ExportDefaultDeclaration(d) => match &d.declaration {
                 ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
                     if let Some(body) = &f.body {
-                        check_fn_stmts_with_params(&body.statements, &f.params)?;
+                        if !has_use_no_memo_directive(body) {
+                            check_fn_stmts_with_params(&body.statements, &f.params)?;
+                        }
                     }
                 }
                 ExportDefaultDeclarationKind::ArrowFunctionExpression(a) => {
-                    let mut refs = std::collections::HashSet::new();
-                    for stmt in &a.body.statements {
-                        collect_ref_names_from_stmt(stmt, &mut refs);
-                    }
-                    if !refs.is_empty() {
-                        check_stmts_for_ref_access(&a.body.statements, &refs)?;
+                    if !has_use_no_memo_directive(&a.body) {
+                        let mut refs = std::collections::HashSet::new();
+                        for stmt in &a.body.statements {
+                            collect_ref_names_from_stmt(stmt, &mut refs);
+                        }
+                        if !refs.is_empty() {
+                            check_stmts_for_ref_access(&a.body.statements, &refs)?;
+                        }
                     }
                 }
                 _ => {}
@@ -3297,7 +3298,9 @@ fn validate_ref_access_during_render<'a>(
             Statement::ExportNamedDeclaration(d) => {
                 if let Some(Declaration::FunctionDeclaration(f)) = &d.declaration {
                     if let Some(body) = &f.body {
-                        check_fn_stmts_with_params(&body.statements, &f.params)?;
+                        if !has_use_no_memo_directive(body) {
+                            check_fn_stmts_with_params(&body.statements, &f.params)?;
+                        }
                     }
                 }
             }
@@ -3306,17 +3309,21 @@ fn validate_ref_access_during_render<'a>(
                     if let Some(init) = &decl.init {
                         match init {
                             Expression::ArrowFunctionExpression(a) => {
-                                let mut refs = std::collections::HashSet::new();
-                                for stmt in &a.body.statements {
-                                    collect_ref_names_from_stmt(stmt, &mut refs);
-                                }
-                                if !refs.is_empty() {
-                                    check_stmts_for_ref_access(&a.body.statements, &refs)?;
+                                if !has_use_no_memo_directive(&a.body) {
+                                    let mut refs = std::collections::HashSet::new();
+                                    for stmt in &a.body.statements {
+                                        collect_ref_names_from_stmt(stmt, &mut refs);
+                                    }
+                                    if !refs.is_empty() {
+                                        check_stmts_for_ref_access(&a.body.statements, &refs)?;
+                                    }
                                 }
                             }
                             Expression::FunctionExpression(f) => {
                                 if let Some(body) = &f.body {
-                                    check_fn_stmts_with_params(&body.statements, &f.params)?;
+                                    if !has_use_no_memo_directive(body) {
+                                        check_fn_stmts_with_params(&body.statements, &f.params)?;
+                                    }
                                 }
                             }
                             _ => {}
@@ -3330,6 +3337,40 @@ fn validate_ref_access_during_render<'a>(
     Ok(())
 }
 
+fn has_use_no_memo_directive(body: &oxc_ast::ast::FunctionBody) -> bool {
+    body.directives.iter().any(|d| {
+        matches!(d.expression.value.as_str(), "use no memo" | "use no forget")
+    })
+}
+
+/// Collect ref-named bindings from a function parameter pattern.
+/// Handles: bare identifiers (`ref`, `fooRef`), ObjectPattern (`{ref, fooRef}`).
+fn collect_ref_names_from_binding_pattern<'a>(
+    pat: &oxc_ast::ast::BindingPattern<'a>,
+    refs: &mut std::collections::HashSet<String>,
+) {
+    use oxc_ast::ast::BindingPatternKind;
+    match &pat.kind {
+        BindingPatternKind::BindingIdentifier(id) => {
+            let name = id.name.as_str();
+            if name == "ref" || name.ends_with("Ref") {
+                refs.insert(name.to_string());
+            }
+        }
+        BindingPatternKind::ObjectPattern(obj) => {
+            for prop in &obj.properties {
+                collect_ref_names_from_binding_pattern(&prop.value, refs);
+            }
+        }
+        BindingPatternKind::ArrayPattern(arr) => {
+            for item in arr.elements.iter().flatten() {
+                collect_ref_names_from_binding_pattern(item, refs);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn collect_ref_names_from_stmt<'a>(
     stmt: &'a oxc_ast::ast::Statement<'a>,
     refs: &mut std::collections::HashSet<String>,
@@ -3337,10 +3378,18 @@ fn collect_ref_names_from_stmt<'a>(
     if let oxc_ast::ast::Statement::VariableDeclaration(v) = stmt {
         for decl in &v.declarations {
             if let Some(init) = &decl.init {
-                if is_use_ref_call(init) {
-                    // Extract the binding identifier name
-                    if let oxc_ast::ast::BindingPatternKind::BindingIdentifier(id) = &decl.id.kind {
+                if let oxc_ast::ast::BindingPatternKind::BindingIdentifier(id) = &decl.id.kind {
+                    // `const ref = useRef(...)` or `const fooRef = useRef(...)`
+                    if is_use_ref_call(init) {
                         refs.insert(id.name.to_string());
+                    }
+                    // `const ref = someExpr.ref` or `const fooRef = someExpr.fooRef`
+                    // Handles: `const ref = props.ref`
+                    if let Expression::StaticMemberExpression(m) = init {
+                        let prop = m.property.name.as_str();
+                        if prop == "ref" || prop.ends_with("Ref") {
+                            refs.insert(id.name.to_string());
+                        }
                     }
                 }
             }
@@ -3461,8 +3510,18 @@ fn check_expr_for_ref_access<'a>(
         // ref.current (read)
         Expression::StaticMemberExpression(m) => {
             if m.property.name == "current" {
+                // Direct ref: `ref.current` where `ref` is in the refs set
                 if let Expression::Identifier(obj) = &m.object {
                     if refs.contains(obj.name.as_str()) {
+                        return Err(CompilerError::invalid_react(
+                            "Cannot access refs during render\n\nReact refs are values that are not needed for rendering. Refs should only be accessed outside of render, such as in event handlers or effects. Accessing a ref value (the `current` property) during render can cause your component not to update as expected (https://react.dev/reference/react/useRef)."
+                        ));
+                    }
+                }
+                // Nested: `props.ref.current` or `obj.someRef.current`
+                if let Expression::StaticMemberExpression(inner) = &m.object {
+                    let prop = inner.property.name.as_str();
+                    if prop == "ref" || prop.ends_with("Ref") {
                         return Err(CompilerError::invalid_react(
                             "Cannot access refs during render\n\nReact refs are values that are not needed for rendering. Refs should only be accessed outside of render, such as in event handlers or effects. Accessing a ref value (the `current` property) during render can cause your component not to update as expected (https://react.dev/reference/react/useRef)."
                         ));
@@ -3542,6 +3601,34 @@ fn check_expr_for_ref_access<'a>(
         Expression::FunctionExpression(func) => {
             if let Some(body) = &func.body {
                 check_stmts_for_ref_access(&body.statements, refs)?;
+            }
+        }
+        // JSX elements — check attribute values and children for ref.current
+        Expression::JSXElement(jsx) => {
+            for attr in &jsx.opening_element.attributes {
+                if let oxc_ast::ast::JSXAttributeItem::Attribute(a) = attr {
+                    if let Some(oxc_ast::ast::JSXAttributeValue::ExpressionContainer(c)) = &a.value {
+                        if let Some(e) = c.expression.as_expression() {
+                            check_expr_for_ref_access(e, refs)?;
+                        }
+                    }
+                }
+            }
+            for child in &jsx.children {
+                if let oxc_ast::ast::JSXChild::ExpressionContainer(c) = child {
+                    if let Some(e) = c.expression.as_expression() {
+                        check_expr_for_ref_access(e, refs)?;
+                    }
+                }
+            }
+        }
+        Expression::JSXFragment(frag) => {
+            for child in &frag.children {
+                if let oxc_ast::ast::JSXChild::ExpressionContainer(c) = child {
+                    if let Some(e) = c.expression.as_expression() {
+                        check_expr_for_ref_access(e, refs)?;
+                    }
+                }
             }
         }
         _ => {}
