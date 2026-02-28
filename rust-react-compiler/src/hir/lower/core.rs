@@ -196,13 +196,15 @@ pub fn lower_program(
             // Check for ref.current in hook dependency arrays (always an error).
             validate_no_ref_in_hook_deps(&program)?;
 
-            // Check for ref.current access during render (pragma-controlled).
-            // Enabled when @validateRefAccessDuringRender is present and not set to false.
-            let ref_validate = first.contains("@validateRefAccessDuringRender")
-                && !first.contains("@validateRefAccessDuringRender false")
-                && !first.contains("@validateRefAccessDuringRender:false");
-            if ref_validate {
-                validate_ref_access_during_render(&program)?;
+            // Check for ref.current access during render.
+            // Default enabled; disabled only when explicitly set to false.
+            let ref_disabled = first.contains("@validateRefAccessDuringRender false")
+                || first.contains("@validateRefAccessDuringRender:false");
+            // Deep check (closure recursion) only when pragma is explicitly enabled.
+            let ref_deep = first.contains("@validateRefAccessDuringRender")
+                && !ref_disabled;
+            if !ref_disabled {
+                validate_ref_access_during_render(&program, ref_deep)?;
             }
         }
     }
@@ -3691,12 +3693,14 @@ fn is_hook_call_expr<'a>(
 /// inside closures). Ref names are scoped per-function to avoid false positives.
 fn validate_ref_access_during_render<'a>(
     program: &'a oxc_ast::ast::Program<'a>,
+    deep: bool,
 ) -> Result<()> {
     use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind, Statement};
 
     fn check_fn_stmts_with_params<'a>(
         stmts: &[oxc_ast::ast::Statement<'a>],
         params: &oxc_ast::ast::FormalParameters<'a>,
+        deep: bool,
     ) -> Result<()> {
         let mut refs = std::collections::HashSet::new();
         // Collect refs from body (useRef calls)
@@ -3707,9 +3711,9 @@ fn validate_ref_access_during_render<'a>(
         for param in &params.items {
             collect_ref_names_from_binding_pattern(&param.pattern, &mut refs);
         }
-        if !refs.is_empty() {
-            check_stmts_for_ref_access(stmts, &refs)?;
-        }
+        // Always run the check (not just when refs is non-empty) — nested *.ref.current patterns
+        // don't require the refs set to be populated.
+        check_stmts_for_ref_access(stmts, &refs, deep)?;
         Ok(())
     }
 
@@ -3720,7 +3724,7 @@ fn validate_ref_access_during_render<'a>(
                 if !name.is_empty() {
                     if let Some(body) = &f.body {
                         if !has_use_no_memo_directive(body) {
-                            check_fn_stmts_with_params(&body.statements, &f.params)?;
+                            check_fn_stmts_with_params(&body.statements, &f.params, deep)?;
                         }
                     }
                 }
@@ -3729,7 +3733,7 @@ fn validate_ref_access_during_render<'a>(
                 ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
                     if let Some(body) = &f.body {
                         if !has_use_no_memo_directive(body) {
-                            check_fn_stmts_with_params(&body.statements, &f.params)?;
+                            check_fn_stmts_with_params(&body.statements, &f.params, deep)?;
                         }
                     }
                 }
@@ -3739,9 +3743,7 @@ fn validate_ref_access_during_render<'a>(
                         for stmt in &a.body.statements {
                             collect_ref_names_from_stmt(stmt, &mut refs);
                         }
-                        if !refs.is_empty() {
-                            check_stmts_for_ref_access(&a.body.statements, &refs)?;
-                        }
+                        check_stmts_for_ref_access(&a.body.statements, &refs, deep)?;
                     }
                 }
                 _ => {}
@@ -3750,7 +3752,7 @@ fn validate_ref_access_during_render<'a>(
                 if let Some(Declaration::FunctionDeclaration(f)) = &d.declaration {
                     if let Some(body) = &f.body {
                         if !has_use_no_memo_directive(body) {
-                            check_fn_stmts_with_params(&body.statements, &f.params)?;
+                            check_fn_stmts_with_params(&body.statements, &f.params, deep)?;
                         }
                     }
                 }
@@ -3765,15 +3767,13 @@ fn validate_ref_access_during_render<'a>(
                                     for stmt in &a.body.statements {
                                         collect_ref_names_from_stmt(stmt, &mut refs);
                                     }
-                                    if !refs.is_empty() {
-                                        check_stmts_for_ref_access(&a.body.statements, &refs)?;
-                                    }
+                                    check_stmts_for_ref_access(&a.body.statements, &refs, deep)?;
                                 }
                             }
                             Expression::FunctionExpression(f) => {
                                 if let Some(body) = &f.body {
                                     if !has_use_no_memo_directive(body) {
-                                        check_fn_stmts_with_params(&body.statements, &f.params)?;
+                                        check_fn_stmts_with_params(&body.statements, &f.params, deep)?;
                                     }
                                 }
                             }
@@ -3866,9 +3866,10 @@ fn is_use_ref_call(expr: &Expression) -> bool {
 fn check_stmts_for_ref_access<'a>(
     stmts: &[oxc_ast::ast::Statement<'a>],
     refs: &std::collections::HashSet<String>,
+    deep: bool,
 ) -> Result<()> {
     for stmt in stmts {
-        check_stmt_for_ref_access(stmt, refs)?;
+        check_stmt_for_ref_access(stmt, refs, deep)?;
     }
     Ok(())
 }
@@ -3876,19 +3877,20 @@ fn check_stmts_for_ref_access<'a>(
 fn check_stmt_for_ref_access<'a>(
     stmt: &oxc_ast::ast::Statement<'a>,
     refs: &std::collections::HashSet<String>,
+    deep: bool,
 ) -> Result<()> {
     use oxc_ast::ast::Statement;
     match stmt {
-        Statement::ExpressionStatement(e) => check_expr_for_ref_access(&e.expression, refs)?,
+        Statement::ExpressionStatement(e) => check_expr_for_ref_access(&e.expression, refs, deep)?,
         Statement::VariableDeclaration(v) => {
             for d in &v.declarations {
                 if let Some(init) = &d.init {
-                    check_expr_for_ref_access(init, refs)?;
+                    check_expr_for_ref_access(init, refs, deep)?;
                 }
             }
         }
         Statement::ReturnStatement(r) => {
-            if let Some(a) = &r.argument { check_expr_for_ref_access(a, refs)?; }
+            if let Some(a) = &r.argument { check_expr_for_ref_access(a, refs, deep)?; }
         }
         Statement::IfStatement(i) => {
             // Skip if-blocks that are null-guard lazy-initialization patterns:
@@ -3896,16 +3898,18 @@ fn check_stmt_for_ref_access<'a>(
             if is_ref_null_guard(&i.test, refs) {
                 // Don't check this if-block (lazy init allowed).
             } else {
-                check_expr_for_ref_access(&i.test, refs)?;
-                check_stmt_for_ref_access(&i.consequent, refs)?;
-                if let Some(alt) = &i.alternate { check_stmt_for_ref_access(alt, refs)?; }
+                check_expr_for_ref_access(&i.test, refs, deep)?;
+                check_stmt_for_ref_access(&i.consequent, refs, deep)?;
+                if let Some(alt) = &i.alternate { check_stmt_for_ref_access(alt, refs, deep)?; }
             }
         }
-        Statement::BlockStatement(b) => check_stmts_for_ref_access(&b.body, refs)?,
+        Statement::BlockStatement(b) => check_stmts_for_ref_access(&b.body, refs, deep)?,
         // Recurse into nested function declarations — they may capture outer refs
         Statement::FunctionDeclaration(f) => {
-            if let Some(body) = &f.body {
-                check_stmts_for_ref_access(&body.statements, refs)?;
+            if deep {
+                if let Some(body) = &f.body {
+                    check_stmts_for_ref_access(&body.statements, refs, deep)?;
+                }
             }
         }
         _ => {}
@@ -3953,9 +3957,16 @@ fn is_ref_current_expr(expr: &Expression, refs: &std::collections::HashSet<Strin
     false
 }
 
+fn ref_access_error() -> crate::error::CompilerError {
+    CompilerError::invalid_react(
+        "Cannot access refs during render\n\nReact refs are values that are not needed for rendering. Refs should only be accessed outside of render, such as in event handlers or effects. Accessing a ref value (the `current` property) during render can cause your component not to update as expected (https://react.dev/reference/react/useRef)."
+    )
+}
+
 fn check_expr_for_ref_access<'a>(
     expr: &Expression<'a>,
     refs: &std::collections::HashSet<String>,
+    deep: bool,
 ) -> Result<()> {
     match expr {
         // ref.current (read)
@@ -3964,23 +3975,37 @@ fn check_expr_for_ref_access<'a>(
                 // Direct ref: `ref.current` where `ref` is in the refs set
                 if let Expression::Identifier(obj) = &m.object {
                     if refs.contains(obj.name.as_str()) {
-                        return Err(CompilerError::invalid_react(
-                            "Cannot access refs during render\n\nReact refs are values that are not needed for rendering. Refs should only be accessed outside of render, such as in event handlers or effects. Accessing a ref value (the `current` property) during render can cause your component not to update as expected (https://react.dev/reference/react/useRef)."
-                        ));
+                        return Err(ref_access_error());
                     }
                 }
                 // Nested: `props.ref.current` or `obj.someRef.current`
                 if let Expression::StaticMemberExpression(inner) = &m.object {
                     let prop = inner.property.name.as_str();
                     if prop == "ref" || prop.ends_with("Ref") {
-                        return Err(CompilerError::invalid_react(
-                            "Cannot access refs during render\n\nReact refs are values that are not needed for rendering. Refs should only be accessed outside of render, such as in event handlers or effects. Accessing a ref value (the `current` property) during render can cause your component not to update as expected (https://react.dev/reference/react/useRef)."
-                        ));
+                        return Err(ref_access_error());
                     }
                 }
             }
             // ref.current.prop (nested) — check object
-            check_expr_for_ref_access(&m.object, refs)?;
+            check_expr_for_ref_access(&m.object, refs, deep)?;
+        }
+        // ref?.current — optional chaining
+        Expression::ChainExpression(chain) => {
+            if let oxc_ast::ast::ChainElement::StaticMemberExpression(m) = &chain.expression {
+                if m.property.name == "current" {
+                    if let Expression::Identifier(obj) = &m.object {
+                        if refs.contains(obj.name.as_str()) {
+                            return Err(ref_access_error());
+                        }
+                    }
+                    if let Expression::StaticMemberExpression(inner) = &m.object {
+                        let prop = inner.property.name.as_str();
+                        if prop == "ref" || prop.ends_with("Ref") {
+                            return Err(ref_access_error());
+                        }
+                    }
+                }
+            }
         }
         // ref.current = value (write via assignment) or ref.current.prop = value
         Expression::AssignmentExpression(a) => {
@@ -3990,9 +4015,7 @@ fn check_expr_for_ref_access<'a>(
                     if m.property.name == "current" {
                         if let Expression::Identifier(obj) = &m.object {
                             if refs.contains(obj.name.as_str()) {
-                                return Err(CompilerError::invalid_react(
-                                    "Cannot access refs during render\n\nReact refs are values that are not needed for rendering. Refs should only be accessed outside of render, such as in event handlers or effects. Accessing a ref value (the `current` property) during render can cause your component not to update as expected (https://react.dev/reference/react/useRef)."
-                                ));
+                                return Err(ref_access_error());
                             }
                         }
                     }
@@ -4001,9 +4024,7 @@ fn check_expr_for_ref_access<'a>(
                         if inner_m.property.name == "current" {
                             if let Expression::Identifier(obj) = &inner_m.object {
                                 if refs.contains(obj.name.as_str()) {
-                                    return Err(CompilerError::invalid_react(
-                                        "Cannot access refs during render\n\nReact refs are values that are not needed for rendering. Refs should only be accessed outside of render, such as in event handlers or effects. Accessing a ref value (the `current` property) during render can cause your component not to update as expected (https://react.dev/reference/react/useRef)."
-                                    ));
+                                    return Err(ref_access_error());
                                 }
                             }
                         }
@@ -4011,7 +4032,7 @@ fn check_expr_for_ref_access<'a>(
                 }
                 _ => {}
             }
-            check_expr_for_ref_access(&a.right, refs)?;
+            check_expr_for_ref_access(&a.right, refs, deep)?;
         }
         // Function calls — check arguments for ref.current
         Expression::CallExpression(call) => {
@@ -4025,33 +4046,37 @@ fn check_expr_for_ref_access<'a>(
             let is_deferred_hook = matches!(callee_name,
                 Some("useEffect" | "useLayoutEffect" | "useInsertionEffect" | "useCallback")
             );
-            check_expr_for_ref_access(&call.callee, refs)?;
+            check_expr_for_ref_access(&call.callee, refs, deep)?;
             for (i, arg) in call.arguments.iter().enumerate() {
                 // Skip the callback (first arg) for deferred hooks
                 if is_deferred_hook && i == 0 {
                     continue;
                 }
                 if let Some(e) = arg.as_expression() {
-                    check_expr_for_ref_access(e, refs)?;
+                    check_expr_for_ref_access(e, refs, deep)?;
                 }
             }
         }
         Expression::LogicalExpression(l) => {
-            check_expr_for_ref_access(&l.left, refs)?;
-            check_expr_for_ref_access(&l.right, refs)?;
+            check_expr_for_ref_access(&l.left, refs, deep)?;
+            check_expr_for_ref_access(&l.right, refs, deep)?;
         }
         Expression::ConditionalExpression(c) => {
-            check_expr_for_ref_access(&c.test, refs)?;
-            check_expr_for_ref_access(&c.consequent, refs)?;
-            check_expr_for_ref_access(&c.alternate, refs)?;
+            check_expr_for_ref_access(&c.test, refs, deep)?;
+            check_expr_for_ref_access(&c.consequent, refs, deep)?;
+            check_expr_for_ref_access(&c.alternate, refs, deep)?;
         }
-        // Recurse into nested closures — outer refs are in scope
+        // Recurse into nested closures only in deep mode
         Expression::ArrowFunctionExpression(arrow) => {
-            check_stmts_for_ref_access(&arrow.body.statements, refs)?;
+            if deep {
+                check_stmts_for_ref_access(&arrow.body.statements, refs, deep)?;
+            }
         }
         Expression::FunctionExpression(func) => {
-            if let Some(body) = &func.body {
-                check_stmts_for_ref_access(&body.statements, refs)?;
+            if deep {
+                if let Some(body) = &func.body {
+                    check_stmts_for_ref_access(&body.statements, refs, deep)?;
+                }
             }
         }
         // JSX elements — check attribute values and children for ref.current
@@ -4060,7 +4085,7 @@ fn check_expr_for_ref_access<'a>(
                 if let oxc_ast::ast::JSXAttributeItem::Attribute(a) = attr {
                     if let Some(oxc_ast::ast::JSXAttributeValue::ExpressionContainer(c)) = &a.value {
                         if let Some(e) = c.expression.as_expression() {
-                            check_expr_for_ref_access(e, refs)?;
+                            check_expr_for_ref_access(e, refs, deep)?;
                         }
                     }
                 }
@@ -4068,7 +4093,7 @@ fn check_expr_for_ref_access<'a>(
             for child in &jsx.children {
                 if let oxc_ast::ast::JSXChild::ExpressionContainer(c) = child {
                     if let Some(e) = c.expression.as_expression() {
-                        check_expr_for_ref_access(e, refs)?;
+                        check_expr_for_ref_access(e, refs, deep)?;
                     }
                 }
             }
@@ -4077,7 +4102,7 @@ fn check_expr_for_ref_access<'a>(
             for child in &frag.children {
                 if let oxc_ast::ast::JSXChild::ExpressionContainer(c) = child {
                     if let Some(e) = c.expression.as_expression() {
-                        check_expr_for_ref_access(e, refs)?;
+                        check_expr_for_ref_access(e, refs, deep)?;
                     }
                 }
             }
