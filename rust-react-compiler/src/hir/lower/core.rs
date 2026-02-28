@@ -159,6 +159,9 @@ pub fn lower_program(
     // Check for imports from known-incompatible libraries.
     validate_no_incompatible_libraries(&program)?;
 
+    // Check for hook identifiers used as values (not called).
+    validate_no_hook_as_value(&program)?;
+
     // Check for @validateBlocklistedImports pragma and validate imports.
     validate_blocklisted_imports(source, &program)?;
 
@@ -1726,6 +1729,179 @@ fn collect_idents_in_expr(expr: &Expression, out: &mut Vec<String>) {
 /// Check if a list of statements contains any ThrowStatement (shallow check).
 fn stmt_list_has_throw(stmts: &[oxc_ast::ast::Statement]) -> bool {
     stmts.iter().any(|s| matches!(s, oxc_ast::ast::Statement::ThrowStatement(_)))
+}
+
+/// Return true if `name` matches the React hook naming convention: starts with `use[A-Z]`.
+fn is_hook_name(name: &str) -> bool {
+    if let Some(after) = name.strip_prefix("use") {
+        after.chars().next().map_or(false, |c| c.is_uppercase())
+    } else {
+        false
+    }
+}
+
+/// Validate that hook identifiers are not referenced as values (must be called).
+/// Scans all top-level functions in the program.
+fn validate_no_hook_as_value(program: &oxc_ast::ast::Program) -> Result<()> {
+    for stmt in &program.body {
+        match stmt {
+            oxc_ast::ast::Statement::FunctionDeclaration(f) => {
+                if let Some(body) = &f.body {
+                    for s in &body.statements {
+                        check_stmt_hook_value(s)?;
+                    }
+                }
+            }
+            oxc_ast::ast::Statement::ExportDefaultDeclaration(d) => {
+                match &d.declaration {
+                    ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
+                        if let Some(body) = &f.body {
+                            for s in &body.statements {
+                                check_stmt_hook_value(s)?;
+                            }
+                        }
+                    }
+                    ExportDefaultDeclarationKind::ArrowFunctionExpression(a) => {
+                        for s in &a.body.statements {
+                            check_stmt_hook_value(s)?;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            oxc_ast::ast::Statement::ExportNamedDeclaration(d) => {
+                if let Some(Declaration::FunctionDeclaration(f)) = &d.declaration {
+                    if let Some(body) = &f.body {
+                        for s in &body.statements {
+                            check_stmt_hook_value(s)?;
+                        }
+                    }
+                }
+            }
+            oxc_ast::ast::Statement::VariableDeclaration(v) => {
+                for decl in &v.declarations {
+                    if let Some(init) = &decl.init {
+                        match init {
+                            Expression::ArrowFunctionExpression(a) => {
+                                for s in &a.body.statements {
+                                    check_stmt_hook_value(s)?;
+                                }
+                            }
+                            Expression::FunctionExpression(f) => {
+                                if let Some(body) = &f.body {
+                                    for s in &body.statements {
+                                        check_stmt_hook_value(s)?;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn check_stmt_hook_value(stmt: &oxc_ast::ast::Statement) -> Result<()> {
+    use oxc_ast::ast::Statement;
+    match stmt {
+        Statement::VariableDeclaration(v) => {
+            for d in &v.declarations {
+                if let Some(init) = &d.init {
+                    check_expr_hook_value(init, false)?;
+                }
+            }
+        }
+        Statement::ExpressionStatement(e) => check_expr_hook_value(&e.expression, false)?,
+        Statement::ReturnStatement(r) => {
+            if let Some(arg) = &r.argument {
+                check_expr_hook_value(arg, false)?;
+            }
+        }
+        Statement::IfStatement(i) => {
+            check_expr_hook_value(&i.test, false)?;
+            check_stmt_hook_value(&i.consequent)?;
+            if let Some(alt) = &i.alternate {
+                check_stmt_hook_value(alt)?;
+            }
+        }
+        Statement::BlockStatement(b) => {
+            for s in &b.body {
+                check_stmt_hook_value(s)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn check_expr_hook_value(expr: &Expression, is_callee: bool) -> Result<()> {
+    const MSG: &str = "Hooks may not be referenced as normal values, they must be called. See https://react.dev/reference/rules/react-calls-components-and-hooks#never-pass-around-hooks-as-regular-values";
+    match expr {
+        Expression::Identifier(id) => {
+            if !is_callee && is_hook_name(id.name.as_str()) {
+                return Err(CompilerError::invalid_react(MSG));
+            }
+        }
+        Expression::StaticMemberExpression(s) => {
+            let prop = s.property.name.as_str();
+            if !is_callee && is_hook_name(prop) {
+                return Err(CompilerError::invalid_react(MSG));
+            }
+            // Don't recurse into the object — that's fine as a value
+        }
+        Expression::CallExpression(call) => {
+            // Callee is being called, so it's ok; recurse with is_callee=true for callee
+            check_expr_hook_value(&call.callee, true)?;
+            for arg in &call.arguments {
+                if let Some(e) = arg.as_expression() {
+                    check_expr_hook_value(e, false)?;
+                }
+            }
+        }
+        Expression::JSXElement(j) => {
+            for attr in &j.opening_element.attributes {
+                if let oxc_ast::ast::JSXAttributeItem::Attribute(a) = attr {
+                    if let Some(oxc_ast::ast::JSXAttributeValue::ExpressionContainer(ec)) = &a.value {
+                        if let Some(inner) = ec.expression.as_expression() {
+                            check_expr_hook_value(inner, false)?;
+                        }
+                    }
+                }
+            }
+            for child in &j.children {
+                if let oxc_ast::ast::JSXChild::ExpressionContainer(ec) = child {
+                    if let Some(inner) = ec.expression.as_expression() {
+                        check_expr_hook_value(inner, false)?;
+                    }
+                }
+            }
+        }
+        Expression::LogicalExpression(l) => {
+            check_expr_hook_value(&l.left, false)?;
+            check_expr_hook_value(&l.right, false)?;
+        }
+        Expression::ConditionalExpression(c) => {
+            check_expr_hook_value(&c.test, false)?;
+            check_expr_hook_value(&c.consequent, false)?;
+            check_expr_hook_value(&c.alternate, false)?;
+        }
+        Expression::AssignmentExpression(a) => {
+            check_expr_hook_value(&a.right, false)?;
+        }
+        Expression::SequenceExpression(s) => {
+            for e in &s.expressions {
+                check_expr_hook_value(e, false)?;
+            }
+        }
+        // Don't recurse into nested arrow/function expressions (different scope)
+        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => {}
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Validate that the program does not import from known-incompatible libraries.
