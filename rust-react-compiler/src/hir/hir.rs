@@ -1277,6 +1277,9 @@ pub struct HIRFunction {
     pub async_: bool,
     pub directives: Vec<String>,
     pub aliasing_effects: Option<Vec<AliasingEffect>>,
+    /// The original source re-emitted as clean JS (TS types stripped).
+    /// Used as passthrough output while full codegen is not yet implemented.
+    pub original_source: String,
 }
 
 // ---------------------------------------------------------------------------

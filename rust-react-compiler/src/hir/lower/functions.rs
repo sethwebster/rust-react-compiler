@@ -73,6 +73,7 @@ fn make_stub_hir_body(
         async_: is_async,
         directives: vec![],
         aliasing_effects: None,
+        original_source: String::new(),
     }
 }
 

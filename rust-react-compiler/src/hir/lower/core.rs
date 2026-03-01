@@ -94,6 +94,7 @@ fn make_passthrough_hir(env: &mut Environment) -> Result<HIRFunction> {
         async_: false,
         directives: vec![],
         aliasing_effects: None,
+        original_source: String::new(),
     })
 }
 
@@ -596,6 +597,7 @@ fn lower_arrow_function<'a>(
         async_: func.r#async,
         directives: vec![],
         aliasing_effects: None,
+        original_source: String::new(),
     })
 }
 
@@ -675,6 +677,7 @@ pub fn lower_function<'a>(
         async_: func.r#async,
         directives: vec![],
         aliasing_effects: None,
+        original_source: String::new(),
     })
 }
 
