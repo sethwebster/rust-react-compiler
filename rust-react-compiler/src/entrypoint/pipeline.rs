@@ -39,7 +39,7 @@ use crate::type_inference::infer_types::infer_types;
 use crate::transform::name_anonymous_functions::name_anonymous_functions;
 use crate::utils::merge_consecutive_blocks::merge_consecutive_blocks;
 use crate::reactive_scopes::{
-    infer_reactive_scope_variables::run as infer_reactive_scope_variables,
+    infer_reactive_scope_variables::run_with_env as infer_reactive_scope_variables,
     memoize_fbt_and_macro_operands::run as memoize_fbt_and_macro_operands,
     align_method_call_scopes::run as align_method_call_scopes,
     align_object_method_scopes::run as align_object_method_scopes,
@@ -173,6 +173,7 @@ pub fn run_with_environment(
 
     infer_mutation_aliasing_ranges(
         hir,
+        env,
         InferMutationAliasingRangesOptions {
             is_function_expression: false,
         },
@@ -188,7 +189,7 @@ pub fn run_with_environment(
     rewrite_instruction_kinds_based_on_reassignment(hir);
 
     if env.enable_memoization() {
-        infer_reactive_scope_variables(hir);
+        infer_reactive_scope_variables(hir, env);
     }
 
     memoize_fbt_and_macro_operands(hir);

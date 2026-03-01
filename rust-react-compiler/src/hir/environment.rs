@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use crate::hir::hir::{
     BlockId, DeclarationId, Identifier, IdentifierId, InstructionId,
-    ReactFunctionType, ScopeId, SourceLocation,
+    ReactFunctionType, ReactiveScope, ScopeId, SourceLocation,
 };
 
 use crate::error::{CompilerDiagnostic, CompilerError};
@@ -89,6 +89,9 @@ pub struct Environment {
     // Arena of all identifiers by IdentifierId
     pub identifiers: HashMap<IdentifierId, Identifier>,
 
+    // Arena of all reactive scopes by ScopeId
+    pub scopes: HashMap<ScopeId, ReactiveScope>,
+
     // Accumulated non-fatal diagnostics
     errors: Vec<CompilerDiagnostic>,
 }
@@ -109,6 +112,7 @@ impl Environment {
             next_scope_id: 0,
             next_declaration_id: 0,
             identifiers: HashMap::new(),
+            scopes: HashMap::new(),
             errors: Vec::new(),
         }
     }
