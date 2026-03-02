@@ -565,16 +565,16 @@
     <!-- METRIC CARDS -->
     <div class="grid-3">
       <div class="card">
-        <div class="card-label">Compile Rate</div>
-        <div class="card-value" id="compile-rate" style="color:var(--rust)">—%</div>
-        <div class="card-sub" id="compile-sub">— of — fixtures compile</div>
-        <div class="progress-track"><div class="progress-fill rust" id="compile-bar" style="width:0%"></div></div>
+        <div class="card-label">Correct Rate</div>
+        <div class="card-value" id="correct-rate" style="color:var(--rust)">—%</div>
+        <div class="card-sub" id="correct-sub">— of — produce correct output</div>
+        <div class="progress-track"><div class="progress-fill rust" id="correct-bar" style="width:0%"></div></div>
       </div>
       <div class="card">
-        <div class="card-label">Correct Rate</div>
-        <div class="card-value" id="correct-rate" style="color:var(--react)">—%</div>
-        <div class="card-sub" id="correct-sub">— of — produce correct output</div>
-        <div class="progress-track"><div class="progress-fill react" id="correct-bar" style="width:0%"></div></div>
+        <div class="card-label">Compile Rate</div>
+        <div class="card-value" id="compile-rate" style="color:var(--react)">—%</div>
+        <div class="card-sub" id="compile-sub">— of — fixtures compile</div>
+        <div class="progress-track"><div class="progress-fill react" id="compile-bar" style="width:0%"></div></div>
       </div>
       <div class="card">
         <div class="card-label">Unexpected Errors</div>
@@ -775,16 +775,16 @@
       const svg = `
         <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
           ${gridLines}
-          ${polyline(compile, 'var(--rust)', '')}
-          ${polyline(correct, 'var(--react)', '')}
+          ${polyline(correct, 'var(--rust)', '')}
+          ${polyline(compile, 'var(--react)', '')}
           ${stubsPct.length === n ? polyline(stubsPct, 'rgba(255,85,102,0.5)', '4 2') : ''}
-          ${dots(compile, 'var(--rust)')}
-          ${dots(correct, 'var(--react)')}
+          ${dots(correct, 'var(--rust)')}
+          ${dots(compile, 'var(--react)')}
           ${xLabels}
         </svg>
         <div class="chart-legend">
-          <div class="chart-legend-item"><div class="chart-legend-line" style="background:var(--rust)"></div>Compile rate</div>
-          <div class="chart-legend-item"><div class="chart-legend-line" style="background:var(--react)"></div>Correct rate</div>
+          <div class="chart-legend-item"><div class="chart-legend-line" style="background:var(--rust)"></div>Correct rate</div>
+          <div class="chart-legend-item"><div class="chart-legend-line" style="background:var(--react)"></div>Compile rate</div>
           <div class="chart-legend-item"><div class="chart-legend-line" style="background:rgba(255,85,102,0.5);border-top:2px dashed rgba(255,85,102,0.5);height:0"></div>Stubs remaining %</div>
         </div>`
 
