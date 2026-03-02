@@ -88,10 +88,10 @@ function parsePasses(content: string): PassStatus[] {
 function parseBulletList(section: string): string[] {
   return section
     .split("\n")
-    .filter(l => l.match(/^[\-\*\d]/))
+    .filter(l => /^[-*\d]/.test(l) && !/^-{2,}$/.test(l.trim()))
     .map(l =>
       l
-        .replace(/^[\-\*\d]+[.)]\s*/, "")
+        .replace(/^[-*•]\s+|^\d+[.)]\s*/, "")
         .replace(/\*\*/g, "")
         .trim()
     )

@@ -16,8 +16,8 @@ function extractSection(content: string, pattern: string): string {
 function parseBulletList(section: string): string[] {
   return section
     .split("\n")
-    .filter(l => /^[-*\d]/.test(l))
-    .map(l => l.replace(/^[-*\d]+[.)]\s*/, "").replace(/\*\*/g, "").trim())
+    .filter(l => /^[-*\d]/.test(l) && !/^-{2,}$/.test(l.trim()))
+    .map(l => l.replace(/^[-*•]\s+|^\d+[.)]\s*/, "").replace(/\*\*/g, "").trim())
     .filter(Boolean)
 }
 
