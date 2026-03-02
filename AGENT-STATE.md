@@ -1,6 +1,6 @@
 # Agent State
 
-**AGENTS: Read this file first. Update it at the end of every session.**
+**AGENTS: Read this file first. Update it throughout your session.**
 
 ---
 
@@ -10,16 +10,23 @@
 1. Read this file completely
 2. Run `git log --oneline -10` and `git diff HEAD --stat` to verify current state
 3. Run `cargo test --test fixtures run_all_fixtures -- --ignored 2>&1 | grep -E "Correct rate|Compile rate|Error"` to get baseline metrics
-4. Begin work on **Current Task** below
+4. Review `## Todo List` — claim your first item, mark it `→ in progress`
+5. Begin work
+
+### During Session (required)
+- Cross off items as you complete them: `- [ ]` → `- [x]`
+- Add newly discovered tasks to `## Todo List`
+- Update `## Current Task` when you switch focus
 
 ### Session End (required)
-Update ALL sections of this file before stopping:
-- Current Task → what's next
-- Completed This Session → what you finished
-- Blocked On → any new blockers discovered
-- Next 3 Actions → concrete, specific, file-level actions
-- Key Invariants → anything you had to re-derive that wasn't written down
-- **History** → append one row to the History table with current metrics
+Update the following before stopping:
+- **Metrics** — current compile rate, correct rate, error counts
+- **Current Task** — what the next agent should start on
+- **Completed This Session** — concrete list of files changed and what changed
+- **Todo List** — cross off completed items, add new tasks
+- **Blocked On** — current blockers
+- **Key Invariants** — anything you had to re-derive
+- **History** — append one row to the History table
 
 ---
 
@@ -46,6 +53,20 @@ Relevant files:
 
 ---
 
+## Todo List
+
+> This list is displayed live at https://rust-react-compiler.sethwebster.workers.dev
+> Format: `- [ ] pending` / `- [x] done`. Maintain throughout your session, not just at the end.
+
+- [ ] Fix destructured parameter lowering (`lower/core.rs`, `lower/functions.rs`)
+- [ ] Define `ReactiveFunction` / `ReactiveScope` types in `hir.rs`
+- [ ] Implement `build_reactive_function` — wire into `pipeline.rs` after scope inference
+- [ ] Fix `codegen_reactive_function` stub to operate on `ReactiveFunction`
+- [ ] Fix `prune_non_reactive_dependencies` (PARTIAL → REAL)
+- [ ] Fix `constant_propagation` (PARTIAL → REAL)
+
+---
+
 ## Completed This Session
 
 - `prune_unused_scopes.rs`: expanded from stub to real implementation
@@ -56,7 +77,7 @@ Relevant files:
 - `propagate_scope_dependencies_hir.rs`: expanded (174 → 274 LOC)
 - `merge_overlapping_reactive_scopes_hir.rs`: expanded (103 → 125 LOC)
 - `prune_non_reactive_dependencies.rs`: expanded (2 → 15 LOC)
-- Introduced **Correct rate** metric to fixture harness (was only tracking compile rate)
+- Introduced **Correct rate** metric to fixture harness
 
 ---
 
@@ -66,26 +87,7 @@ Relevant files:
   - Blocks: `codegen_reactive_function`, `rename_variables`, and all downstream scope passes
   - Needs: `ReactiveFunction` type defined in `hir.rs` first
 - Codegen (`hir_codegen.rs`) currently operates on raw `HIR`, not `ReactiveFunction`
-  - This is an architectural mismatch that limits correct rate ceiling
   - Fix requires `build_reactive_function` to exist first
-
----
-
-## Next 3 Actions
-
-1. **Define `ReactiveFunction` / `ReactiveScope` types in `hir.rs`**
-   — Model after TS: `ReactiveFunction.ts`, `ReactiveScope.ts`
-   — Add to `hir/mod.rs` exports
-
-2. **Implement `build_reactive_function`**
-   — TS source: `react/compiler/.../ReactiveScopes/BuildReactiveFunction.ts`
-   — Input: `&HIRFunction` (post scope inference)
-   — Output: `ReactiveFunction`
-   — Wire into `pipeline.rs` after `infer_reactive_scope_variables`
-
-3. **Fix `codegen_reactive_function` stub to operate on `ReactiveFunction`**
-   — Once #2 exists, replace `hir_codegen.rs` passthrough with proper scope-aware codegen
-   — Expected to unlock significant correct rate improvement
 
 ---
 
@@ -154,50 +156,31 @@ Relevant files:
 
 ## Key Invariants (don't re-derive)
 
-- **Identifiers**: stored by `IdentifierId` (u32 newtype), not by reference. Use `env.identifier(id)` to look up.
-- **Blocks**: stored in `IndexMap<BlockId, BasicBlock>` in **reverse-postorder**. Iteration order = RPO.
+- **Identifiers**: stored by `IdentifierId` (u32 newtype). Use `env.identifier(id)` to look up.
+- **Blocks**: stored in `IndexMap<BlockId, BasicBlock>` in **reverse-postorder**.
 - **Place**: stores `IdentifierId`, not a pointer. Identifier data lives in `Environment.identifiers`.
-- **No lifetimes on HIR types** — all owned `String`s. Avoids borrow complexity at cost of cloning.
-- **oxc 0.69** for parsing — AST types differ from Babel. Don't assume Babel node shapes.
-- **`ReactiveFunction` type does NOT exist yet** — do not reference it until `hir.rs` is updated.
-- **Codegen operates on HIR directly** — architectural mismatch vs TS compiler (which uses ReactiveFunction). Intentional temporary state.
-- **serde** on all HIR types — requires `indexmap = { features = ["serde"] }` in Cargo.toml.
-- **TS source location**: `react/compiler/packages/babel-plugin-react-compiler/src/`
-- **Fixture dir**: `react/compiler/packages/babel-plugin-react-compiler/src/__tests__/fixtures/compiler/`
+- **No lifetimes on HIR types** — all owned `String`s.
+- **oxc 0.69** — AST types differ from Babel. Don't assume Babel node shapes.
+- **`ReactiveFunction` type does NOT exist yet** — do not reference until `hir.rs` is updated.
+- **Codegen operates on HIR directly** — intentional temporary architectural mismatch.
+- **serde** on all HIR types — requires `indexmap = { features = ["serde"] }`.
+- **TS source**: `react/compiler/packages/babel-plugin-react-compiler/src/`
+- **Fixtures**: `react/compiler/packages/babel-plugin-react-compiler/src/__tests__/fixtures/compiler/`
 
 ---
 
 ## Architecture
 
 ```
-oxc parse
-    ↓
-pre-lowering validators (core.rs)
-    ↓
-HIR lowering (lower/)
-    ↓
-SSA construction (ssa/)
-    ↓
-inference passes (inference/)
-    ↓
-optimization passes (optimization/)
-    ↓
-reactive scope inference (reactive_scopes/infer_*)
-    ↓
-reactive scope transforms (reactive_scopes/ — mostly stubs)
-    ↓
-build_reactive_function  ← CRITICAL MISSING PIECE
-    ↓
-codegen (codegen/hir_codegen.rs — currently bypasses ReactiveFunction)
-    ↓
-oxc_codegen → JS output
+oxc parse → pre-lowering validators → HIR lowering → SSA → inference →
+optimization → reactive scope inference → reactive scope transforms →
+build_reactive_function ← CRITICAL MISSING PIECE →
+codegen (currently bypasses ReactiveFunction) → oxc_codegen → JS output
 ```
 
 ---
 
 ## History
-
-Agents: append one row here at the end of every session with actual measured values.
 
 | Date | Compile % | Correct % | Overall % | Passes Real | Stubs |
 |------|-----------|-----------|-----------|-------------|-------|
