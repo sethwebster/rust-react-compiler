@@ -741,26 +741,30 @@
           font-size="9" text-anchor="end" font-family="monospace">${v}%</text>`
       ).join('')
 
-      const fmtDate = iso => {
-        const d = new Date(iso)
-        if (isNaN(d)) return iso // fallback for manual History table entries
-        const mo = (d.getMonth() + 1).toString().padStart(2, '0')
-        const day = d.getDate().toString().padStart(2, '0')
-        const hr = d.getHours().toString().padStart(2, '0')
-        const mn = d.getMinutes().toString().padStart(2, '0')
-        return `${mo}/${day} ${hr}:${mn}`
-      }
-
+      // Label each point that is either: first of a new day, or first in a new 3-hour bucket
+      let lastDay = null, last3Hr = null
       const xLabels = pts.map((p, i) => {
-        if (n > 8 && i % Math.ceil(n / 8) !== 0 && i !== n - 1) return ''
-        const label = fmtDate(p.date)
-        // Two-line label: date on first line, time on second
-        const [datePart, timePart] = label.split(' ')
-        return `
-          <text x="${xPos(i)}" y="${H - 14}" fill="rgba(255,255,255,0.3)"
-            font-size="8" text-anchor="middle" font-family="monospace">${datePart}</text>
-          <text x="${xPos(i)}" y="${H - 4}" fill="rgba(255,255,255,0.2)"
-            font-size="8" text-anchor="middle" font-family="monospace">${timePart ?? ''}</text>`
+        const d = new Date(p.date)
+        if (isNaN(d.getTime())) return ''
+        const dayKey = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`
+        const bucket = Math.floor(d.getHours() / 3)
+        const newDay = dayKey !== lastDay
+        const new3Hr = bucket !== last3Hr
+        if (!newDay && !new3Hr) return ''
+        lastDay = dayKey
+        last3Hr = bucket
+        const mo = String(d.getMonth() + 1).padStart(2, '0')
+        const day = String(d.getDate()).padStart(2, '0')
+        const hr = String(d.getHours()).padStart(2, '0')
+        const mn = String(d.getMinutes()).padStart(2, '0')
+        const x = xPos(i)
+        return newDay
+          ? `<text x="${x}" y="${H-16}" fill="rgba(255,255,255,0.55)" font-size="8.5"
+               text-anchor="middle" font-family="monospace" font-weight="bold">${mo}/${day}</text>
+             <text x="${x}" y="${H-5}" fill="rgba(255,255,255,0.25)" font-size="7.5"
+               text-anchor="middle" font-family="monospace">${hr}:${mn}</text>`
+          : `<text x="${x}" y="${H-5}" fill="rgba(255,255,255,0.2)" font-size="7.5"
+               text-anchor="middle" font-family="monospace">${hr}:${mn}</text>`
       }).join('')
 
       const compile  = pts.map(p => p.compileRate)
