@@ -167,7 +167,7 @@ async function fetchGitHistory(token?: string): Promise<HistoryPoint[]> {
         if (!text) return null
         const s = parseState(text)
         return {
-          date: (node.committedDate as string).slice(0, 10),
+          date: node.committedDate as string, // full ISO — formatted client-side
           sha: (node.oid as string).slice(0, 7),
           compileRate: s.metrics.compileRate,
           correctRate: s.metrics.correctRate,
