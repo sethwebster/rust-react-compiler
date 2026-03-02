@@ -690,23 +690,23 @@
     function renderList(id, items, Cls) {
       const el = document.getElementById(id)
       if (!el) return
+      let html
       if (!items || items.length === 0) {
-        el.innerHTML = `<div style="color:var(--muted);font-size:0.8rem">None</div>`
-        return
-      }
-      if (Cls === 'action') {
-        el.innerHTML = items.map((t, i) =>
+        html = `<div style="color:var(--muted);font-size:0.8rem">None</div>`
+      } else if (Cls === 'action') {
+        html = items.map((t, i) =>
           `<div class="action-item"><span class="action-num">${i+1}</span><span>${t}</span></div>`
         ).join('')
       } else if (Cls === 'blocker') {
-        el.innerHTML = items.map(t =>
+        html = items.map(t =>
           `<div class="blocker-card">${t}</div>`
         ).join('')
       } else {
-        el.innerHTML = items.map(t =>
+        html = items.map(t =>
           `<div class="completed-item"><span>${t}</span></div>`
         ).join('')
       }
+      if (el.innerHTML !== html) el.innerHTML = html
     }
 
     function update(data) {
