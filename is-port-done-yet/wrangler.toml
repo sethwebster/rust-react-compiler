@@ -1,0 +1,7 @@
+name = "rust-react-compiler"
+main = "worker.ts"
+compatibility_date = "2025-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+[assets]
+directory = "./public"
