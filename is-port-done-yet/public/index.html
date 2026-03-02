@@ -663,6 +663,19 @@
 
   <script>
     let lastData = null
+    let gitHistory = []
+
+    // Fetch git history once on load — uses GitHub GraphQL, cached 2 min on CDN
+    async function loadHistory() {
+      try {
+        const res = await fetch('/api/history')
+        if (res.ok) {
+          gitHistory = await res.json()
+          if (lastData) renderChart(gitHistory, lastData)
+        }
+      } catch {}
+    }
+    loadHistory()
 
     function fmt(n, decimals = 1) {
       return typeof n === 'number' ? n.toFixed(decimals) : '—'
@@ -859,8 +872,8 @@
       renderList('next-actions', nextActions, 'action')
       renderList('completed-list', completedThisSession, 'completed')
 
-      // Chart
-      renderChart(data.history ?? [], data)
+      // Chart — use git history if loaded, else fall back to inline history table
+      renderChart(gitHistory.length ? gitHistory : (data.history ?? []), data)
 
       // Passes
       if (passes?.length) renderPasses(passes)

@@ -109,6 +109,78 @@ async function fetchStateFile(token?: string): Promise<string> {
   return res.text()
 }
 
+// ── Git History via GraphQL (single request for all historical snapshots) ─────
+
+interface HistoryPoint {
+  date: string
+  sha: string
+  compileRate: number
+  correctRate: number
+  overallCompletion: number
+  passesReal: number
+  stubs: number
+}
+
+async function fetchGitHistory(token?: string): Promise<HistoryPoint[]> {
+  if (!token) return []
+
+  const query = `{
+    repository(owner: "sethwebster", name: "rust-react-compiler") {
+      defaultBranchRef {
+        target {
+          ... on Commit {
+            history(path: "AGENT-STATE.md", first: 50) {
+              nodes {
+                committedDate
+                oid
+                file(path: "AGENT-STATE.md") {
+                  object {
+                    ... on Blob { text }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }`
+
+  const res = await fetch("https://api.github.com/graphql", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "Content-Type": "application/json",
+      "User-Agent": "rust-react-compiler-dashboard",
+    },
+    body: JSON.stringify({ query }),
+  })
+
+  if (!res.ok) throw new Error(`GraphQL: ${res.status}`)
+  const json = await res.json() as any
+  const nodes: any[] = json?.data?.repository?.defaultBranchRef?.target?.history?.nodes ?? []
+
+  return nodes
+    .map(node => {
+      try {
+        const text: string = node?.file?.object?.text
+        if (!text) return null
+        const s = parseState(text)
+        return {
+          date: (node.committedDate as string).slice(0, 10),
+          sha: (node.oid as string).slice(0, 7),
+          compileRate: s.metrics.compileRate,
+          correctRate: s.metrics.correctRate,
+          overallCompletion: s.overallCompletion,
+          passesReal: s.passStats.real,
+          stubs: s.passStats.stub,
+        }
+      } catch { return null }
+    })
+    .filter((p): p is HistoryPoint => p !== null)
+    .reverse() // API returns newest-first; we want chronological
+}
+
 // ── Worker ────────────────────────────────────────────────────────────────────
 
 export default {
@@ -135,6 +207,17 @@ export default {
         return new Response(`retry: 5000\ndata: ${JSON.stringify({ error: String(e) })}\n\n`, {
           headers: { ...cors, "Content-Type": "text/event-stream" },
         })
+      }
+    }
+
+    if (pathname === "/api/history") {
+      try {
+        const history = await fetchGitHistory(env.GITHUB_TOKEN)
+        return Response.json(history, {
+          headers: { ...cors, "Cache-Control": "public, max-age=120" },
+        })
+      } catch (e) {
+        return Response.json({ error: String(e) }, { status: 500, headers: cors })
       }
     }
 
