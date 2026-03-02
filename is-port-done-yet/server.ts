@@ -5,7 +5,7 @@ import { fileURLToPath } from "url"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const STATE_FILE = resolve(__dirname, "../AGENT-STATE.md")
-const HTML_FILE = resolve(__dirname, "index.html")
+const HTML_FILE = resolve(__dirname, "public/index.html")
 
 interface PassStatus {
   name: string
@@ -85,6 +85,26 @@ function parsePasses(content: string): PassStatus[] {
     .filter(Boolean) as PassStatus[]
 }
 
+function parseHistory(content: string) {
+  const section = extractSection(content, "History")
+  return section
+    .split("\n")
+    .filter(l => l.startsWith("|") && !l.includes("---") && !/^\|\s*Date\s*\|/.test(l))
+    .map(row => {
+      const cols = row.split("|").map(c => c.trim()).filter(Boolean)
+      if (cols.length < 5) return null
+      return {
+        date: cols[0],
+        compileRate: parseFloat(cols[1]) || 0,
+        correctRate: parseFloat(cols[2]) || 0,
+        overallCompletion: parseInt(cols[3]) || 0,
+        passesReal: parseInt(cols[4]) || 0,
+        stubs: parseInt(cols[5]) || 0,
+      }
+    })
+    .filter(Boolean)
+}
+
 function parseBulletList(section: string): string[] {
   return section
     .split("\n")
@@ -126,6 +146,7 @@ function parseState(content: string): AgentState {
     passes,
     overallCompletion,
     passStats: { real, partial, stub, total },
+    history: parseHistory(content),
   }
 }
 

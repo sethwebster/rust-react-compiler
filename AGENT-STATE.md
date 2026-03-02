@@ -19,6 +19,7 @@ Update ALL sections of this file before stopping:
 - Blocked On → any new blockers discovered
 - Next 3 Actions → concrete, specific, file-level actions
 - Key Invariants → anything you had to re-derive that wasn't written down
+- **History** → append one row to the History table with current metrics
 
 ---
 
@@ -192,4 +193,12 @@ codegen (codegen/hir_codegen.rs — currently bypasses ReactiveFunction)
 oxc_codegen → JS output
 ```
 
+---
 
+## History
+
+Agents: append one row here at the end of every session with actual measured values.
+
+| Date | Compile % | Correct % | Overall % | Passes Real | Stubs |
+|------|-----------|-----------|-----------|-------------|-------|
+| 2026-03-02 | 84.2 | 17.3 | 29 | 14 | 38 |

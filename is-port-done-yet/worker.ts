@@ -41,6 +41,26 @@ function parsePasses(content: string) {
     .filter(Boolean) as { name: string; file: string; status: "REAL" | "PARTIAL" | "STUB"; loc: number }[]
 }
 
+function parseHistory(content: string) {
+  const section = extractSection(content, "History")
+  return section
+    .split("\n")
+    .filter(l => l.startsWith("|") && !l.includes("---") && !/^\|\s*Date\s*\|/.test(l))
+    .map(row => {
+      const cols = row.split("|").map(c => c.trim()).filter(Boolean)
+      if (cols.length < 5) return null
+      return {
+        date: cols[0],
+        compileRate: parseFloat(cols[1]) || 0,
+        correctRate: parseFloat(cols[2]) || 0,
+        overallCompletion: parseInt(cols[3]) || 0,
+        passesReal: parseInt(cols[4]) || 0,
+        stubs: parseInt(cols[5]) || 0,
+      }
+    })
+    .filter(Boolean) as { date: string; compileRate: number; correctRate: number; overallCompletion: number; passesReal: number; stubs: number }[]
+}
+
 function parseState(content: string) {
   const s = extractSection(content, "Metrics.*?")
   const n = (rx: RegExp) => parseFloat(content.match(rx)?.[1] ?? "0") || 0
@@ -77,6 +97,7 @@ function parseState(content: string) {
     passes,
     overallCompletion,
     passStats: { real, partial, stub, total },
+    history: parseHistory(content),
   }
 }
 

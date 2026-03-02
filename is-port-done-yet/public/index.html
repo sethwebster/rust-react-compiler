@@ -480,6 +480,24 @@
       z-index: 100;
     }
 
+    /* ── BURNDOWN CHART ── */
+    .chart-wrap { position: relative; width: 100%; height: 200px; }
+    .chart-wrap svg { width: 100%; height: 100%; overflow: visible; }
+    .chart-legend {
+      display: flex; gap: 1.5rem; margin-top: 0.75rem; flex-wrap: wrap;
+    }
+    .chart-legend-item {
+      display: flex; align-items: center; gap: 0.4rem;
+      font-size: 0.68rem; color: var(--muted);
+    }
+    .chart-legend-line {
+      width: 20px; height: 2px; border-radius: 1px;
+    }
+    .chart-empty {
+      display: flex; align-items: center; justify-content: center;
+      height: 160px; color: var(--muted); font-size: 0.8rem;
+    }
+
     /* ── ANIMATIONS ── */
     @keyframes fadeIn {
       from { opacity: 0; transform: translateY(8px); }
@@ -563,6 +581,14 @@
         <div class="card-value" id="unexpected-val" style="color:var(--green)">—</div>
         <div class="card-sub" id="expected-sub">— expected · — uncommitted files</div>
         <div class="progress-track"><div class="progress-fill green" id="unexpected-bar" style="width:100%"></div></div>
+      </div>
+    </div>
+
+    <!-- BURNDOWN CHART -->
+    <div class="card" style="margin-bottom:1.25rem">
+      <div class="card-label">Burndown</div>
+      <div id="chart-container">
+        <div class="chart-empty">No history yet — agents append rows to AGENT-STATE.md ## History on each session end</div>
       </div>
     </div>
 
@@ -658,6 +684,78 @@
     function setWidth(id, pct) {
       const el = document.getElementById(id)
       if (el) el.style.width = `${Math.max(0, Math.min(100, pct))}%`
+    }
+
+    function renderChart(history, current) {
+      const container = document.getElementById('chart-container')
+      if (!container) return
+
+      // Always include current snapshot as the latest point
+      const pts = [
+        ...history,
+        { date: 'now', compileRate: current.metrics.compileRate, correctRate: current.metrics.correctRate,
+          overallCompletion: current.overallCompletion, stubs: current.passStats.stub }
+      ]
+
+      if (pts.length < 2) {
+        container.innerHTML = `<div class="chart-empty">Accumulating history… (${pts.length} point${pts.length === 1 ? '' : 's'} so far)</div>`
+        return
+      }
+
+      const W = 800, H = 160, PL = 36, PR = 12, PT = 12, PB = 28
+      const cW = W - PL - PR, cH = H - PT - PB
+      const n = pts.length
+
+      const xPos = i => PL + (i / (n - 1)) * cW
+      const yPos = v => PT + cH - (Math.min(100, Math.max(0, v)) / 100) * cH
+
+      const polyline = (values, color, dash = '') => {
+        const points = values.map((v, i) => `${xPos(i)},${yPos(v)}`).join(' ')
+        return `<polyline points="${points}" fill="none" stroke="${color}" stroke-width="2"
+          stroke-linejoin="round" stroke-linecap="round" ${dash ? `stroke-dasharray="${dash}"` : ''}
+          style="filter:drop-shadow(0 0 4px ${color}44)"/>`
+      }
+
+      const dots = (values, color) => values.map((v, i) =>
+        `<circle cx="${xPos(i)}" cy="${yPos(v)}" r="${i === n-1 ? 4 : 2.5}" fill="${color}"
+          style="filter:drop-shadow(0 0 3px ${color})"/>`
+      ).join('')
+
+      const gridLines = [0, 25, 50, 75, 100].map(v =>
+        `<line x1="${PL}" y1="${yPos(v)}" x2="${PL + cW}" y2="${yPos(v)}"
+          stroke="rgba(255,255,255,0.05)" stroke-width="1"/>
+         <text x="${PL - 4}" y="${yPos(v) + 4}" fill="rgba(255,255,255,0.2)"
+          font-size="9" text-anchor="end" font-family="monospace">${v}%</text>`
+      ).join('')
+
+      const xLabels = pts.map((p, i) => {
+        if (n > 6 && i % Math.ceil(n / 6) !== 0 && i !== n - 1) return ''
+        return `<text x="${xPos(i)}" y="${H - 4}" fill="rgba(255,255,255,0.25)"
+          font-size="9" text-anchor="middle" font-family="monospace">${p.date}</text>`
+      }).join('')
+
+      const compile  = pts.map(p => p.compileRate)
+      const correct  = pts.map(p => p.correctRate)
+      const stubsPct = pts.map(p => p.stubs != null ? (p.stubs / (current.passStats.total || 56)) * 100 : null)
+        .filter(v => v !== null)
+
+      const svg = `
+        <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+          ${gridLines}
+          ${polyline(compile, 'var(--rust)', '')}
+          ${polyline(correct, 'var(--react)', '')}
+          ${stubsPct.length === n ? polyline(stubsPct, 'rgba(255,85,102,0.5)', '4 2') : ''}
+          ${dots(compile, 'var(--rust)')}
+          ${dots(correct, 'var(--react)')}
+          ${xLabels}
+        </svg>
+        <div class="chart-legend">
+          <div class="chart-legend-item"><div class="chart-legend-line" style="background:var(--rust)"></div>Compile rate</div>
+          <div class="chart-legend-item"><div class="chart-legend-line" style="background:var(--react)"></div>Correct rate</div>
+          <div class="chart-legend-item"><div class="chart-legend-line" style="background:rgba(255,85,102,0.5);border-top:2px dashed rgba(255,85,102,0.5);height:0"></div>Stubs remaining %</div>
+        </div>`
+
+      container.innerHTML = svg
     }
 
     function renderPasses(passes) {
@@ -760,6 +858,9 @@
       renderList('blockers', blockedOn, 'blocker')
       renderList('next-actions', nextActions, 'action')
       renderList('completed-list', completedThisSession, 'completed')
+
+      // Chart
+      renderChart(data.history ?? [], data)
 
       // Passes
       if (passes?.length) renderPasses(passes)
