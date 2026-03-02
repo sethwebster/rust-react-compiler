@@ -786,6 +786,7 @@
       es.onmessage = e => {
         try {
           const data = JSON.parse(e.data)
+          data.lastUpdated = new Date().toISOString() // stamp at receive time
           update(data)
         } catch {}
       }
