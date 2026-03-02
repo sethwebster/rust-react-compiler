@@ -548,7 +548,7 @@
       </div>
       <div class="header-right">
         <div class="live-dot" id="live-indicator">LIVE</div>
-        <div>updated <span id="last-updated">—</span></div>
+        <div id="updated-label">updated <span id="last-updated">—</span></div>
       </div>
     </header>
 
@@ -873,10 +873,13 @@
     // Update relative timestamps every 10s
     setInterval(() => {
       if (lastData?.lastUpdated) {
-        setText('last-updated', timeSince(lastData.lastUpdated))
-        // If >60s stale, mark yellow
+        const ago = timeSince(lastData.lastUpdated)
         const stale = (Date.now() - new Date(lastData.lastUpdated)) > 60000
         document.getElementById('live-indicator').className = stale ? 'live-dot stale' : 'live-dot'
+        const label = document.getElementById('updated-label')
+        if (label) label.innerHTML = stale
+          ? `stale &middot; <span id="last-updated">${ago}</span>`
+          : `updated <span id="last-updated">${ago}</span>`
       }
     }, 10000)
 
@@ -893,7 +896,8 @@
       }
 
       es.onerror = () => {
-        document.getElementById('live-indicator').className = 'live-dot stale'
+        // Don't mark stale here — normal reconnects fire onerror every 3s.
+        // The interval above handles genuine staleness based on lastUpdated age.
         es.close()
         setTimeout(connect, 5000) // reconnect
       }
