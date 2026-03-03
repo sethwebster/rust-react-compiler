@@ -361,17 +361,18 @@ fn count_scope_outputs(hir: &HIRFunction, env: &Environment) -> HashMap<ScopeId,
                 if instr_in_scope(instr, sid, scope, env) {
                     scope_instr_ids.insert(instr.id.0);
                     scope_lvalue_ids.insert(instr.lvalue.identifier.0);
-                    if let InstructionValue::StoreLocal { lvalue, .. } = &instr.value {
-                        // Only count StoreLocals for variables that genuinely belong to this
-                        // scope — either declared in scope.declarations or having ident.scope=sid.
-                        // This prevents counting pruned-scope variables (ident.scope=None) whose
-                        // StoreLocal falls within this scope's range but is not this scope's output.
+                    if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
+                        // Count StoreLocals where the bound variable OR its stored value
+                        // belongs to this scope. The value case handles `const x = push_result`
+                        // where push_result has scope==sid but x is not in scope.declarations.
                         let var_id = lvalue.place.identifier;
                         let is_scope_decl = scope.declarations.contains_key(&var_id);
                         let is_scope_ident = env.get_identifier(var_id)
                             .and_then(|i| i.scope)
                             == Some(sid);
-                        if is_scope_decl || is_scope_ident {
+                        let val_is_scope_owned = scope.declarations.contains_key(&value.identifier)
+                            || env.get_identifier(value.identifier).and_then(|i| i.scope) == Some(sid);
+                        if is_scope_decl || is_scope_ident || val_is_scope_owned {
                             store_var_ids.push(var_id);
                         }
                     }
@@ -3213,6 +3214,20 @@ impl<'a> Codegen<'a> {
 
             InstructionValue::CallExpression { callee, args, .. } => {
                 let callee_expr = self.expr(callee);
+                // If this is an IIFE with no args, unwrap to just the body expression.
+                if args.is_empty() {
+                    if let Some(inner) = extract_iife_return_expr(&callee_expr) {
+                        let name = self.env.get_identifier(instr.lvalue.identifier)
+                            .and_then(|i| i.name.as_ref())
+                            .map(|n| n.value().to_string());
+                        return if let Some(n) = name {
+                            Some(format!("const {n} = {inner};"))
+                        } else {
+                            let lv = self.lvalue_name(&instr.lvalue);
+                            Some(format!("{lv} = {inner};"))
+                        };
+                    }
+                }
                 // If the callee is an arrow function (contains '=>'), wrap it in parens
                 // so that `((x) => expr)()` rather than `(x) => expr()`.
                 let callee_str = if callee_expr.contains("=>") {
@@ -4355,26 +4370,30 @@ fn extract_iife_return_expr(expr: &str) -> Option<String> {
     let s = s.trim_start();
     let s = s.strip_prefix("=>")?;
     let s = s.trim_start();
-    // Body must be `{ return EXPR; }` or `{ return EXPR }`
-    let s = s.strip_prefix('{')?;
-    let s = s.trim_start();
-    let s = s.strip_prefix("return")?;
-    // Must have whitespace after `return`
-    if s.is_empty() || !s.starts_with(|c: char| c.is_whitespace()) {
-        return None;
+
+    // Case 1: Block body `{ return EXPR; }`
+    if let Some(body) = s.strip_prefix('{') {
+        let body = body.trim_start();
+        let body = body.strip_prefix("return")?;
+        if body.is_empty() || !body.starts_with(|c: char| c.is_whitespace()) {
+            return None;
+        }
+        let body = body.trim_start();
+        let body = body.trim_end();
+        let body = body.strip_suffix('}')?;
+        let body = body.trim_end();
+        let body = body.strip_suffix(';').unwrap_or(body);
+        let body = body.trim_end();
+        if body.is_empty() { return None; }
+        return Some(body.to_string());
     }
-    let s = s.trim_start();
-    // Find the closing `}` — consume everything before it
-    let s = s.trim_end();
-    let s = s.strip_suffix('}')?;
-    let s = s.trim_end();
-    // Strip optional trailing semicolon
-    let s = s.strip_suffix(';').unwrap_or(s);
-    let s = s.trim_end();
-    if s.is_empty() {
-        return None;
+
+    // Case 2: Expression body `() => EXPR` (no braces)
+    if !s.is_empty() {
+        return Some(s.to_string());
     }
-    Some(s.to_string())
+
+    None
 }
 
 /// Re-indent a potentially multi-line expression so that it looks correct when

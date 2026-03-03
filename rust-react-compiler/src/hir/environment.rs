@@ -46,7 +46,7 @@ impl Default for EnvironmentConfig {
             enable_memoization: true,
             enable_validations: true,
             output_mode: OutputMode::Function,
-            enable_drop_manual_memoization: false,
+            enable_drop_manual_memoization: true,
             enable_function_outlining: true,
             enable_jsx_outlining: false,
             enable_name_anonymous_functions: false,
