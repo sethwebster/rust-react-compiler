@@ -4,5 +4,8 @@ rust-react-compiler/target/
 # Claude session files (private)
 .claude/
 
+# Secrets
+.env
+
 # OS
 .DS_Store

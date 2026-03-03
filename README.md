@@ -24,10 +24,10 @@ The long-term goal is a `react-compiler` binary that produces the same output as
 | Metric | Value |
 |---|---|
 | Compile rate | 84.2% (1,048 / 1,244 fixtures) |
-| Correct rate | 17.3% |
+| Correct rate | 24.1% |
 | Expected error fixtures | 196 |
 | Unexpected errors | 0 |
-| Implemented passes | 14 real, 5 partial, ~37 stubs |
+| Implemented passes | 16 real, 5 partial, ~36 stubs |
 
 **Compile rate** measures how many of the 1,244 test fixtures the compiler processes without panicking. **Correct rate** measures how many produce output that matches the TypeScript compiler's expected output. The correct rate ceiling is currently limited by the unimplemented `build_reactive_function` pass — see [Critical Path](#critical-path) below.
 
@@ -75,7 +75,7 @@ Reactive scope transforms       Merges, prunes, and propagates dependencies
     |                           across scope boundaries.
     v
 
-build_reactive_function         HIRFunction → ReactiveFunction.       [STUB]
+build_reactive_function         HIRFunction → ReactiveFunction.       [PARTIAL]
     |                           This is the critical missing piece.
     v
 
@@ -176,11 +176,11 @@ Fixtures named `error.*` or `todo.error.*` are expected to fail compilation. If 
 | validate_hooks_usage | `validation/` | PARTIAL |
 | validate_no_ref_access_in_render | `validation/` | PARTIAL |
 | infer_types | `type_inference/` | PARTIAL |
-| **build_reactive_function** | `reactive_scopes/` | **STUB — critical** |
+| **build_reactive_function** | `reactive_scopes/` | **PARTIAL — critical** |
 | codegen_reactive_function | `reactive_scopes/` | STUB |
 | rename_variables | `reactive_scopes/` | STUB |
 | analyse_functions | `inference/` | STUB |
-| drop_manual_memoization | `inference/` | STUB |
+| drop_manual_memoization | `inference/` | REAL |
 | inline_iife | `inference/` | STUB |
 | name_anonymous_functions | `transform/` | STUB |
 | [13 validation passes] | `validation/` | STUB |
@@ -191,7 +191,7 @@ Fixtures named `error.*` or `todo.error.*` are expected to fail compilation. If 
 
 ## Critical Path
 
-The correct rate is currently 17.3%. The primary bottleneck is `build_reactive_function`.
+The correct rate is currently 24.1%. The primary bottleneck is `build_reactive_function`.
 
 The TypeScript compiler transforms a post-scope-inference `HIRFunction` into a `ReactiveFunction` — a tree of reactive scopes that directly maps to `useMemo`/`useCallback` call sites. Our codegen currently bypasses this and operates on raw HIR, which means it cannot emit the scope-based memoization wrapping that most fixtures expect.
 

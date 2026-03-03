@@ -11,18 +11,38 @@ Also read [AGENT-STATE.md](./AGENT-STATE.md), which tracks live session metrics,
 ### On Session Start (mandatory, in order)
 
 ```bash
-# 1. Check where the work left off
+# 1. Load push credentials (for real-time status updates to the dashboard)
+set -a && source rust-react-compiler/.env && set +a
+
+# 2. Check where the work left off
 cat AGENT-STATE.md
 
-# 2. Verify git state — uncommitted changes are common between sessions
+# 3. Verify git state — uncommitted changes are common between sessions
 git log --oneline -10
 git diff HEAD --stat
 
-# 3. Get your baseline metrics BEFORE touching any code
+# 4. Get your baseline metrics BEFORE touching any code
 cd rust-react-compiler && cargo test --test fixtures run_all_fixtures -- --ignored 2>&1 | grep -E "Compile rate|Correct rate|Error"
 ```
 
 Do not begin any implementation work until you have the baseline metrics. You need them to measure whether your changes helped.
+
+### Real-Time Status Push
+
+After sourcing `.env`, push live status updates to https://isreactcompilerrustyet.com:
+
+```bash
+# What you're working on (viewers see this immediately)
+bash rust-react-compiler/scripts/push-status.sh status "Implementing build_reactive_function"
+
+# After a metric change (updates compile/correct rate cards live)
+bash rust-react-compiler/scripts/push-status.sh progress "Fixed for-loop codegen" 86.5 24.2
+
+# After a significant win (triggers emoji celebration for all viewers)
+bash rust-react-compiler/scripts/push-status.sh milestone "build_reactive_function passing 40 fixtures"
+```
+
+Push a `status` update when you start a new task. Push `progress` after running the fixture suite and seeing metric changes. Push `milestone` for breakthroughs (5+ new fixtures passing, new pass implemented, etc.).
 
 ### On Session End (mandatory)
 

@@ -150,9 +150,10 @@ fn resolve_dep_path(
     def_at: &HashMap<IdentifierId, InstructionId>,
     instr_map: &HashMap<IdentifierId, &Instruction>,
     store_local_value: &HashMap<IdentifierId, IdentifierId>,
+    phi_operands: &HashMap<IdentifierId, Vec<IdentifierId>>,
     range_start: InstructionId,
 ) -> Option<(IdentifierId, Vec<DependencyPathEntry>)> {
-    resolve_dep_path_inner(place_id, def_at, instr_map, store_local_value, range_start, 0)
+    resolve_dep_path_inner(place_id, def_at, instr_map, store_local_value, phi_operands, range_start, 0)
 }
 
 fn resolve_dep_path_inner(
@@ -160,6 +161,7 @@ fn resolve_dep_path_inner(
     def_at: &HashMap<IdentifierId, InstructionId>,
     instr_map: &HashMap<IdentifierId, &Instruction>,
     store_local_value: &HashMap<IdentifierId, IdentifierId>,
+    phi_operands: &HashMap<IdentifierId, Vec<IdentifierId>>,
     range_start: InstructionId,
     depth: u32,
 ) -> Option<(IdentifierId, Vec<DependencyPathEntry>)> {
@@ -181,11 +183,11 @@ fn resolve_dep_path_inner(
             match &instr.value {
                 InstructionValue::LoadLocal { place, .. }
                 | InstructionValue::LoadContext { place, .. } => {
-                    return resolve_dep_path_inner(place.identifier, def_at, instr_map, store_local_value, range_start, depth + 1);
+                    return resolve_dep_path_inner(place.identifier, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1);
                 }
                 InstructionValue::PropertyLoad { object, property, .. } => {
                     if let Some((base_id, mut path)) =
-                        resolve_dep_path_inner(object.identifier, def_at, instr_map, store_local_value, range_start, depth + 1)
+                        resolve_dep_path_inner(object.identifier, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1)
                     {
                         path.push(DependencyPathEntry {
                             property: property.clone(),
@@ -211,7 +213,7 @@ fn resolve_dep_path_inner(
                             crate::hir::hir::ObjectExpressionProperty::Property(p) => p.place.identifier,
                             crate::hir::hir::ObjectExpressionProperty::Spread(s) => s.place.identifier,
                         };
-                        if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, range_start, depth + 1) {
+                        if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1) {
                             return Some(result);
                         }
                     }
@@ -224,7 +226,7 @@ fn resolve_dep_path_inner(
                             crate::hir::hir::ArrayElement::Spread(s) => s.place.identifier,
                             crate::hir::hir::ArrayElement::Hole => continue,
                         };
-                        if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, range_start, depth + 1) {
+                        if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1) {
                             return Some(result);
                         }
                     }
@@ -237,7 +239,7 @@ fn resolve_dep_path_inner(
                             crate::hir::hir::CallArg::Place(p) => p.identifier,
                             crate::hir::hir::CallArg::Spread(s) => s.place.identifier,
                         };
-                        if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, range_start, depth + 1) {
+                        if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1) {
                             return Some(result);
                         }
                     }
@@ -259,7 +261,7 @@ fn resolve_dep_path_inner(
         match &instr.value {
             InstructionValue::PropertyLoad { object, property, .. } => {
                 if let Some((base_id, mut path)) =
-                    resolve_dep_path_inner(object.identifier, def_at, instr_map, store_local_value, range_start, depth + 1)
+                    resolve_dep_path_inner(object.identifier, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1)
                 {
                     path.push(DependencyPathEntry {
                         property: property.clone(),
@@ -271,7 +273,7 @@ fn resolve_dep_path_inner(
             // LoadLocal / LoadContext are transparent — trace through to the source.
             InstructionValue::LoadLocal { place, .. }
             | InstructionValue::LoadContext { place, .. } => {
-                return resolve_dep_path_inner(place.identifier, def_at, instr_map, store_local_value, range_start, depth + 1);
+                return resolve_dep_path_inner(place.identifier, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1);
             }
             // Internal allocations: trace through to operands.
             InstructionValue::ObjectExpression { properties, .. } => {
@@ -280,7 +282,7 @@ fn resolve_dep_path_inner(
                         crate::hir::hir::ObjectExpressionProperty::Property(p) => p.place.identifier,
                         crate::hir::hir::ObjectExpressionProperty::Spread(s) => s.place.identifier,
                     };
-                    if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, range_start, depth + 1) {
+                    if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1) {
                         return Some(result);
                     }
                 }
@@ -293,7 +295,7 @@ fn resolve_dep_path_inner(
                         crate::hir::hir::ArrayElement::Spread(s) => s.place.identifier,
                         crate::hir::hir::ArrayElement::Hole => continue,
                     };
-                    if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, range_start, depth + 1) {
+                    if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1) {
                         return Some(result);
                     }
                 }
@@ -305,7 +307,7 @@ fn resolve_dep_path_inner(
                         crate::hir::hir::CallArg::Place(p) => p.identifier,
                         crate::hir::hir::CallArg::Spread(s) => s.place.identifier,
                     };
-                    if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, range_start, depth + 1) {
+                    if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1) {
                         return Some(result);
                     }
                 }
@@ -319,7 +321,7 @@ fn resolve_dep_path_inner(
     // e.g., `let cond = param_30` → StoreLocal { lvalue: 37, value: 30 }
     // instr_map doesn't have 37, but store_local_value[37] = 30.
     if let Some(&val_id) = store_local_value.get(&place_id) {
-        return resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, range_start, depth + 1);
+        return resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1);
     }
 
     if std::env::var("RC_DEBUG2").is_ok() {
@@ -334,13 +336,14 @@ fn resolve_dep_path_debug(
     def_at: &HashMap<IdentifierId, InstructionId>,
     instr_map: &HashMap<IdentifierId, &Instruction>,
     store_local_value: &HashMap<IdentifierId, IdentifierId>,
+    phi_operands: &HashMap<IdentifierId, Vec<IdentifierId>>,
     range_start: InstructionId,
 ) -> Option<(IdentifierId, Vec<DependencyPathEntry>)> {
     if std::env::var("RC_DEBUG2").is_ok() {
         eprintln!("[resolve_start] id={} def_at={:?} range_start={}", place_id.0,
             def_at.get(&place_id).map(|id| id.0), range_start.0);
     }
-    resolve_dep_path_inner(place_id, def_at, instr_map, store_local_value, range_start, 0)
+    resolve_dep_path_inner(place_id, def_at, instr_map, store_local_value, phi_operands, range_start, 0)
 }
 
 /// Returns true for "transparent" instructions whose operands are subsumed by
@@ -396,6 +399,16 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
     for (_, block) in &hir.body.blocks {
         for instr in &block.instructions {
             instr_map.insert(instr.lvalue.identifier, instr);
+        }
+    }
+
+    // Build phi_operands: phi result id → list of operand ids.
+    // Used by resolve_dep_path to trace through phis to their sources.
+    let mut phi_operands: HashMap<IdentifierId, Vec<IdentifierId>> = HashMap::new();
+    for (_, block) in &hir.body.blocks {
+        for phi in &block.phis {
+            let ops: Vec<IdentifierId> = phi.operands.values().map(|p| p.identifier).collect();
+            phi_operands.insert(phi.place.identifier, ops);
         }
     }
 
@@ -571,7 +584,7 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
                     let fn_source = &lowered_func.func.original_source;
                     for ctx_place in &lowered_func.func.context {
                         let Some((base_id, base_path)) =
-                            resolve_dep_path(ctx_place.identifier, &def_at, &instr_map, &store_local_value, range_start)
+                            resolve_dep_path(ctx_place.identifier, &def_at, &instr_map, &store_local_value, &phi_operands, range_start)
                         else {
                             continue;
                         };
@@ -629,7 +642,7 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
                         eprintln!("[prop_dep] scope {:?} instr {} place {:?} reactive={}", scope_id.0, instr.id.0, place.identifier.0, place.reactive);
                     }
                     // Resolve dep path for all places — we need the base to check always-invalidating.
-                    let resolved = resolve_dep_path(place.identifier, &def_at, &instr_map, &store_local_value, range_start);
+                    let resolved = resolve_dep_path(place.identifier, &def_at, &instr_map, &store_local_value, &phi_operands, range_start);
                     if std::env::var("RC_DEBUG").is_ok() {
                         eprintln!("[prop_dep]   def_at[{}]={:?}, range_start={:?}, resolved={:?}",
                             place.identifier.0,
@@ -695,11 +708,20 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
         // only in the Branch terminal of the test block, not in any scope-member instruction.
         for (_, block) in &hir.body.blocks {
             let term_id = block.terminal.id();
+            if std::env::var("RC_DEBUG").is_ok() {
+                eprintln!("[prop_dep] terminal scan: block {:?} term_id={} range=[{},{})", block.id.0, term_id.0, range_start.0, range_end.0);
+            }
             if term_id < range_start || term_id >= range_end {
                 continue;
             }
             for place in each_terminal_operand(&block.terminal) {
-                let Some((base_id, path)) = resolve_dep_path(place.identifier, &def_at, &instr_map, &store_local_value, range_start) else {
+                if std::env::var("RC_DEBUG").is_ok() {
+                    let resolved = resolve_dep_path(place.identifier, &def_at, &instr_map, &store_local_value, &phi_operands, range_start);
+                    eprintln!("[prop_dep] terminal operand id={} reactive={} resolved={:?}",
+                        place.identifier.0, reactive_ids.contains(&place.identifier),
+                        resolved.as_ref().map(|(id, p)| (id.0, p.len())));
+                }
+                let Some((base_id, path)) = resolve_dep_path(place.identifier, &def_at, &instr_map, &store_local_value, &phi_operands, range_start) else {
                     continue;
                 };
                 if !reactive_ids.contains(&base_id) {

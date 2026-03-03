@@ -665,6 +665,59 @@
     }
 
     .error-banner.visible { display: block; }
+
+    /* ── AGENT ACTIVITY ── */
+    .agent-activity {
+      background: linear-gradient(135deg, rgba(192,132,252,0.08), rgba(192,132,252,0.03));
+      border: 1px solid rgba(192,132,252,0.2);
+      border-radius: 8px;
+      padding: 0.75rem 1.25rem;
+      margin-bottom: 1.25rem;
+      display: none;
+      align-items: center;
+      gap: 0.75rem;
+      font-size: 0.82rem;
+      line-height: 1.4;
+      animation: fadeIn 0.4s ease both;
+      transition: opacity 0.6s ease;
+    }
+
+    .agent-activity.visible { display: flex; }
+    .agent-activity.faded { opacity: 0.4; }
+
+    .agent-pulse {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--purple);
+      box-shadow: 0 0 6px var(--purple);
+      animation: pulse 2s ease-in-out infinite;
+      flex-shrink: 0;
+    }
+
+    .agent-type-badge {
+      display: inline-block;
+      padding: 0.1em 0.5em;
+      border-radius: 4px;
+      font-size: 0.62rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      flex-shrink: 0;
+    }
+
+    .agent-type-badge.status    { background: rgba(192,132,252,0.15); color: var(--purple); }
+    .agent-type-badge.progress  { background: rgba(97,218,251,0.15);  color: var(--react); }
+    .agent-type-badge.milestone { background: rgba(61,255,160,0.15);  color: var(--green); }
+
+    .agent-message { color: var(--text); flex: 1; }
+
+    .agent-time {
+      font-size: 0.65rem;
+      color: var(--muted);
+      flex-shrink: 0;
+      white-space: nowrap;
+    }
   </style>
 </head>
 <body>
@@ -683,6 +736,14 @@
 
     <!-- ERROR -->
     <div class="error-banner" id="error-banner"></div>
+
+    <!-- AGENT ACTIVITY -->
+    <div class="agent-activity" id="agent-activity">
+      <div class="agent-pulse"></div>
+      <span class="agent-type-badge status" id="agent-type-badge">STATUS</span>
+      <span class="agent-message" id="agent-message"></span>
+      <span class="agent-time" id="agent-time"></span>
+    </div>
 
     <!-- HERO -->
     <div class="hero">
@@ -820,6 +881,9 @@
     } else {
       loadHistory()
     }
+
+    // Re-fetch history every 3 minutes
+    setInterval(loadHistory, 180000)
 
     function fmt(n, decimals = 1) {
       return typeof n === 'number' ? n.toFixed(decimals) : '—'
@@ -1045,6 +1109,9 @@
       // Todo list
       if (data.todoItems) { todoItems = data.todoItems; renderTodoList() }
 
+      // Agent status (from local dev SSE merge)
+      if (data.agentStatus) showAgentStatus(data.agentStatus)
+
       // Timestamp
       setText('last-updated', timeSince(data.lastUpdated))
       lastData = data
@@ -1063,6 +1130,41 @@
           : `updated <span id="last-updated">${ago}</span>`
       }
     }, 10000)
+
+    // ── AGENT STATUS ──────────────────────────────────────────────
+    let agentFadeTimer = null
+
+    function showAgentStatus(status) {
+      const bar = document.getElementById('agent-activity')
+      const badge = document.getElementById('agent-type-badge')
+      const msg = document.getElementById('agent-message')
+      const time = document.getElementById('agent-time')
+      if (!bar || !badge || !msg || !time) return
+
+      badge.textContent = (status.type || 'status').toUpperCase()
+      badge.className = 'agent-type-badge ' + (status.type || 'status')
+      msg.textContent = status.message || ''
+      time.textContent = status.timestamp ? timeSince(status.timestamp) : 'just now'
+
+      bar.classList.add('visible')
+      bar.classList.remove('faded')
+
+      // If progress type has metrics, override the metric cards
+      if (status.type === 'progress' && status.metrics) {
+        if (status.metrics.compileRate != null) {
+          setText('compile-rate', `${fmt(status.metrics.compileRate)}%`)
+          setWidth('compile-bar', status.metrics.compileRate)
+        }
+        if (status.metrics.correctRate != null) {
+          setText('correct-rate', `${fmt(status.metrics.correctRate)}%`)
+          setWidth('correct-bar', status.metrics.correctRate)
+        }
+      }
+
+      // Fade after 5 min of no new status
+      clearTimeout(agentFadeTimer)
+      agentFadeTimer = setTimeout(() => bar.classList.add('faded'), 300000)
+    }
 
     // SSE
     function connect() {
@@ -1177,6 +1279,8 @@
           } else if (msg.type === 'todo-state') {
             todoChecked = new Set(msg.checked)
             renderTodoList()
+          } else if (msg.type === 'agent-status') {
+            showAgentStatus(msg)
           }
         } catch {}
       }

@@ -150,6 +150,8 @@ function parseState(content: string): AgentState {
   }
 }
 
+let latestAgentStatus: { type: string; message: string; metrics?: { compileRate?: number; correctRate?: number }; timestamp?: string } | null = null
+
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Cache-Control": "no-cache",
@@ -159,6 +161,27 @@ const server = serve({
   port: 3420,
   fetch(req) {
     const url = new URL(req.url)
+
+    if (url.pathname === "/api/push" && req.method === "POST") {
+      const secret = process.env.PUSH_SECRET
+      if (secret) {
+        const auth = req.headers.get("Authorization")
+        if (auth !== `Bearer ${secret}`) {
+          return Response.json({ error: "unauthorized" }, { status: 401, headers: CORS })
+        }
+      }
+      return req.json().then((body: any) => {
+        body.timestamp = new Date().toISOString()
+        latestAgentStatus = body
+        return Response.json({ ok: true }, { headers: CORS })
+      })
+    }
+
+    if (req.method === "OPTIONS") {
+      return new Response(null, {
+        headers: { ...CORS, "Access-Control-Allow-Methods": "GET, POST, OPTIONS", "Access-Control-Allow-Headers": "Authorization, Content-Type" },
+      })
+    }
 
     if (url.pathname === "/api/state") {
       try {
@@ -177,7 +200,8 @@ const server = serve({
           const send = () => {
             try {
               const content = readFileSync(STATE_FILE, "utf-8")
-              const state = parseState(content)
+              const state = parseState(content) as any
+              if (latestAgentStatus) state.agentStatus = latestAgentStatus
               controller.enqueue(enc.encode(`data: ${JSON.stringify(state)}\n\n`))
             } catch (e) {
               controller.enqueue(enc.encode(`data: ${JSON.stringify({ error: String(e) })}\n\n`))

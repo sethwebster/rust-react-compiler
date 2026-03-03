@@ -38,31 +38,18 @@ Update the following before stopping:
 | Correct rate | 24.1% (300/1244) |
 | Error (expected) | 196 |
 | Error (unexpected) | 0 |
-| Uncommitted changes | 0 |
+| Uncommitted changes | 10 files (8 modified, 2 untracked) |
 
 ---
 
 ## Current Task
 
-**Active plan**: [`plans/correctness-284-to-350.md`](./plans/correctness-284-to-350.md)
+**Active plan**: [`plans/correctness-300-to-500.md`](./plans/correctness-300-to-500.md)
 
-Next up: **Phase 1 — Codegen Quick Wins** (~41 exclusive fixtures, target 284 → 310-320)
-- [ ] 1a. Fix `$tN` internal temp leak in codegen (46 files, 13 exclusive)
-- [ ] 1b. For-loop init/update reassembly (26 files, 14 exclusive)
-- [ ] 1c. Lambda hoisting to `_temp` form (41 files, 14 exclusive)
-
-Then: **Phase 2 — Codegen Naming + Control Flow** (~32 exclusive, target → 350)
-- [ ] 2a. Use original identifier in memo blocks (94 files, 22 exclusive)
-- [ ] 2b. Switch codegen cleanup (11 files, 7 exclusive)
-- [ ] 2c. Try/catch codegen (6 files, 3 exclusive)
-
-Previously completed:
-- `prune_non_escaping_scopes`: STUB → REAL (memoization-level-based scope pruning)
-- optional chaining fix: InlineJs dep bridging in prune_non_escaping_scopes (+2 fixtures)
-- codegen dep hoisting: hoist non-trivial dep expressions before scope guards
-- `drop_manual_memoization`: STUB → REAL (useMemo/useCallback dropping)
-- codegen IIFE unwrap: expression-body arrows + second CallExpression path
-- `count_scope_outputs`: fix multi-output scope counting (val_is_scope_owned)
+Next up: **Phase 3 — ReactiveFunction Critical Path** (target: 300 → 400+)
+- [ ] 3a. Implement `build_reactive_scope_terminals_hir` from TS `BuildReactiveScopeTerminalsHIR.ts`
+- [ ] 3b. Continue `build_reactive_function` from skeleton to full CFG→tree conversion
+- [ ] 3c. Implement `codegen_reactive_function` and wire dual codegen fallback
 
 ---
 
@@ -88,11 +75,12 @@ Previously completed:
 
 ### Ongoing / Deferred
 - [ ] Fix destructured parameter lowering (`lower/core.rs`, `lower/functions.rs`)
-- [ ] Define `ReactiveFunction` / `ReactiveScope` types in `hir.rs`
+- [x] Define `ReactiveFunction` / `ReactiveScope` types in `hir.rs`
 - [ ] Implement `build_reactive_function` — wire into `pipeline.rs` after scope inference
 - [ ] Fix `codegen_reactive_function` stub to operate on `ReactiveFunction`
 - [ ] Fix `prune_non_reactive_dependencies` (PARTIAL → REAL)
 - [ ] Fix `constant_propagation` (PARTIAL → REAL)
+- [x] Fix compile regression: thread `phi_operands` through dep-resolution callsites
 
 ---
 
@@ -107,16 +95,20 @@ Previously completed:
 - `hir_codegen.rs`: skip outlined FunctionExpression stmt, self-assignment guards
 - Investigated is_named_var for const outputs — deferred (regresses 50+ fixtures)
 - 284 → 287 correct (+3 net)
+- `build_reactive_function.rs`: implemented initial ReactiveFunction tree builder skeleton (WIP)
+- `propagate_scope_dependencies_hir.rs`: added phi tracing map and fixed missing `phi_operands` call plumbing
+- Fixture suite compile restored after propagation-signature regression
+- `is-port-done-yet`: added push API + realtime agent activity strip + milestone reaction burst
 
 ---
 
 ## Blocked On
 
-- `build_reactive_function` is still a 2-LOC stub — **critical path blocker**
-  - Blocks: `codegen_reactive_function`, `rename_variables`, and all downstream scope passes
-  - Needs: `ReactiveFunction` type defined in `hir.rs` first
+- `build_reactive_function` is PARTIAL (initial skeleton only) — still **critical path blocker**
+  - Blocks: full `codegen_reactive_function`, `rename_variables`, and downstream scope transforms
+  - Needs: scope terminals + full terminal/branch/loop coverage in tree builder
 - Codegen (`hir_codegen.rs`) currently operates on raw `HIR`, not `ReactiveFunction`
-  - Fix requires `build_reactive_function` to exist first
+  - Fix requires full tree build + dual codegen integration first
 
 ---
 
@@ -148,7 +140,7 @@ Previously completed:
 | prune_unused_scopes | reactive_scopes/prune_unused_scopes.rs | REAL | 180 |
 | promote_used_temporaries | reactive_scopes/promote_used_temporaries.rs | REAL | 45 |
 | prune_non_reactive_dependencies | reactive_scopes/prune_non_reactive_dependencies.rs | PARTIAL | 15 |
-| **build_reactive_function** | reactive_scopes/build_reactive_function.rs | **STUB** | **2** |
+| **build_reactive_function** | reactive_scopes/build_reactive_function.rs | **PARTIAL** | **~500** |
 | build_reactive_scope_terminals_hir | reactive_scopes/build_reactive_scope_terminals_hir.rs | STUB | 2 |
 | codegen_reactive_function | reactive_scopes/codegen_reactive_function.rs | STUB | 14 |
 | align_method_call_scopes | reactive_scopes/align_method_call_scopes.rs | STUB | 2 |
@@ -190,7 +182,7 @@ Previously completed:
 - **Place**: stores `IdentifierId`, not a pointer. Identifier data lives in `Environment.identifiers`.
 - **No lifetimes on HIR types** — all owned `String`s.
 - **oxc 0.69** — AST types differ from Babel. Don't assume Babel node shapes.
-- **`ReactiveFunction` type does NOT exist yet** — do not reference until `hir.rs` is updated.
+- **`ReactiveFunction` types are defined in `hir.rs`** — keep tree/codegen logic aligned with existing variants.
 - **Codegen operates on HIR directly** — intentional temporary architectural mismatch.
 - **serde** on all HIR types — requires `indexmap = { features = ["serde"] }`.
 - **TS source**: `react/compiler/packages/babel-plugin-react-compiler/src/`
@@ -223,3 +215,4 @@ codegen (currently bypasses ReactiveFunction) → oxc_codegen → JS output
 | 2026-03-03 | 84.2 | 23.8 | — | 16 | 36 | ralph-loop iter1: flatten_reactive_loops deferred, near-miss analysis |
 | 2026-03-03 | 84.2 | 24.1 | — | 16 | 36 | ralph-loop iter2: alloc dep tracing (+4), rename_variables deferred |
 | 2026-03-03 | 84.2 | 24.1 | — | 16 | 36 | ralph-loop iter3: tree builder skeleton, scope inference investigation |
+| 2026-03-03 | 84.2 | 24.1 | — | 16 | 36 | fixed propagate_scope_dependencies compile regression (`phi_operands` threading) |

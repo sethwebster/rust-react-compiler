@@ -3,9 +3,17 @@ const GITHUB_RAW =
 
 interface Env {
   GITHUB_TOKEN?: string
+  PUSH_SECRET?: string
   REACTIONS?: KVNamespace
   ROOM: DurableObjectNamespace
   ASSETS: Fetcher
+}
+
+interface AgentStatusPayload {
+  type: "status" | "progress" | "milestone"
+  message: string
+  metrics?: { compileRate?: number; correctRate?: number }
+  timestamp?: string
 }
 
 // ── Durable Object: Room ───────────────────────────────────────────────────────
@@ -20,10 +28,33 @@ export class RoomDO implements DurableObject {
   private countsLoaded = false
   private checkedTodos: Set<string> = new Set()
   private checkedLoaded = false
+  private agentStatus: AgentStatusPayload | null = null
+  private agentStatusLoaded = false
 
   constructor(state: DurableObjectState) { this.state = state }
 
   async fetch(request: Request): Promise<Response> {
+    // Handle non-WS push from /api/push
+    if (request.method === "POST" && request.headers.get("Upgrade") !== "websocket") {
+      const payload = await request.json() as AgentStatusPayload
+      payload.timestamp = new Date().toISOString()
+      this.agentStatus = payload
+      this.state.storage.put("agent-status", payload)
+      this.broadcast({ type: "agent-status", ...payload })
+
+      // Milestone → emoji burst
+      if (payload.type === "milestone") {
+        const burst = ["🎉", "🚀", "🔥", "💯"]
+        for (const emoji of burst) {
+          this.broadcast({ type: "reaction", id: crypto.randomUUID(), emoji })
+        }
+      }
+
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: { "Content-Type": "application/json" },
+      })
+    }
+
     if (request.headers.get("Upgrade") !== "websocket")
       return new Response("Expected WebSocket", { status: 426 })
 
@@ -46,9 +77,17 @@ export class RoomDO implements DurableObject {
     this.state.acceptWebSocket(server)
     server.serializeAttachment(meta)
 
+    if (!this.agentStatusLoaded) {
+      this.agentStatus = (await this.state.storage.get<AgentStatusPayload>("agent-status")) ?? null
+      this.agentStatusLoaded = true
+    }
+
     server.send(JSON.stringify({ type: "init", id: meta.id }))
     server.send(JSON.stringify({ type: "counts", counts: this.counts }))
     server.send(JSON.stringify({ type: "todo-state", checked: [...this.checkedTodos] }))
+    if (this.agentStatus) {
+      server.send(JSON.stringify({ type: "agent-status", ...this.agentStatus }))
+    }
     this.broadcastCursors()
 
     return new Response(null, { status: 101, webSocket: client })
@@ -313,6 +352,28 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const { pathname } = new URL(request.url)
     const cors = { "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store" }
+
+    if (pathname === "/api/push" && request.method === "POST") {
+      if (env.PUSH_SECRET) {
+        const auth = request.headers.get("Authorization")
+        if (auth !== `Bearer ${env.PUSH_SECRET}`) {
+          return Response.json({ error: "unauthorized" }, { status: 401, headers: cors })
+        }
+      }
+      const id = env.ROOM.idFromName("main")
+      const doRes = await env.ROOM.get(id).fetch(new Request("https://do/push", {
+        method: "POST",
+        body: await request.text(),
+        headers: { "Content-Type": "application/json" },
+      }))
+      return new Response(doRes.body, { status: doRes.status, headers: { ...cors, "Content-Type": "application/json" } })
+    }
+
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        headers: { ...cors, "Access-Control-Allow-Methods": "GET, POST, OPTIONS", "Access-Control-Allow-Headers": "Authorization, Content-Type" },
+      })
+    }
 
     if (pathname === "/api/state") {
       try {

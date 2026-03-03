@@ -256,7 +256,6 @@ fn has_side_effects(value: &InstructionValue) -> bool {
             | InstructionValue::Await { .. }
             | InstructionValue::UnsupportedNode { .. }
             | InstructionValue::InlineJs { .. }
-            // Update expressions (++/--) mutate a variable — always a side effect.
             | InstructionValue::PostfixUpdate { .. }
             | InstructionValue::PrefixUpdate { .. }
     )
