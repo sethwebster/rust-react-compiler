@@ -81,8 +81,11 @@ fn instruction_memo_level(value: &InstructionValue) -> MemoLevel {
         | InstructionValue::Debugger { .. }
         | InstructionValue::StartMemoize { .. }
         | InstructionValue::FinishMemoize { .. }
-        | InstructionValue::UnsupportedNode { .. }
-        | InstructionValue::InlineJs { .. } => MemoLevel::Unmemoized,
+        | InstructionValue::UnsupportedNode { .. } => MemoLevel::Unmemoized,
+
+        // InlineJs (optional chaining) — Conditional so backward traversal propagates
+        // through the synthetic dep added during node building.
+        InstructionValue::InlineJs { .. } => MemoLevel::Conditional,
 
         // Never: barrier to backward propagation (no rvalues = empty deps).
         InstructionValue::BinaryExpression { .. }
@@ -199,7 +202,7 @@ pub fn run_with_env(hir: &HIRFunction, env: &mut Environment) {
     let mut definitions: HashMap<DeclarationId, DeclarationId> = HashMap::new();
 
     for (_, block) in &hir.body.blocks {
-        for instr in &block.instructions {
+        for (instr_idx, instr) in block.instructions.iter().enumerate() {
             let lv = instr.lvalue.identifier;
             let lv_decl = decl_for(lv);
             let level = instruction_memo_level(&instr.value);
@@ -278,6 +281,20 @@ pub fn run_with_env(hir: &HIRFunction, env: &mut Environment) {
                                 }
                             }
                             vec![val_decl]
+                        }
+                        // InlineJs (e.g. optional chaining `x?.b`) has zero tracked
+                        // operands, creating a dead end in the dep graph. Bridge the
+                        // gap by linking back to the preceding instruction's lvalue,
+                        // which is typically the LoadLocal/StoreLocal that produced the
+                        // chain's root object.
+                        InstructionValue::InlineJs { .. } => {
+                            let mut inline_deps = Vec::new();
+                            if instr_idx > 0 {
+                                let prev = &block.instructions[instr_idx - 1];
+                                let prev_decl = decl_for(prev.lvalue.identifier);
+                                inline_deps.push(prev_decl);
+                            }
+                            inline_deps
                         }
                         _ => {
                             each_instruction_value_operand(&instr.value)
