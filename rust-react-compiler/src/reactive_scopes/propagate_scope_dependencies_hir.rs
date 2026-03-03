@@ -201,6 +201,35 @@ fn resolve_dep_path_inner(
                         return None;
                     }
                 }
+                // Allocations (Object, Array) create new values every render.
+                // Trace through to their first resolvable operand so the dep is
+                // the reactive INPUT, not the allocation itself.
+                // e.g., `{a: param}` → dep should be `param`, not the object.
+                InstructionValue::ObjectExpression { properties, .. } => {
+                    for prop in properties {
+                        let val_id = match prop {
+                            crate::hir::hir::ObjectExpressionProperty::Property(p) => p.place.identifier,
+                            crate::hir::hir::ObjectExpressionProperty::Spread(s) => s.place.identifier,
+                        };
+                        if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, range_start, depth + 1) {
+                            return Some(result);
+                        }
+                    }
+                    return None;
+                }
+                InstructionValue::ArrayExpression { elements, .. } => {
+                    for elem in elements {
+                        let val_id = match elem {
+                            crate::hir::hir::ArrayElement::Place(p) => p.identifier,
+                            crate::hir::hir::ArrayElement::Spread(s) => s.place.identifier,
+                            crate::hir::hir::ArrayElement::Hole => continue,
+                        };
+                        if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, range_start, depth + 1) {
+                            return Some(result);
+                        }
+                    }
+                    return None;
+                }
                 _ => {}
             }
         }
