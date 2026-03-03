@@ -205,6 +205,10 @@ fn resolve_dep_path_inner(
             }
         }
         // Already an external base — return with empty path.
+        if std::env::var("RC_DEBUG2").is_ok() {
+            eprintln!("[resolve_ext] id={} depth={} def_at={:?} → Some({})", place_id.0, depth,
+                def_at.get(&place_id).map(|id| id.0), place_id.0);
+        }
         return Some((place_id, vec![]));
     }
 
@@ -238,7 +242,25 @@ fn resolve_dep_path_inner(
         return resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, range_start, depth + 1);
     }
 
+    if std::env::var("RC_DEBUG2").is_ok() {
+        eprintln!("[resolve] id={} depth={} def_at={:?} is_external={} → None", place_id.0, depth,
+            def_at.get(&place_id).map(|id| id.0), is_external);
+    }
     None
+}
+
+fn resolve_dep_path_debug(
+    place_id: IdentifierId,
+    def_at: &HashMap<IdentifierId, InstructionId>,
+    instr_map: &HashMap<IdentifierId, &Instruction>,
+    store_local_value: &HashMap<IdentifierId, IdentifierId>,
+    range_start: InstructionId,
+) -> Option<(IdentifierId, Vec<DependencyPathEntry>)> {
+    if std::env::var("RC_DEBUG2").is_ok() {
+        eprintln!("[resolve_start] id={} def_at={:?} range_start={}", place_id.0,
+            def_at.get(&place_id).map(|id| id.0), range_start.0);
+    }
+    resolve_dep_path_inner(place_id, def_at, instr_map, store_local_value, range_start, 0)
 }
 
 /// Returns true for "transparent" instructions whose operands are subsumed by
@@ -262,12 +284,28 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
     // Build def_at: identifier → InstructionId where it was defined.
     // Includes both instruction result temps AND StoreLocal binding targets,
     // so that variables defined inside a scope are not mistakenly treated as external deps.
+    //
+    // Also includes phi node results: phi.place.identifier → the ID of the first instruction
+    // in that block (as a proxy for "defined in this block"). This prevents phi results from
+    // being treated as external deps just because they don't appear in instruction lvalues.
     let mut def_at: HashMap<IdentifierId, InstructionId> = HashMap::new();
     for (_, block) in &hir.body.blocks {
+        // Register phi results using the block's first instruction ID as a proxy.
+        // If the block has no instructions, we skip (phi block with no instructions is empty;
+        // the range check will handle it correctly since range_start >= 0).
+        let first_instr_id = block.instructions.first().map(|i| i.id);
+        for phi in &block.phis {
+            if let Some(fid) = first_instr_id {
+                def_at.entry(phi.place.identifier).or_insert(fid);
+            }
+        }
         for instr in &block.instructions {
             def_at.insert(instr.lvalue.identifier, instr.id);
             // Also track StoreLocal binding targets so they're seen as scope-internal.
             if let InstructionValue::StoreLocal { lvalue, .. } = &instr.value {
+                if std::env::var("RC_DEBUG2").is_ok() {
+                    eprintln!("[def_at_store] named_var={} instr={}", lvalue.place.identifier.0, instr.id.0);
+                }
                 def_at.entry(lvalue.place.identifier).or_insert(instr.id);
             }
         }

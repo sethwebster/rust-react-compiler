@@ -70,7 +70,7 @@
     .layout {
       max-width: 1280px;
       margin: 0 auto;
-      padding: 2rem 2rem 4rem;
+      padding: 2rem 2rem 5rem;
     }
 
     /* ── HEADER ── */
@@ -498,6 +498,135 @@
       height: 160px; color: var(--muted); font-size: 0.8rem;
     }
 
+    /* ── REACTION BAR ── */
+    .reaction-bar {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      z-index: 200;
+      display: flex;
+      justify-content: center;
+      padding: 0.6rem 1rem;
+      background: linear-gradient(to top, rgba(7,7,15,0.95) 60%, transparent);
+      gap: 0.5rem;
+    }
+
+    .reaction-btn {
+      background: var(--bg1);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 0.3rem 0.75rem;
+      font-size: 1.1rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      transition: border-color 0.15s, transform 0.1s, background 0.15s;
+      color: var(--text);
+      font-family: inherit;
+      line-height: 1;
+    }
+
+    .reaction-btn:hover {
+      border-color: var(--border2);
+      background: var(--bg2);
+      transform: scale(1.1);
+    }
+
+    .reaction-btn:active { transform: scale(0.95); }
+
+    .reaction-count {
+      font-size: 0.65rem;
+      color: var(--muted);
+      min-width: 8px;
+    }
+
+    /* ── REMOTE CURSORS ── */
+    .remote-cursor {
+      position: fixed;
+      pointer-events: none;
+      z-index: 500;
+      font-size: 1.3rem;
+      line-height: 1;
+      transition: left 0.12s linear, top 0.12s linear, opacity 0.4s ease;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+    }
+
+    /* ── TODO LIST ── */
+    .todo-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.6rem;
+      padding: 0.5rem 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.82rem;
+      line-height: 1.4;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .todo-item:last-child { border-bottom: none; }
+
+    .todo-check {
+      width: 14px;
+      height: 14px;
+      border: 1px solid var(--muted);
+      border-radius: 3px;
+      flex-shrink: 0;
+      margin-top: 0.15em;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.6rem;
+      transition: background 0.15s, border-color 0.15s;
+    }
+
+    .todo-item.checked .todo-check {
+      background: var(--green);
+      border-color: var(--green);
+      color: var(--bg);
+    }
+
+    .todo-item.checked .todo-text {
+      text-decoration: line-through;
+      color: var(--muted);
+    }
+
+    .todo-item.agent-done .todo-text { color: var(--muted); font-style: italic; }
+
+    .cursor-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.55rem;
+      color: var(--text);
+      background: var(--bg1);
+      border: 1px solid var(--border);
+      padding: 1px 5px;
+      border-radius: 3px;
+      white-space: nowrap;
+      margin-top: 2px;
+      margin-left: 6px;
+    }
+
+    /* ── FLOATING EMOJI ── */
+    .float-emoji {
+      position: fixed;
+      bottom: 56px;
+      font-size: 1.8rem;
+      pointer-events: none;
+      z-index: 300;
+      animation: floatUp 3s ease-out forwards;
+      line-height: 1;
+    }
+
+    @keyframes floatUp {
+      0%   { opacity: 1;   transform: translateY(0)     scale(1)   rotate(0deg); }
+      60%  { opacity: 0.9; }
+      100% { opacity: 0;   transform: translateY(-220px) scale(1.2) rotate(var(--rot)); }
+    }
+
     /* ── ANIMATIONS ── */
     @keyframes fadeIn {
       from { opacity: 0; transform: translateY(8px); }
@@ -619,15 +748,15 @@
         <div class="pass-grid" id="pass-grid"></div>
       </div>
 
-      <!-- Current task + next actions -->
+      <!-- Current task + todo list -->
       <div style="display:flex;flex-direction:column;gap:1.25rem">
         <div class="card" style="flex:0 0 auto">
           <div class="card-label">Current Task</div>
           <div class="task-text" id="current-task">Loading…</div>
         </div>
         <div class="card" style="flex:1">
-          <div class="card-label">Next Actions</div>
-          <div id="next-actions"></div>
+          <div class="card-label">Todo List</div>
+          <div id="todo-list"><div style="color:var(--muted);font-size:0.8rem">Loading…</div></div>
         </div>
       </div>
     </div>
@@ -635,6 +764,7 @@
     <!-- BLOCKERS -->
     <div class="section-header">Blockers</div>
     <div id="blockers" style="margin-bottom:2rem"></div>
+
 
     <!-- COMPLETED + PASS TABLE -->
     <div class="grid-2">
@@ -661,6 +791,16 @@
 
   </div>
 
+  <!-- REACTION BAR -->
+  <div class="reaction-bar" id="reaction-bar">
+    <button class="reaction-btn" data-emoji="🚀" onclick="sendReaction('🚀')">🚀 <span class="reaction-count" id="rc-🚀">0</span></button>
+    <button class="reaction-btn" data-emoji="🔥" onclick="sendReaction('🔥')">🔥 <span class="reaction-count" id="rc-🔥">0</span></button>
+    <button class="reaction-btn" data-emoji="❤️" onclick="sendReaction('❤️')">❤️ <span class="reaction-count" id="rc-❤️">0</span></button>
+    <button class="reaction-btn" data-emoji="🎉" onclick="sendReaction('🎉')">🎉 <span class="reaction-count" id="rc-🎉">0</span></button>
+    <button class="reaction-btn" data-emoji="👀" onclick="sendReaction('👀')">👀 <span class="reaction-count" id="rc-👀">0</span></button>
+    <button class="reaction-btn" data-emoji="💯" onclick="sendReaction('💯')">💯 <span class="reaction-count" id="rc-💯">0</span></button>
+  </div>
+
   <script>
     let lastData = null
     let gitHistory = []
@@ -675,7 +815,11 @@
         }
       } catch {}
     }
-    loadHistory()
+    if (window.__INITIAL_HISTORY__?.length) {
+      gitHistory = window.__INITIAL_HISTORY__
+    } else {
+      loadHistory()
+    }
 
     function fmt(n, decimals = 1) {
       return typeof n === 'number' ? n.toFixed(decimals) : '—'
@@ -898,9 +1042,13 @@
       // Passes
       if (passes?.length) renderPasses(passes)
 
+      // Todo list
+      if (data.todoItems) { todoItems = data.todoItems; renderTodoList() }
+
       // Timestamp
       setText('last-updated', timeSince(data.lastUpdated))
       lastData = data
+
     }
 
     // Update relative timestamps every 10s
@@ -936,6 +1084,152 @@
       }
     }
 
+    // ── REACTIONS + CURSORS (WebSocket) ───────────────────────────
+    const seenReactionIds = new Set()
+    const remoteCursors = {}     // id → DOM element
+    const cursorLastSeen = {}    // id → timestamp of last position change
+    const cursorLastPos = {}     // id → {x, y}
+    let myId = null
+    let ws = null
+    let lastCursorSend = 0
+
+    function spawnEmoji(emoji) {
+      const el = document.createElement('div')
+      el.className = 'float-emoji'
+      el.textContent = emoji
+      el.style.left = (10 + Math.random() * 80) + 'vw'
+      el.style.setProperty('--rot', (Math.random() * 40 - 20) + 'deg')
+      document.body.appendChild(el)
+      el.addEventListener('animationend', () => el.remove())
+    }
+
+    function updateCounts(counts) {
+      for (const emoji of ['🚀','🔥','❤️','🎉','👀','💯']) {
+        const el = document.getElementById('rc-' + emoji)
+        if (el) el.textContent = (counts[emoji] ?? 0).toLocaleString()
+      }
+    }
+
+    function updateCursors(list) {
+      const active = new Set(list.map(c => c.id))
+      for (const id of Object.keys(remoteCursors)) {
+        if (!active.has(id)) {
+          remoteCursors[id].remove()
+          delete remoteCursors[id]
+          delete cursorLastSeen[id]
+          delete cursorLastPos[id]
+        }
+      }
+      for (const c of list) {
+        if (c.id === myId) continue
+        if (!remoteCursors[c.id]) {
+          const el = document.createElement('div')
+          el.className = 'remote-cursor'
+          const loc = [c.city, c.country].filter(Boolean).join(', ') || '?'
+          el.innerHTML = `🦀<span class="cursor-label">${loc}</span>`
+          document.body.appendChild(el)
+          remoteCursors[c.id] = el
+        }
+        // c.x / c.y are absolute page pixels
+        remoteCursors[c.id].style.left = (c.x * window.innerWidth)  + 'px'
+        remoteCursors[c.id].style.top  = (c.y * window.innerHeight) + 'px'
+        // Only reset idle timer when position actually changes
+        const prev = cursorLastPos[c.id]
+        if (!prev || prev.x !== c.x || prev.y !== c.y) {
+          cursorLastPos[c.id] = { x: c.x, y: c.y }
+          cursorLastSeen[c.id] = Date.now()
+          remoteCursors[c.id].style.opacity = '1'
+        }
+      }
+    }
+
+    setInterval(() => {
+      const now = Date.now()
+      for (const [id, el] of Object.entries(remoteCursors)) {
+        const idle = now - (cursorLastSeen[id] ?? now)
+        el.style.opacity = idle > 1000 ? '0' : '1'
+      }
+    }, 200)
+
+    function clearCursors() {
+      for (const el of Object.values(remoteCursors)) el.remove()
+      Object.keys(remoteCursors).forEach(k => delete remoteCursors[k])
+    }
+
+    function connectWS() {
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+      ws = new WebSocket(`${proto}//${location.host}/api/ws`)
+
+      ws.onmessage = e => {
+        try {
+          const msg = JSON.parse(e.data)
+          if (msg.type === 'init') {
+            myId = msg.id
+          } else if (msg.type === 'cursors') {
+            updateCursors(msg.cursors)
+          } else if (msg.type === 'counts') {
+            updateCounts(msg.counts)
+          } else if (msg.type === 'reaction') {
+            if (!seenReactionIds.has(msg.id)) {
+              seenReactionIds.add(msg.id)
+              spawnEmoji(msg.emoji)
+            }
+          } else if (msg.type === 'todo-state') {
+            todoChecked = new Set(msg.checked)
+            renderTodoList()
+          }
+        } catch {}
+      }
+
+      ws.onclose = () => { clearCursors(); setTimeout(connectWS, 3000) }
+      ws.onerror = () => ws.close()
+    }
+
+    document.addEventListener('mousemove', e => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return
+      const now = Date.now()
+      if (now - lastCursorSend < 50) return
+      lastCursorSend = now
+      ws.send(JSON.stringify({ type: 'cursor', x: e.clientX / window.innerWidth, y: e.clientY / window.innerHeight }))
+    })
+
+    function sendReaction(emoji) {
+      spawnEmoji(emoji) // local only — server echoes to others but NOT back to us
+      if (ws && ws.readyState === WebSocket.OPEN)
+        ws.send(JSON.stringify({ type: 'react', emoji }))
+    }
+
+    // ── TODO LIST ──────────────────────────────────────────────────
+    let todoItems = []       // [{text, agentDone}] from SSE
+    let todoChecked = new Set()  // texts checked by viewers (from DO)
+
+    function renderTodoList() {
+      const el = document.getElementById('todo-list')
+      if (!el) return
+      if (!todoItems.length) {
+        el.innerHTML = '<div style="color:var(--muted);font-size:0.8rem">No todo items yet — agent writes ## Todo List to AGENT-STATE.md</div>'
+        return
+      }
+      el.innerHTML = todoItems.map(item => {
+        const checked = todoChecked.has(item.text) || item.agentDone
+        return `<div class="todo-item${checked ? ' checked' : ''}${item.agentDone ? ' agent-done' : ''}"
+          onclick="toggleTodo(${JSON.stringify(item.text)})">
+          <div class="todo-check">${checked ? '✓' : ''}</div>
+          <span class="todo-text">${item.text}</span>
+        </div>`
+      }).join('')
+    }
+
+    function toggleTodo(text) {
+      if (ws && ws.readyState === WebSocket.OPEN)
+        ws.send(JSON.stringify({ type: 'todo-toggle', text }))
+    }
+
+    if (window.__INITIAL_STATE__) {
+      window.__INITIAL_STATE__.lastUpdated = new Date().toISOString()
+      update(window.__INITIAL_STATE__)
+    }
+    connectWS()
     connect()
   </script>
 </body>

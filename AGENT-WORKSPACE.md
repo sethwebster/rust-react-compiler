@@ -26,14 +26,30 @@ Do not begin any implementation work until you have the baseline metrics. You ne
 
 ### On Session End (mandatory)
 
-Update ALL of the following sections in `AGENT-STATE.md` before stopping:
+Update the following sections in `AGENT-STATE.md` before stopping:
 
 - **Metrics** — current compile rate, correct rate, error counts
-- **Current Task** — what you were working on (even if unfinished)
+- **Current Task** — what the next agent should start on
 - **Completed This Session** — concrete list of files changed and what changed
-- **Blocked On** — any new blockers you hit
-- **Next 3 Actions** — specific file-level actions for the next agent
+- **Todo List** — cross off completed items (`- [ ]` → `- [x]`), add new tasks; this is the canonical backlog
+- **Blocked On** — current blockers
 - **Key Invariants** — anything you had to re-derive that wasn't written down
+- **History** — append one row with current metrics
+
+**Do not add a `## Next 3 Actions` section** — that's been replaced by `## Todo List`.
+
+The `## Todo List` section is displayed live at https://rust-react-compiler.sethwebster.workers.dev. Maintain it throughout your session, not just at the end:
+- Session start: review the list, mark your item `→ in progress`
+- During: cross off items as you complete them
+- Session end: add newly discovered tasks
+
+Format:
+```
+## Todo List
+- [x] Fix destructured parameter lowering
+- [ ] Define ReactiveFunction / ReactiveScope types in hir.rs
+- [ ] Implement build_reactive_function
+```
 
 If you skip this, the next agent starts blind.
 

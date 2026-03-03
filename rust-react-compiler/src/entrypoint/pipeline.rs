@@ -8,12 +8,12 @@ use oxc_span::SourceType;
 use crate::error::{Result};
 use crate::hir::environment::{Environment, EnvironmentConfig, OutputMode};
 use crate::hir::hir::{HIRFunction, ReactFunctionType};
-use crate::hir::build_hir::lower_program;
+use crate::hir::build_hir::{lower_program, lower_program_nth};
 use crate::hir::print_hir::print_hir_function;
 
 use crate::optimization::{
     constant_propagation::constant_propagation,
-    dead_code_elimination::dead_code_elimination,
+    dead_code_elimination::dead_code_elimination_with_env,
     prune_maybe_throws::prune_maybe_throws,
     optimize_props_method_calls::optimize_props_method_calls,
     optimize_for_ssr::optimize_for_ssr,
@@ -21,7 +21,7 @@ use crate::optimization::{
     outline_jsx::outline_jsx,
 };
 use crate::ssa::{
-    enter_ssa::enter_ssa,
+    enter_ssa::{enter_ssa_with_env},
     eliminate_redundant_phi::eliminate_redundant_phi,
     rewrite_instruction_kinds::rewrite_instruction_kinds_based_on_reassignment,
 };
@@ -44,22 +44,22 @@ use crate::reactive_scopes::{
     align_method_call_scopes::run as align_method_call_scopes,
     align_object_method_scopes::run as align_object_method_scopes,
     prune_unused_labels_hir::run as prune_unused_labels_hir,
-    align_reactive_scopes_to_block_scopes_hir::run as align_reactive_scopes_to_block_scopes_hir,
-    merge_overlapping_reactive_scopes_hir::run as merge_overlapping_reactive_scopes_hir,
+    align_reactive_scopes_to_block_scopes_hir::run_with_env as align_reactive_scopes_to_block_scopes_hir,
+    merge_overlapping_reactive_scopes_hir::run_with_env as merge_overlapping_reactive_scopes_hir,
     build_reactive_scope_terminals_hir::run as build_reactive_scope_terminals_hir,
     flatten_reactive_loops_hir::run as flatten_reactive_loops_hir,
-    flatten_scopes_with_hooks_or_use_hir::run as flatten_scopes_with_hooks_or_use_hir,
+    flatten_scopes_with_hooks_or_use_hir::run_with_env as flatten_scopes_with_hooks_or_use_hir,
     propagate_scope_dependencies_hir::run as propagate_scope_dependencies_hir,
     build_reactive_function::run as build_reactive_function,
     prune_unused_labels::run as prune_unused_labels,
     prune_non_escaping_scopes::run as prune_non_escaping_scopes,
     prune_non_reactive_dependencies::run as prune_non_reactive_dependencies,
-    prune_unused_scopes::run as prune_unused_scopes,
-    merge_reactive_scopes_that_invalidate_together::run as merge_reactive_scopes_that_invalidate_together,
+    prune_unused_scopes::run_with_env as prune_unused_scopes,
+    merge_reactive_scopes_that_invalidate_together::run_with_env as merge_reactive_scopes_that_invalidate_together,
     prune_always_invalidating_scopes::run as prune_always_invalidating_scopes,
     propagate_early_returns::run as propagate_early_returns,
     prune_unused_lvalues::run as prune_unused_lvalues,
-    promote_used_temporaries::run as promote_used_temporaries,
+    promote_used_temporaries::run_with_env as promote_used_temporaries,
     extract_scope_declarations_from_destructuring::run as extract_scope_declarations_from_destructuring,
     stabilize_block_ids::run as stabilize_block_ids,
     rename_variables::run as rename_variables,
@@ -85,26 +85,274 @@ impl Default for CompileOptions {
     }
 }
 
-/// Compile a JS/TS source string containing a React component/hook.
-/// Returns the JS code output.
+/// Compile a JS/TS source string containing one or more React components/hooks.
+/// Returns the full file output: compiled functions + passthrough of other code.
 pub fn compile(source: &str, options: CompileOptions) -> Result<CodegenOutput> {
-    let mut env = Environment::new(options.fn_type, options.config, options.filename);
     let source_type = options.source_type;
-    let mut hir = lower_program(source, source_type, &mut env)?;
-    let result = run_with_environment(&mut hir, &mut env);
+    // Collect the spans of all compilable top-level functions.
+    let fn_spans = collect_compilable_fn_spans(source, source_type);
 
-    // If codegen is a stub (returns stub output), fall back to oxc passthrough.
-    match result {
-        Ok(ref out) if !out.js.starts_with("// react-compiler (Phase 1 stub)") => result,
-        Ok(_) | Err(_) => {
-            // Run oxc_codegen to re-emit the source as clean JS (strips TS types).
-            let passthrough = emit_passthrough(source, source_type);
-            match result {
-                Err(e) => Err(e),
-                Ok(_) => Ok(CodegenOutput { js: passthrough }),
+    if fn_spans.is_empty() {
+        // No compilable functions — passthrough the whole file.
+        let js = emit_passthrough(source, source_type);
+        return Ok(CodegenOutput { js });
+    }
+
+    // Compile each function. Track whether any produced cache slots.
+    let mut compiled_fns: Vec<(u32, u32, String)> = Vec::new(); // (start, end, compiled_js)
+    let mut any_scoped = false;
+
+    // Whether the file uses panic_threshold:none (passthrough on any error).
+    let first_line = source.lines().next().unwrap_or("");
+    let panic_threshold_none = first_line.contains("@panicThreshold:\"none\"")
+        || first_line.contains("@panicThreshold:'none'");
+
+    for (i, &(start, end)) in fn_spans.iter().enumerate() {
+        let mut env = Environment::new(options.fn_type, options.config.clone(), options.filename.clone());
+        match lower_program_nth(source, source_type, &mut env, i) {
+            Ok(mut hir) => {
+                match run_with_environment(&mut hir, &mut env) {
+                    Ok(output) => {
+                        let fn_js = output.js;
+                        // Check if the output has cache import (means scopes were used).
+                        if fn_js.contains("react/compiler-runtime") {
+                            any_scoped = true;
+                        }
+                        compiled_fns.push((start, end, fn_js));
+                    }
+                    Err(e) => {
+                        if panic_threshold_none {
+                            // Passthrough this function's source.
+                            let fn_src = source.get(start as usize..end as usize).unwrap_or("").to_string();
+                            let pt = emit_passthrough(&fn_src, source_type);
+                            compiled_fns.push((start, end, pt));
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                if panic_threshold_none {
+                    // Passthrough this function's source.
+                    let fn_src = source.get(start as usize..end as usize).unwrap_or("").to_string();
+                    let pt = emit_passthrough(&fn_src, source_type);
+                    compiled_fns.push((start, end, pt));
+                } else {
+                    return Err(e);
+                }
             }
         }
     }
+
+    // Reconstruct the file by splicing compiled outputs into the original source.
+    // For non-function spans, use oxc_codegen passthrough.
+    let reconstructed = splice_compiled_fns(source, source_type, &compiled_fns);
+    Ok(CodegenOutput { js: reconstructed })
+}
+
+/// Parse the source and return byte spans (start, end) of each top-level
+/// compilable function (FunctionDeclaration, exported function/arrow).
+/// These are in the same order as lower_program_nth processes them (fn_skip_param).
+fn collect_compilable_fn_spans(source: &str, source_type: SourceType) -> Vec<(u32, u32)> {
+    use oxc_allocator::Allocator;
+    use oxc_ast::ast::*;
+
+    let allocator = Allocator::default();
+    let mut parse = oxc_parser::Parser::new(&allocator, source, source_type).parse();
+    if !parse.errors.is_empty() {
+        let tsx = SourceType::tsx();
+        let retry = oxc_parser::Parser::new(&allocator, source, tsx).parse();
+        if retry.errors.is_empty() { parse = retry; }
+    }
+    if !parse.errors.is_empty() { return vec![]; }
+
+    let mut spans: Vec<(u32, u32)> = Vec::new();
+
+    for stmt in &parse.program.body {
+        match stmt {
+            Statement::FunctionDeclaration(func) => {
+                // Skip 'use no memo' / 'use no forget' functions.
+                let no_memo = func.body.as_ref()
+                    .map(|b| b.directives.iter().any(|d| matches!(d.expression.value.as_str(), "use no memo" | "use no forget")))
+                    .unwrap_or(false);
+                if !no_memo {
+                    spans.push((func.span.start, func.span.end));
+                }
+            }
+            Statement::ExportDefaultDeclaration(decl) => {
+                match &decl.declaration {
+                    ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
+                        let no_memo = func.body.as_ref()
+                            .map(|b| b.directives.iter().any(|d| matches!(d.expression.value.as_str(), "use no memo" | "use no forget")))
+                            .unwrap_or(false);
+                        if !no_memo {
+                            spans.push((decl.span.start, decl.span.end));
+                        }
+                    }
+                    ExportDefaultDeclarationKind::ArrowFunctionExpression(_) => {
+                        spans.push((decl.span.start, decl.span.end));
+                    }
+                    ExportDefaultDeclarationKind::FunctionExpression(func) => {
+                        let no_memo = func.body.as_ref()
+                            .map(|b| b.directives.iter().any(|d| matches!(d.expression.value.as_str(), "use no memo" | "use no forget")))
+                            .unwrap_or(false);
+                        if !no_memo {
+                            spans.push((decl.span.start, decl.span.end));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Statement::ExportNamedDeclaration(decl) => {
+                match decl.declaration.as_ref() {
+                    Some(Declaration::FunctionDeclaration(func)) => {
+                        let no_memo = func.body.as_ref()
+                            .map(|b| b.directives.iter().any(|d| matches!(d.expression.value.as_str(), "use no memo" | "use no forget")))
+                            .unwrap_or(false);
+                        if !no_memo {
+                            spans.push((decl.span.start, decl.span.end));
+                        }
+                    }
+                    Some(Declaration::VariableDeclaration(var_decl)) => {
+                        // Arrow / fn expression assigned to a variable.
+                        for decl_item in &var_decl.declarations {
+                            let is_fn = match &decl_item.init {
+                                Some(Expression::ArrowFunctionExpression(_)) => true,
+                                Some(Expression::FunctionExpression(_)) => true,
+                                _ => false,
+                            };
+                            if is_fn {
+                                spans.push((decl.span.start, decl.span.end));
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Statement::VariableDeclaration(var_decl) => {
+                for decl_item in &var_decl.declarations {
+                    let is_fn = match &decl_item.init {
+                        Some(Expression::ArrowFunctionExpression(_)) => true,
+                        Some(Expression::FunctionExpression(_)) => true,
+                        _ => false,
+                    };
+                    if is_fn {
+                        spans.push((var_decl.span.start, var_decl.span.end));
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    spans
+}
+
+/// Splice compiled function outputs into a reconstructed file.
+/// - compiled_fns: list of (span_start, span_end, compiled_js) in order
+/// - Non-function regions of the source are passed through via oxc_codegen
+/// - The `import { c as _c }` line is emitted at most once at the top
+fn splice_compiled_fns(
+    source: &str,
+    source_type: SourceType,
+    compiled_fns: &[(u32, u32, String)],
+) -> String {
+    if compiled_fns.is_empty() {
+        return emit_passthrough(source, source_type);
+    }
+
+    // Step 1: extract the import line and function body from each compiled output.
+    // The compiled output looks like:
+    //   import { c as _c } from "react/compiler-runtime";\nfunction Foo() {...}\n
+    // OR (for passthrough/no-scope):
+    //   function Foo() {...}\n
+    // We want: the function body (everything after the import line, if any).
+    let import_line = "import { c as _c } from \"react/compiler-runtime\";";
+    let mut has_runtime_import = false;
+    let mut fn_bodies: Vec<(u32, u32, String)> = Vec::new();
+
+    for &(start, end, ref js) in compiled_fns {
+        let body = if let Some(rest) = js.strip_prefix(import_line) {
+            has_runtime_import = true;
+            rest.trim_start_matches('\n').to_string()
+        } else {
+            js.trim_start_matches('\n').to_string()
+        };
+        fn_bodies.push((start, end, body));
+    }
+
+    // Step 2: parse the source to get clean passthrough of non-function regions.
+    // We need to passthrough all statements that are NOT in fn_bodies spans.
+    // Strategy: use oxc_codegen on the whole file to get clean passthrough,
+    // then use span replacement.
+    //
+    // We parse the source once to get a statement-by-statement passthrough.
+    let passthrough = emit_passthrough(source, source_type);
+
+    // Step 3: reconstruct by doing span-based replacement on the ORIGINAL source.
+    // Build a list of "segments":
+    //   - (start=0, end=fn_bodies[0].start): non-function prefix
+    //   - fn_bodies[0] compiled output
+    //   - (fn_bodies[0].end, fn_bodies[1].start): non-function middle
+    //   - fn_bodies[1] compiled output
+    //   - ... etc
+    //   - (fn_bodies.last().end, source.len()): non-function suffix
+    //
+    // For non-function segments, passthrough via oxc_codegen.
+
+    let source_bytes = source.as_bytes();
+    let mut output = String::new();
+
+    // Prepend the runtime import once if any function needed it.
+    if has_runtime_import {
+        output.push_str(import_line);
+        output.push('\n');
+    }
+
+    let mut pos: u32 = 0;
+    for (start, end, body) in &fn_bodies {
+        let start = *start;
+        let end = *end;
+        // Emit passthrough of the region before this function.
+        if pos < start {
+            let region = source.get(pos as usize..start as usize).unwrap_or("");
+            if !region.trim().is_empty() {
+                // Pass through this region via oxc_codegen.
+                let region_pt = emit_passthrough(region, source_type);
+                if !region_pt.trim().is_empty() {
+                    output.push_str(&region_pt);
+                    if !region_pt.ends_with('\n') {
+                        output.push('\n');
+                    }
+                }
+            }
+        }
+        // Emit the compiled function body.
+        output.push_str(body);
+        if !body.ends_with('\n') {
+            output.push('\n');
+        }
+        pos = end;
+    }
+
+    // Emit passthrough of the region after the last function.
+    if pos < source.len() as u32 {
+        let region = source.get(pos as usize..).unwrap_or("");
+        if !region.trim().is_empty() {
+            let region_pt = emit_passthrough(region, source_type);
+            if !region_pt.trim().is_empty() {
+                output.push_str(&region_pt);
+                if !region_pt.ends_with('\n') {
+                    output.push('\n');
+                }
+            }
+        }
+    }
+
+    output
 }
 
 /// Re-emit source as clean JS using oxc_codegen (strips TypeScript type annotations).
@@ -147,7 +395,7 @@ pub fn run_with_environment(
     merge_consecutive_blocks(hir);
 
     // --- Phase: SSA ---
-    enter_ssa(hir);
+    enter_ssa_with_env(hir, Some(env));
     eliminate_redundant_phi(hir);
 
     // --- Phase: Optimization pre-inference ---
@@ -168,7 +416,7 @@ pub fn run_with_environment(
     }
 
     // --- Phase: DCE + cleanup ---
-    dead_code_elimination(hir);
+    dead_code_elimination_with_env(hir, Some(env));
     prune_maybe_throws(hir);
 
     infer_mutation_aliasing_ranges(
@@ -184,16 +432,10 @@ pub fn run_with_environment(
     // validate_no_ref_access_in_render(hir)             -- TODO
     // validate_no_set_state_in_render(hir)              -- TODO
 
-    // --- Phase: Reactivity ---
-    infer_reactive_places(hir);
-    rewrite_instruction_kinds_based_on_reassignment(hir);
-
-    if env.enable_memoization() {
-        infer_reactive_scope_variables(hir, env);
-    }
-
-    memoize_fbt_and_macro_operands(hir);
-
+    // --- Phase: Pre-reactivity optimizations ---
+    // outline_functions must run BEFORE infer_reactive_scope_variables so that
+    // outlined arrow functions (name_hint set) are treated as non-allocating
+    // (may_alloc=false) by scope inference and don't get their own reactive scopes.
     if env.config.enable_jsx_outlining {
         outline_jsx(hir);
     }
@@ -201,41 +443,51 @@ pub fn run_with_environment(
         name_anonymous_functions(hir);
     }
     if env.config.enable_function_outlining {
-        outline_functions(hir);
+        outline_functions(hir, env);
     }
+
+    // --- Phase: Reactivity ---
+    infer_reactive_places(hir);
+    rewrite_instruction_kinds_based_on_reassignment(hir, env);
+
+    if env.enable_memoization() {
+        infer_reactive_scope_variables(hir, env);
+    }
+
+    memoize_fbt_and_macro_operands(hir);
 
     // --- Phase: Scope alignment ---
     align_method_call_scopes(hir);
     align_object_method_scopes(hir);
     prune_unused_labels_hir(hir);
-    align_reactive_scopes_to_block_scopes_hir(hir);
-    merge_overlapping_reactive_scopes_hir(hir);
+    align_reactive_scopes_to_block_scopes_hir(hir, Some(env));
+    merge_overlapping_reactive_scopes_hir(hir, env);
     build_reactive_scope_terminals_hir(hir);
     flatten_reactive_loops_hir(hir);
-    flatten_scopes_with_hooks_or_use_hir(hir);
-    propagate_scope_dependencies_hir(hir);
+    flatten_scopes_with_hooks_or_use_hir(hir, env);
+    propagate_scope_dependencies_hir(hir, env);
+    merge_reactive_scopes_that_invalidate_together(hir, env);
+    prune_non_reactive_dependencies(hir, env);
+    prune_always_invalidating_scopes(hir);
+    propagate_early_returns(hir);
+    prune_unused_lvalues(hir);
+    promote_used_temporaries(hir, env);
+    extract_scope_declarations_from_destructuring(hir);
+    stabilize_block_ids(hir);
+    rename_variables(hir);
+    prune_hoisted_contexts(hir);
+    prune_unused_scopes(hir, env);
+    prune_non_escaping_scopes(hir);
+    prune_unused_labels(hir);
 
     // --- Phase: Reactive function construction ---
     build_reactive_function(hir);
 
-    // NOTE: build_reactive_function above is a stub returning unit.
-    // Once it returns a ReactiveFunction, the rest of the passes will operate on it.
-    // For Phase 1, we use the HIR directly for a stub codegen.
-
-    // Reactive passes (stubs)
-    // prune_unused_labels, prune_non_escaping_scopes, ...
-
-    // --- Codegen stub ---
-    // TODO: build actual ReactiveFunction and codegen
-    // For Phase 1, return placeholder output
     if env.has_errors() {
         return Err(env.aggregate_errors());
     }
 
-    Ok(CodegenOutput {
-        js: format!(
-            "// react-compiler (Phase 1 stub)\n// HIR printed below:\n/*\n{}\n*/",
-            print_hir_function(hir, env)
-        ),
-    })
+    // --- Codegen ---
+    let js = crate::codegen::hir_codegen::codegen_hir_function(hir, env);
+    Ok(CodegenOutput { js })
 }

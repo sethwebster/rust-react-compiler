@@ -1,6 +1,24 @@
 #![allow(unused_imports, unused_variables, dead_code)]
 use std::collections::HashSet;
 use crate::hir::hir::*;
+use crate::hir::environment::Environment;
+
+fn contains_as_word(s: &str, pattern: &str) -> bool {
+    if pattern.is_empty() { return false; }
+    let mut start = 0;
+    while let Some(rel_pos) = s[start..].find(pattern) {
+        let pos = start + rel_pos;
+        let before_ok = pos == 0 || {
+            let c = s[..pos].chars().next_back().unwrap_or('\0');
+            !(c.is_alphanumeric() || c == '_' || c == '$')
+        };
+        if before_ok {
+            return true;
+        }
+        start = pos + 1;
+    }
+    false
+}
 
 /// Dead code elimination pass.
 ///
@@ -11,8 +29,21 @@ use crate::hir::hir::*;
 ///      lvalue must appear in the used-identifier set, OR the instruction has
 ///      observable side effects.
 pub fn dead_code_elimination(hir: &mut HIRFunction) {
+    dead_code_elimination_with_env(hir, None);
+}
+
+pub fn dead_code_elimination_with_env(hir: &mut HIRFunction, env: Option<&Environment>) {
     remove_unreachable_blocks(hir);
-    remove_dead_instructions(hir);
+    // Iterate until convergence: removing dead StoreLocals can make their
+    // value-producing Primitives dead, requiring another pass.
+    loop {
+        let before: usize = hir.body.blocks.values().map(|b| b.instructions.len()).sum();
+        remove_dead_instructions(hir, env);
+        let after: usize = hir.body.blocks.values().map(|b| b.instructions.len()).sum();
+        if after == before {
+            break;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -43,11 +74,8 @@ fn remove_unreachable_blocks(hir: &mut HIRFunction) {
 // Pass 2: dead instruction removal
 // ---------------------------------------------------------------------------
 
-fn remove_dead_instructions(hir: &mut HIRFunction) {
+fn remove_dead_instructions(hir: &mut HIRFunction, env: Option<&Environment>) {
     let mut used: HashSet<IdentifierId> = HashSet::new();
-
-    // The return place is always live.
-    used.insert(hir.returns.identifier);
 
     // Parameters are always live.
     for param in &hir.params {
@@ -76,9 +104,106 @@ fn remove_dead_instructions(hir: &mut HIRFunction) {
         }
     }
 
+    // Build a set of named variables that are actually LoadLocal'd or LoadContext'd.
+    let mut loaded_vars: HashSet<IdentifierId> = HashSet::new();
+    // Build a set of named variables that are captured by FunctionExpressions.
+    // Captured variables must not have their StoreLocals removed even if the outer
+    // function never LoadLocals them — the closure reads them via LoadContext.
+    let mut captured_vars: HashSet<IdentifierId> = HashSet::new();
+    // Build a set of identifiers produced by NextPropertyOf / IteratorNext.
+    // StoreLocals that bind such values are for-in/for-of loop variable declarations
+    // and must be preserved for codegen even if the variable is never read.
+    let mut loop_iter_results: HashSet<IdentifierId> = HashSet::new();
+    // Collect InlineJs source strings — these reference variables by name but we
+    // can't track individual operands. Build a combined string to scan against.
+    let mut inline_js_sources: Vec<String> = Vec::new();
+    for block in hir.body.blocks.values() {
+        for instr in &block.instructions {
+            if let InstructionValue::LoadLocal { place, .. }
+            | InstructionValue::LoadContext { place, .. } = &instr.value {
+                loaded_vars.insert(place.identifier);
+            }
+            if let InstructionValue::FunctionExpression { lowered_func, .. } = &instr.value {
+                for ctx_place in &lowered_func.func.context {
+                    captured_vars.insert(ctx_place.identifier);
+                }
+            }
+            if matches!(
+                &instr.value,
+                InstructionValue::NextPropertyOf { .. } | InstructionValue::IteratorNext { .. }
+            ) {
+                if std::env::var("RC_DEBUG").is_ok() {
+                    eprintln!("[DCE] IteratorNext/NextPropertyOf lv.id={}", instr.lvalue.identifier.0);
+                }
+                loop_iter_results.insert(instr.lvalue.identifier);
+            }
+            if let InstructionValue::InlineJs { source, .. } = &instr.value {
+                inline_js_sources.push(source.clone());
+            }
+        }
+    }
+    // For InlineJs instructions: scan all named variables whose name appears in
+    // any InlineJs source string and mark them as loaded. This prevents DCE from
+    // removing StoreLocals for variables that InlineJs references by name.
+    if !inline_js_sources.is_empty() {
+        if let Some(env) = env {
+            let combined = inline_js_sources.join(" ");
+            // Collect all named identifiers in the HIR.
+            for block in hir.body.blocks.values() {
+                for instr in &block.instructions {
+                    if let InstructionValue::StoreLocal { lvalue, .. } = &instr.value {
+                        if let Some(name) = env.get_identifier(lvalue.place.identifier)
+                            .and_then(|i| i.name.as_ref())
+                            .map(|n| n.value().to_string())
+                        {
+                            // Check if name appears as a whole word in any InlineJs source.
+                            if contains_as_word(&combined, &name) {
+                                loaded_vars.insert(lvalue.place.identifier);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Remove instructions whose lvalue is dead and that have no side effects.
+    // Special case: StoreLocal whose named variable is never loaded, never
+    // captured by a closure, AND never consumed as a phi operand is dead
+    // (the write is truly unobservable).
     for block in hir.body.blocks.values_mut() {
         block.instructions.retain(|instr| {
+            if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
+                if !loaded_vars.contains(&lvalue.place.identifier)
+                    && !captured_vars.contains(&lvalue.place.identifier)
+                    && !used.contains(&lvalue.place.identifier)
+                {
+                    // Preserve for-in/for-of loop variable bindings even when the
+                    // variable is never read — codegen needs the binding to emit
+                    // `for (const y in ...) { ... }` with the correct variable name.
+                    if std::env::var("RC_DEBUG").is_ok() {
+                        eprintln!("[DCE] StoreLocal lv.place.id={} instr.lv.id={} value.id={} loop_iter_contains={} used_contains={}",
+                            lvalue.place.identifier.0, instr.lvalue.identifier.0, value.identifier.0,
+                            loop_iter_results.contains(&value.identifier),
+                            used.contains(&instr.lvalue.identifier));
+                    }
+                    if loop_iter_results.contains(&value.identifier) {
+                        return true;
+                    }
+                    return used.contains(&instr.lvalue.identifier);
+                }
+            }
+            // DeclareLocal for a variable that is never loaded, never captured,
+            // and never used as a phi operand is truly dead — eliminate it.
+            // This handles `let foo;` inside a loop where `foo` is never read.
+            if let InstructionValue::DeclareLocal { lvalue, .. } = &instr.value {
+                if !loaded_vars.contains(&lvalue.place.identifier)
+                    && !captured_vars.contains(&lvalue.place.identifier)
+                    && !used.contains(&lvalue.place.identifier)
+                {
+                    return false;
+                }
+            }
             used.contains(&instr.lvalue.identifier) || has_side_effects(&instr.value)
         });
     }
@@ -103,11 +228,16 @@ fn has_side_effects(value: &InstructionValue) -> bool {
             | InstructionValue::StoreGlobal { .. }
             | InstructionValue::DeclareLocal { .. }
             | InstructionValue::DeclareContext { .. }
+            | InstructionValue::Destructure { .. }
             | InstructionValue::Debugger { .. }
             | InstructionValue::StartMemoize { .. }
             | InstructionValue::FinishMemoize { .. }
             | InstructionValue::Await { .. }
             | InstructionValue::UnsupportedNode { .. }
+            | InstructionValue::InlineJs { .. }
+            // Update expressions (++/--) mutate a variable — always a side effect.
+            | InstructionValue::PostfixUpdate { .. }
+            | InstructionValue::PrefixUpdate { .. }
     )
 }
 
@@ -318,6 +448,7 @@ fn collect_instruction_uses(value: &InstructionValue, used: &mut HashSet<Identif
         | InstructionValue::RegExpLiteral { .. }
         | InstructionValue::MetaProperty { .. }
         | InstructionValue::Debugger { .. }
+        | InstructionValue::InlineJs { .. }
         | InstructionValue::UnsupportedNode { .. } => {}
     }
 }

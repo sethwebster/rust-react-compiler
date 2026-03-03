@@ -297,6 +297,7 @@ fn rewrite_value_identifiers(
         | Debugger { .. }
         | StartMemoize { .. }
         | UnsupportedNode { .. }
+        | InlineJs { .. }
         | ObjectMethod { .. }
         | FunctionExpression { .. } => {}
     }

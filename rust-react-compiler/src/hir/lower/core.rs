@@ -17,6 +17,7 @@ use oxc_ast::ast::{
 };
 use oxc_index::Idx;
 use oxc_semantic::SemanticBuilder;
+use oxc_span::GetSpan;
 
 use crate::error::{CompilerError, Result};
 use crate::hir::environment::Environment;
@@ -95,6 +96,9 @@ fn make_passthrough_hir(env: &mut Environment) -> Result<HIRFunction> {
         directives: vec![],
         aliasing_effects: None,
         original_source: String::new(),
+        is_arrow: false,
+        is_named_export: false,
+        is_default_export: false,
     })
 }
 
@@ -112,10 +116,60 @@ fn make_passthrough_hir(env: &mut Environment) -> Result<HIRFunction> {
 ///   4. VariableDeclaration      → fn-expr / arrow in first declarator
 ///   5. ExpressionStatement      → FunctionExpression / ArrowFunctionExpression
 ///                               → CallExpression(React.memo/forwardRef, fn/arrow)
+
+/// Run only the pre-lowering validators (no HIR construction).
+/// Called from pipeline.rs before the passthrough check so that validation
+/// errors (e.g. mismatched memoization deps) fire even when the file would
+/// otherwise be passed through due to function-level 'use no memo' directives.
+pub fn run_pre_lowering_validators(
+    source: &str,
+    source_type: oxc_span::SourceType,
+) -> Result<()> {
+    use crate::error::CompilerError;
+    let allocator = oxc_allocator::Allocator::default();
+    let mut parse = oxc_parser::Parser::new(&allocator, source, source_type).parse();
+    if !parse.errors.is_empty() && !source_type.is_typescript() {
+        let tsx = oxc_span::SourceType::tsx();
+        let retry = oxc_parser::Parser::new(&allocator, source, tsx).parse();
+        if retry.errors.is_empty() { parse = retry; }
+    }
+    if !parse.errors.is_empty() { return Ok(()); } // can't validate if parse fails
+    let program = parse.program;
+    let first = source.lines().next().unwrap_or("");
+
+    // Only run validators that are triggered by pragmas and could fire even
+    // when some functions have opt-out directives.
+    if first.contains("@validatePreserveExistingMemoizationGuarantees") {
+        validate_optional_dep_mismatch(source, &program)?;
+    }
+    Ok(())
+}
+
 pub fn lower_program(
     source: &str,
     source_type: oxc_span::SourceType,
     env: &mut Environment,
+) -> Result<HIRFunction> {
+    lower_program_impl(source, source_type, env, 0)
+}
+
+/// Like `lower_program`, but skips the first `n` compilable function-like
+/// top-level statements and compiles the (n+1)th. Used by the pipeline to
+/// compile all functions in a multi-function source file.
+pub fn lower_program_nth(
+    source: &str,
+    source_type: oxc_span::SourceType,
+    env: &mut Environment,
+    n: usize,
+) -> Result<HIRFunction> {
+    lower_program_impl(source, source_type, env, n)
+}
+
+fn lower_program_impl(
+    source: &str,
+    source_type: oxc_span::SourceType,
+    env: &mut Environment,
+    fn_skip_param: usize,
 ) -> Result<HIRFunction> {
     // Files marked with @expectNothingCompiled should pass without transformation.
     // Return a minimal stub HIR so the fixture counts as passing.
@@ -123,10 +177,11 @@ pub fn lower_program(
         return make_passthrough_hir(env);
     }
 
-    // 'use no forget' directive opts a function out of compilation → passthrough.
-    if source.contains("'use no forget'") || source.contains("\"use no forget\"") {
-        return make_passthrough_hir(env);
-    }
+    // NOTE: 'use no forget'/'use no memo' inside a function body opts that
+    // individual function out — handled per-function in the statement loop below.
+    // The file-level check lives in pipeline.rs::file_should_passthrough.
+    // DO NOT add a file-level check here — it would prevent compiling other
+    // functions in the same file.
 
     // Test-only pragma: simulate an unexpected exception in the pipeline.
     if source.contains("@throwUnknownException__testonly:true") {
@@ -321,7 +376,7 @@ pub fn lower_program(
         let panic_threshold_none = first.contains("@panicThreshold:\"none\"")
             || first.contains("@panicThreshold:'none'");
         if !panic_threshold_none {
-            validate_no_eslint_suppression(source)?;
+            validate_no_eslint_suppression(source, &program)?;
         }
     }
 
@@ -367,32 +422,109 @@ pub fn lower_program(
     let panic_threshold_none = first_line.contains("@panicThreshold:\"none\"")
         || first_line.contains("@panicThreshold:'none'");
 
-    macro_rules! maybe_lower_fn {
-        ($call:expr) => {{
-            let result = $call;
-            if panic_threshold_none {
-                match result {
-                    Ok(hir) => return Ok(hir),
-                    Err(_) => return make_passthrough_hir(env),
+    // Collect module-level variable names before lowering.
+    // These are let/const/var declarations at module scope. Arrow functions that only
+    // reference module-level names (plus globals/imports) can be safely outlined.
+    {
+        use std::collections::HashSet;
+        let mut names: HashSet<String> = HashSet::new();
+        for stmt in &program.body {
+            let decls = match stmt {
+                Statement::VariableDeclaration(v) => Some(v.declarations.as_slice()),
+                Statement::ExportNamedDeclaration(e) => {
+                    if let Some(Declaration::VariableDeclaration(v)) = &e.declaration {
+                        Some(v.declarations.as_slice())
+                    } else { None }
                 }
+                _ => None,
+            };
+            if let Some(decls) = decls {
+                for d in decls {
+                    if let BindingPatternKind::BindingIdentifier(id) = &d.id.kind {
+                        names.insert(id.name.to_string());
+                    }
+                }
+            }
+        }
+        env.module_level_names = names;
+    }
+
+    let mut fn_skip = fn_skip_param;
+
+    // maybe_lower_fn!: used when we KNOW there's a function (FunctionDeclaration, etc.)
+    // When fn_skip > 0, we skip without evaluating $call (just decrement the counter).
+    // When fn_skip == 0, existing behavior: evaluate, return on success or passthrough on error.
+    // Optional second/third args: is_named_export, is_default_export booleans.
+    macro_rules! maybe_lower_fn {
+        ($call:expr) => { maybe_lower_fn!($call, false, false) };
+        ($call:expr, $named:expr, $default:expr) => {{
+            if fn_skip > 0 {
+                fn_skip -= 1;
             } else {
-                return result;
+                let result = $call;
+                if panic_threshold_none {
+                    match result {
+                        Ok(mut hir) => {
+                            hir.is_named_export = $named;
+                            hir.is_default_export = $default;
+                            return Ok(hir);
+                        }
+                        Err(_) => return make_passthrough_hir(env),
+                    }
+                } else {
+                    match result {
+                        Ok(mut hir) => {
+                            hir.is_named_export = $named;
+                            hir.is_default_export = $default;
+                            return Ok(hir);
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
             }
         }};
     }
 
+    // maybe_lower_opt!: used when we're not sure if there's a function
+    // (e.g. VariableDeclaration that might or might not have a fn initializer).
+    // When fn_skip > 0, evaluate $call and only decrement if it returns Ok(Some(_)).
+    // Optional second/third args: is_named_export, is_default_export booleans.
     macro_rules! maybe_lower_opt {
-        ($call:expr) => {{
-            let result = $call;
-            if panic_threshold_none {
+        ($call:expr) => { maybe_lower_opt!($call, false, false) };
+        ($call:expr, $named:expr, $default:expr) => {{
+            if fn_skip > 0 {
+                let result = $call;
                 match result {
-                    Ok(Some(hir)) => return Ok(hir),
+                    Ok(Some(_)) => { fn_skip -= 1; }
                     Ok(None) => {}
-                    Err(_) => return make_passthrough_hir(env),
+                    Err(e) => {
+                        if !panic_threshold_none {
+                            return Err(e);
+                        }
+                        // panic_threshold_none: ignore errors in skip mode
+                    }
                 }
             } else {
-                if let Some(hir) = result? {
-                    return Ok(hir);
+                let result = $call;
+                if panic_threshold_none {
+                    match result {
+                        Ok(Some(mut hir)) => {
+                            hir.is_named_export = $named;
+                            hir.is_default_export = $default;
+                            return Ok(hir);
+                        }
+                        Ok(None) => {}
+                        Err(_) => return make_passthrough_hir(env),
+                    }
+                } else {
+                    match result? {
+                        Some(mut hir) => {
+                            hir.is_named_export = $named;
+                            hir.is_default_export = $default;
+                            return Ok(hir);
+                        }
+                        None => {}
+                    }
                 }
             }
         }};
@@ -403,7 +535,14 @@ pub fn lower_program(
             // ----------------------------------------------------------------
             // 1. Plain function declaration
             Statement::FunctionDeclaration(func) => {
-                maybe_lower_fn!(lower_function(func, &semantic, env));
+                // Skip 'use no memo' functions — they are not compilable,
+                // just passed through unchanged by the pipeline.
+                let no_memo = func.body.as_ref()
+                    .map(|b| b.directives.iter().any(|d| matches!(d.expression.value.as_str(), "use no memo" | "use no forget")))
+                    .unwrap_or(false);
+                if !no_memo {
+                    maybe_lower_fn!(lower_function(func, &semantic, env));
+                }
             }
 
             // ----------------------------------------------------------------
@@ -411,13 +550,23 @@ pub fn lower_program(
             Statement::ExportDefaultDeclaration(decl) => {
                 match &decl.declaration {
                     ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
-                        maybe_lower_fn!(lower_function(func, &semantic, env));
+                        let no_memo = func.body.as_ref()
+                            .map(|b| b.directives.iter().any(|d| matches!(d.expression.value.as_str(), "use no memo" | "use no forget")))
+                            .unwrap_or(false);
+                        if !no_memo {
+                            maybe_lower_fn!(lower_function(func, &semantic, env), false, true);
+                        }
                     }
                     ExportDefaultDeclarationKind::ArrowFunctionExpression(arrow) => {
-                        maybe_lower_fn!(lower_arrow_function(arrow, &semantic, env));
+                        maybe_lower_fn!(lower_arrow_function(arrow, &semantic, env), false, true);
                     }
                     ExportDefaultDeclarationKind::FunctionExpression(func) => {
-                        maybe_lower_fn!(lower_function(func, &semantic, env));
+                        let no_memo = func.body.as_ref()
+                            .map(|b| b.directives.iter().any(|d| matches!(d.expression.value.as_str(), "use no memo" | "use no forget")))
+                            .unwrap_or(false);
+                        if !no_memo {
+                            maybe_lower_fn!(lower_function(func, &semantic, env), false, true);
+                        }
                     }
                     _ => {}
                 }
@@ -429,14 +578,19 @@ pub fn lower_program(
                 if let Some(declaration) = &decl.declaration {
                     match declaration {
                         Declaration::FunctionDeclaration(func) => {
-                            maybe_lower_fn!(lower_function(func, &semantic, env));
+                            let no_memo = func.body.as_ref()
+                                .map(|b| b.directives.iter().any(|d| matches!(d.expression.value.as_str(), "use no memo" | "use no forget")))
+                                .unwrap_or(false);
+                            if !no_memo {
+                                maybe_lower_fn!(lower_function(func, &semantic, env), true, false);
+                            }
                         }
                         Declaration::VariableDeclaration(var_decl) => {
                             maybe_lower_opt!(try_lower_var_declarators(
                                 &var_decl.declarations,
                                 &semantic,
                                 env,
-                            ));
+                            ), true, false);
                         }
                         _ => {}
                     }
@@ -488,13 +642,25 @@ fn try_lower_var_declarators<'a>(
     env: &mut Environment,
 ) -> Result<Option<HIRFunction>> {
     for decl in declarators {
+        // Extract the variable name for naming the HIR function.
+        let var_name: Option<String> = match &decl.id.kind {
+            BindingPatternKind::BindingIdentifier(id) => Some(id.name.to_string()),
+            _ => None,
+        };
         if let Some(init) = &decl.init {
             match init {
                 Expression::FunctionExpression(func) => {
-                    return Ok(Some(lower_function(func, semantic, env)?));
+                    let mut hir = lower_function(func, semantic, env)?;
+                    // Use the variable name if the function has no id.
+                    if hir.id.is_none() {
+                        hir.id = var_name;
+                    }
+                    return Ok(Some(hir));
                 }
                 Expression::ArrowFunctionExpression(arrow) => {
-                    return Ok(Some(lower_arrow_function(arrow, semantic, env)?));
+                    let mut hir = lower_arrow_function(arrow, semantic, env)?;
+                    hir.id = var_name;
+                    return Ok(Some(hir));
                 }
                 _ => {}
             }
@@ -543,8 +709,11 @@ fn lower_arrow_function<'a>(
 
     // --- Params ---
     let mut params: Vec<Param> = Vec::new();
-    for formal_param in &func.params.items {
-        lower_formal_param(formal_param, semantic, &mut ctx, &mut params)?;
+    {
+        let mut lower_expr_cb = make_lower_expr_cb(semantic);
+        for formal_param in &func.params.items {
+            lower_formal_param(formal_param, semantic, &mut ctx, &mut params, &mut lower_expr_cb)?;
+        }
     }
     if let Some(rest) = &func.params.rest {
         let rest_loc = span_loc(rest.span);
@@ -555,30 +724,47 @@ fn lower_arrow_function<'a>(
     // --- Body ---
     // For expression arrows (`() => expr`), `func.expression` is true and the
     // body has one ExpressionStatement containing the return expression.
-    // We lower all statements and then emit an implicit void return;
-    // the explicit-return case is already emitted by lower_statement for
-    // ReturnStatement nodes.
-    for stmt in &func.body.statements {
-        lower_statement(stmt, semantic, &mut ctx)?;
-    }
-    // If expression body, we need to return the result of the expression.
-    // lower_statement already processes ExpressionStatements, so we just
-    // emit a void fallthrough return.
-    let undef = ctx.push(
-        InstructionValue::Primitive {
-            value: PrimitiveValue::Undefined,
+    // We must explicitly return that expression's value.
+    if func.expression && func.body.statements.len() == 1 {
+        if let Statement::ExpressionStatement(expr_stmt) = &func.body.statements[0] {
+            let val = lower_expr(&expr_stmt.expression, semantic, &mut ctx)?;
+            let ret_id = ctx.next_instruction_id();
+            let ret_loc = span_loc(expr_stmt.span);
+            ctx.terminate(Terminal::Return {
+                value: val,
+                return_variant: ReturnVariant::Explicit,
+                id: ret_id,
+                loc: ret_loc,
+                effects: None,
+            });
+        } else {
+            // Fallback: lower statement normally + void return.
+            lower_statement(&func.body.statements[0], semantic, &mut ctx)?;
+            let undef = ctx.push(InstructionValue::Primitive { value: PrimitiveValue::Undefined, loc: SourceLocation::Generated }, SourceLocation::Generated);
+            let ret_id = ctx.next_instruction_id();
+            ctx.terminate(Terminal::Return { value: undef, return_variant: ReturnVariant::Void, id: ret_id, loc: SourceLocation::Generated, effects: None });
+        }
+    } else {
+        for stmt in &func.body.statements {
+            lower_statement(stmt, semantic, &mut ctx)?;
+        }
+        // Void fallthrough return after block-body arrow.
+        let undef = ctx.push(
+            InstructionValue::Primitive {
+                value: PrimitiveValue::Undefined,
+                loc: SourceLocation::Generated,
+            },
+            SourceLocation::Generated,
+        );
+        let ret_id = ctx.next_instruction_id();
+        ctx.terminate(Terminal::Return {
+            value: undef,
+            return_variant: ReturnVariant::Void,
+            id: ret_id,
             loc: SourceLocation::Generated,
-        },
-        SourceLocation::Generated,
-    );
-    let ret_id = ctx.next_instruction_id();
-    ctx.terminate(Terminal::Return {
-        value: undef,
-        return_variant: ReturnVariant::Void,
-        id: ret_id,
-        loc: SourceLocation::Generated,
-        effects: None,
-    });
+            effects: None,
+        });
+    }
 
     let returns = ctx.make_temporary(SourceLocation::Generated);
     let (hir_body, _) = ctx.build(returns.clone());
@@ -598,6 +784,9 @@ fn lower_arrow_function<'a>(
         directives: vec![],
         aliasing_effects: None,
         original_source: String::new(),
+        is_arrow: true,
+        is_named_export: false,
+        is_default_export: false,
     })
 }
 
@@ -616,8 +805,11 @@ pub fn lower_function<'a>(
 
     // --- Params ---
     let mut params: Vec<Param> = Vec::new();
-    for formal_param in &func.params.items {
-        lower_formal_param(formal_param, semantic, &mut ctx, &mut params)?;
+    {
+        let mut lower_expr_cb = make_lower_expr_cb(semantic);
+        for formal_param in &func.params.items {
+            lower_formal_param(formal_param, semantic, &mut ctx, &mut params, &mut lower_expr_cb)?;
+        }
     }
     // Handle rest parameter (e.g., `...args`)
     if let Some(rest) = &func.params.rest {
@@ -627,10 +819,24 @@ pub fn lower_function<'a>(
     }
 
     // --- Body ---
+    let mut non_opt_out_directives: Vec<String> = Vec::new();
     if let Some(body) = &func.body {
+        // Collect non-opt-out directives (e.g. "use foo", "use bar", "use forget") to preserve in output.
+        // Only filter out opt-OUT directives ("use no memo", "use no forget").
+        for directive in &body.directives {
+            let val = directive.expression.value.as_str();
+            if val != "use no memo" && val != "use no forget" {
+                non_opt_out_directives.push(val.to_string());
+            }
+        }
+
         // Detect hoisted function declarations that appear after a return statement.
         // This pattern requires special handling (function hoisting) that we don't support yet.
         check_hoisted_function_declarations(&body.statements)?;
+
+        // Pre-register all direct-scope bindings so collect_captures sees them
+        // even when a function declaration references a variable declared later.
+        pre_register_bindings(&body.statements, semantic, &mut ctx);
 
         for stmt in &body.statements {
             lower_statement(stmt, semantic, &mut ctx)?;
@@ -675,9 +881,12 @@ pub fn lower_function<'a>(
         body: hir_body,
         generator: func.generator,
         async_: func.r#async,
-        directives: vec![],
+        directives: non_opt_out_directives,
         aliasing_effects: None,
         original_source: String::new(),
+        is_arrow: false,
+        is_named_export: false,
+        is_default_export: false,
     })
 }
 
@@ -711,6 +920,7 @@ fn lower_formal_param<'a>(
     semantic: &oxc_semantic::Semantic<'a>,
     ctx: &mut LoweringContext,
     params: &mut Vec<Param>,
+    lower_expr: &mut dyn FnMut(&Expression<'a>, &mut LoweringContext) -> Result<Place>,
 ) -> Result<()> {
     let loc = span_loc(formal_param.span);
     match &formal_param.pattern.kind {
@@ -726,22 +936,105 @@ fn lower_formal_param<'a>(
         BindingPatternKind::ArrayPattern(_) | BindingPatternKind::ObjectPattern(_) => {
             let tmp = ctx.make_temporary(loc.clone());
             params.push(Param::Place(tmp.clone()));
-            // Full destructuring lowering is handled by patterns.rs.
-            ctx.push(
-                InstructionValue::UnsupportedNode { loc: loc.clone() },
-                loc,
-            );
+            // Destructure the pattern into the function body using the temp param.
+            super::patterns::lower_binding_pattern(
+                ctx,
+                semantic,
+                &formal_param.pattern,
+                tmp,
+                InstructionKind::Const,
+                lower_expr,
+            )?;
         }
-        BindingPatternKind::AssignmentPattern(_) => {
+        BindingPatternKind::AssignmentPattern(ap) => {
+            // Assignment pattern = param with default value (e.g. `x = 0`).
+            // Simplified: create temp param and destructure the left side only,
+            // ignoring the default expression.
             let tmp = ctx.make_temporary(loc.clone());
-            params.push(Param::Place(tmp));
-            ctx.push(
-                InstructionValue::UnsupportedNode { loc: loc.clone() },
-                loc,
-            );
+            params.push(Param::Place(tmp.clone()));
+            super::patterns::lower_binding_pattern(
+                ctx,
+                semantic,
+                &ap.left,
+                tmp,
+                InstructionKind::Const,
+                lower_expr,
+            )?;
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// pre_register_bindings — pre-populate symbol_map for all direct bindings
+// in a statement list so that collect_captures sees them even when a
+// function declaration references a variable defined later in the same scope.
+// ---------------------------------------------------------------------------
+
+/// Pre-register all direct-scope binding identifiers (from variable declarations
+/// and function declarations) in `ctx.symbol_map` before lowering any statements.
+/// This ensures `collect_captures` sees all bindings when lowering function
+/// declarations that reference variables declared after them (JavaScript hoisting).
+fn pre_register_bindings<'a>(stmts: &[oxc_ast::ast::Statement<'a>], semantic: &oxc_semantic::Semantic<'a>, ctx: &mut LoweringContext) {
+    for stmt in stmts {
+        match stmt {
+            oxc_ast::ast::Statement::VariableDeclaration(decl) => {
+                for declarator in &decl.declarations {
+                    register_binding_pattern(&declarator.id, semantic, ctx);
+                }
+            }
+            oxc_ast::ast::Statement::FunctionDeclaration(func) => {
+                if let Some(func_id) = &func.id {
+                    if let Some(sym_id) = func_id.symbol_id.get() {
+                        let loc = crate::hir::hir::SourceLocation::source(func_id.span.start, func_id.span.end);
+                        ctx.get_or_create_symbol(sym_id.index() as u32, Some(func_id.name.as_str()), loc);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Recursively register all binding identifiers in a binding pattern.
+fn register_binding_pattern<'a>(
+    pat: &oxc_ast::ast::BindingPattern<'a>,
+    semantic: &oxc_semantic::Semantic<'a>,
+    ctx: &mut LoweringContext,
+) {
+    match &pat.kind {
+        BindingPatternKind::BindingIdentifier(ident) => {
+            if let Some(sym_id) = ident.symbol_id.get() {
+                let loc = crate::hir::hir::SourceLocation::source(ident.span.start, ident.span.end);
+                ctx.get_or_create_symbol(sym_id.index() as u32, Some(ident.name.as_str()), loc);
+            }
+        }
+        BindingPatternKind::ArrayPattern(ap) => {
+            for elem in &ap.elements {
+                if let Some(e) = elem {
+                    register_binding_pattern(e, semantic, ctx);
+                }
+            }
+            if let Some(rest) = &ap.rest {
+                register_binding_pattern(&rest.argument, semantic, ctx);
+            }
+        }
+        BindingPatternKind::ObjectPattern(op) => {
+            for prop in &op.properties {
+                match prop {
+                    oxc_ast::ast::BindingProperty { value, .. } => {
+                        register_binding_pattern(value, semantic, ctx);
+                    }
+                }
+            }
+            if let Some(rest) = &op.rest {
+                register_binding_pattern(&rest.argument, semantic, ctx);
+            }
+        }
+        BindingPatternKind::AssignmentPattern(ap) => {
+            register_binding_pattern(&ap.left, semantic, ctx);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -923,6 +1216,81 @@ pub fn lower_statement<'r, 'a: 'r>(
 }
 
 // ---------------------------------------------------------------------------
+// IIFE helpers
+// ---------------------------------------------------------------------------
+
+/// If `call` is an immediately-invoked function expression with no params and
+/// no arguments (i.e. `(function() { stmts })()` or `(() => { stmts })()`),
+/// return the slice of body statements for inlining. Returns `None` otherwise.
+fn iife_body_stmts<'r, 'a: 'r>(call: &'r oxc_ast::ast::CallExpression<'a>) -> Option<&'r [Statement<'a>]> {
+    if !call.arguments.is_empty() {
+        return None;
+    }
+    // Unwrap parenthesized expression: `(function() {...})()` has callee
+    // wrapped in a ParenthesizedExpression.
+    let callee = unwrap_parens(&call.callee);
+    match callee {
+        Expression::FunctionExpression(f) => {
+            if f.r#async || f.generator || !f.params.items.is_empty() {
+                return None;
+            }
+            f.body.as_ref().map(|b| b.statements.as_slice())
+        }
+        Expression::ArrowFunctionExpression(a) => {
+            if a.r#async || !a.params.items.is_empty() {
+                return None;
+            }
+            // Only handle block-body arrows (not expression-body)
+            if a.expression {
+                return None;
+            }
+            Some(a.body.statements.as_slice())
+        }
+        _ => None,
+    }
+}
+
+/// Strip any number of `ParenthesizedExpression` wrappers from `expr`.
+fn unwrap_parens<'r, 'a: 'r>(expr: &'r Expression<'a>) -> &'r Expression<'a> {
+    let mut e = expr;
+    loop {
+        if let Expression::ParenthesizedExpression(p) = e {
+            e = &p.expression;
+        } else {
+            return e;
+        }
+    }
+}
+
+/// Returns true if `stmt` contains a `return` statement OR a nested IIFE call
+/// (shallow check for top-level statements; does not recurse into nested fns).
+/// We block inlining when a nested IIFE call is present because recursive
+/// inlining would over-eagerly flatten nested IIFE structures that the TS
+/// compiler preserves at the inner level.
+fn stmt_has_return(stmt: &Statement<'_>) -> bool {
+    match stmt {
+        Statement::ReturnStatement(_) => true,
+        Statement::BlockStatement(b) => b.body.iter().any(stmt_has_return),
+        Statement::IfStatement(s) => {
+            stmt_has_return(&s.consequent)
+                || s.alternate.as_ref().map_or(false, |a| stmt_has_return(a))
+        }
+        // If the body contains a nested IIFE call as an expression statement,
+        // don't inline this outer IIFE (to avoid over-flattening).
+        Statement::ExpressionStatement(e) => {
+            if let Expression::CallExpression(c) = &e.expression {
+                if c.arguments.is_empty() {
+                    let callee = unwrap_parens(&c.callee);
+                    return matches!(callee, Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_));
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // lower_expr — public so submodules can recurse via closures
 // ---------------------------------------------------------------------------
 
@@ -996,6 +1364,29 @@ pub fn lower_expr<'r, 'a: 'r>(
         // ------------------------------------------------------------------
         // Call expression
         Expression::CallExpression(e) => {
+            // IIFE inlining: (function() { stmts })() or (() => { stmts })()
+            // with no params and no args — inline body statements in place.
+            if e.arguments.is_empty() {
+                if let Some(stmts) = iife_body_stmts(e) {
+                    // Lower each statement inline. If any statement is a return,
+                    // we handle it as the IIFE result. For now, only inline IIFEs
+                    // with no return statements (pure side-effect bodies).
+                    let has_return = stmts.iter().any(stmt_has_return);
+                    if !has_return {
+                        for stmt in stmts {
+                            lower_statement(stmt, semantic, ctx)?;
+                        }
+                        let loc = span_loc(e.span);
+                        return Ok(ctx.push(
+                            InstructionValue::Primitive {
+                                value: PrimitiveValue::Undefined,
+                                loc: loc.clone(),
+                            },
+                            loc,
+                        ));
+                    }
+                }
+            }
             let mut cb = make_lower_expr_cb(semantic);
             calls::lower_call(ctx, semantic, e, &mut cb)
         }
@@ -1162,11 +1553,54 @@ pub fn lower_expr<'r, 'a: 'r>(
         // ------------------------------------------------------------------
         // TypeScript: type assertions, satisfies, non-null assertions, etc.
         // These are transparent — just lower the inner expression.
-        Expression::TSAsExpression(e) => lower_expr(&e.expression, semantic, ctx),
+        Expression::TSAsExpression(e) => {
+            let inner = lower_expr(&e.expression, semantic, ctx)?;
+            // Preserve `as const` annotations — extract the annotation text.
+            let annotation: Option<String> = match &e.type_annotation {
+                oxc_ast::ast::TSType::TSTypeReference(tref) => {
+                    match &tref.type_name {
+                        oxc_ast::ast::TSTypeName::IdentifierReference(id) => {
+                            Some(id.name.as_str().to_string())
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            if let Some(ann) = annotation {
+                let loc = span_loc(e.span);
+                let cast_place = ctx.push(InstructionValue::TypeCastExpression {
+                    value: inner,
+                    type_: Type::default(),
+                    source_annotation: Some(ann),
+                    loc: loc.clone(),
+                }, loc);
+                Ok(cast_place)
+            } else {
+                Ok(inner)
+            }
+        }
         Expression::TSSatisfiesExpression(e) => lower_expr(&e.expression, semantic, ctx),
         Expression::TSNonNullExpression(e) => lower_expr(&e.expression, semantic, ctx),
         Expression::TSTypeAssertion(e) => lower_expr(&e.expression, semantic, ctx),
         Expression::TSInstantiationExpression(e) => lower_expr(&e.expression, semantic, ctx),
+
+        // ------------------------------------------------------------------
+        // Chain expression (optional chaining: a?.b, foo?.(), etc.)
+        // Preserve the source text verbatim so codegen can emit `a?.b.c[0]` correctly.
+        Expression::ChainExpression(chain) => {
+            use oxc_span::GetSpan;
+            let span = chain.span();
+            let source_text = &semantic.source_text()[span.start as usize..span.end as usize];
+            let loc = span_loc(span);
+            Ok(ctx.push(
+                InstructionValue::InlineJs {
+                    source: source_text.to_string(),
+                    loc: loc.clone(),
+                },
+                loc,
+            ))
+        }
 
         // ------------------------------------------------------------------
         // Yield expression
@@ -1849,7 +2283,46 @@ fn check_expr_impure_functions(expr: &Expression, impure: &[(&str, &str)]) -> Re
 /// Detect ESLint rule suppressions that the compiler must bail out for.
 /// Always checks react-hooks/rules-of-hooks.
 /// Additional rules can be specified via @eslintSuppressionRules pragma.
-fn validate_no_eslint_suppression(source: &str) -> Result<()> {
+///
+/// Suppressions inside 'use no forget'/'use no memo' function bodies are ignored —
+/// those functions are passthrough and their ESLint suppressions are irrelevant.
+fn validate_no_eslint_suppression<'a>(source: &str, program: &'a oxc_ast::ast::Program<'a>) -> Result<()> {
+    use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind, Statement};
+
+    // Collect byte ranges [start, end) of opted-out function bodies.
+    let opted_out_ranges: Vec<(u32, u32)> = {
+        let mut ranges = Vec::new();
+        for stmt in &program.body {
+            let maybe_body: Option<&oxc_ast::ast::FunctionBody> = match stmt {
+                Statement::FunctionDeclaration(f) => f.body.as_deref(),
+                Statement::ExportDefaultDeclaration(d) => match &d.declaration {
+                    ExportDefaultDeclarationKind::FunctionDeclaration(f) => f.body.as_deref(),
+                    ExportDefaultDeclarationKind::ArrowFunctionExpression(a) => Some(&a.body),
+                    _ => None,
+                },
+                Statement::ExportNamedDeclaration(d) => match &d.declaration {
+                    Some(Declaration::FunctionDeclaration(f)) => f.body.as_deref(),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(body) = maybe_body {
+                let is_opted_out = body.directives.iter().any(|d|
+                    matches!(d.expression.value.as_str(), "use no memo" | "use no forget")
+                );
+                if is_opted_out {
+                    ranges.push((body.span.start, body.span.end));
+                }
+            }
+        }
+        ranges
+    };
+
+    let in_opted_out = |byte_offset: usize| -> bool {
+        let off = byte_offset as u32;
+        opted_out_ranges.iter().any(|(start, end)| off >= *start && off < *end)
+    };
+
     let first_line = source.lines().next().unwrap_or("");
 
     // Parse @eslintSuppressionRules:["rule1","rule2"] pragma.
@@ -1873,19 +2346,24 @@ fn validate_no_eslint_suppression(source: &str) -> Result<()> {
         }
     }
 
-    // Check if any of the rules are suppressed in the source.
+    // Check if any of the rules are suppressed in the source OUTSIDE opted-out fn bodies.
     for rule in &rules_to_check {
         let disable_patterns = [
             format!("eslint-disable {}", rule),
             format!("eslint-disable-next-line {}", rule),
         ];
         for pattern in &disable_patterns {
-            if source.contains(pattern.as_str()) {
-                return Err(CompilerError::invalid_react(format!(
-                    "React Compiler has skipped optimizing this component because one or more React ESLint rules were disabled\n\
-                     React Compiler only works when your components follow all the rules of React, disabling them may result in unexpected or incorrect behavior. \
-                     Found suppression `{pattern}`."
-                )));
+            let mut search_pos = 0;
+            while let Some(rel_idx) = source[search_pos..].find(pattern.as_str()) {
+                let abs_idx = search_pos + rel_idx;
+                if !in_opted_out(abs_idx) {
+                    return Err(CompilerError::invalid_react(format!(
+                        "React Compiler has skipped optimizing this component because one or more React ESLint rules were disabled\n\
+                         React Compiler only works when your components follow all the rules of React, disabling them may result in unexpected or incorrect behavior. \
+                         Found suppression `{pattern}`."
+                    )));
+                }
+                search_pos = abs_idx + pattern.len();
             }
         }
     }
@@ -4249,6 +4727,13 @@ fn validate_no_param_mutation<'a>(
     fn check_fn<'a>(func: &oxc_ast::ast::Function<'a>) -> Result<()> {
         let name = func.id.as_ref().map(|id| id.name.as_str()).unwrap_or("");
         if name.is_empty() { return Ok(()); }
+
+        // Skip functions opted out with 'use no forget'/'use no memo'.
+        if let Some(body) = &func.body {
+            if body.directives.iter().any(|d| matches!(d.expression.value.as_str(), "use no memo" | "use no forget")) {
+                return Ok(());
+            }
+        }
 
         // Collect ALL parameter binding names, including from destructured ObjectPattern.
         let mut param_names: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -7306,24 +7791,41 @@ fn collect_component_hook_bodies<'a>(
         first.map_or(false, |c| c.is_uppercase()) || is_hook_name(name)
     }
 
+    // Check if a function body opts out via 'use no forget'/'use no memo' directive.
+    let body_is_opted_out = |body: &oxc_ast::ast::FunctionBody| -> bool {
+        body.directives.iter().any(|d|
+            matches!(d.expression.value.as_str(), "use no memo" | "use no forget")
+        )
+    };
+
     let mut bodies: Vec<&'a [oxc_ast::ast::Statement<'a>]> = Vec::new();
     for stmt in &program.body {
         match stmt {
             Statement::FunctionDeclaration(f) => {
                 let name = f.id.as_ref().map(|id| id.name.as_str()).unwrap_or("");
                 if is_component_or_hook(name) {
-                    if let Some(body) = &f.body { bodies.push(&body.statements); }
+                    if let Some(body) = &f.body {
+                        if !body_is_opted_out(body) {
+                            bodies.push(&body.statements);
+                        }
+                    }
                 }
             }
             Statement::ExportDefaultDeclaration(d) => match &d.declaration {
                 ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
                     let name = f.id.as_ref().map(|id| id.name.as_str()).unwrap_or("");
                     if is_component_or_hook(name) || name.is_empty() {
-                        if let Some(body) = &f.body { bodies.push(&body.statements); }
+                        if let Some(body) = &f.body {
+                            if !body_is_opted_out(body) {
+                                bodies.push(&body.statements);
+                            }
+                        }
                     }
                 }
                 ExportDefaultDeclarationKind::ArrowFunctionExpression(a) => {
-                    bodies.push(&a.body.statements);
+                    if !body_is_opted_out(&a.body) {
+                        bodies.push(&a.body.statements);
+                    }
                 }
                 _ => {}
             },
@@ -7332,7 +7834,11 @@ fn collect_component_hook_bodies<'a>(
                     Some(Declaration::FunctionDeclaration(f)) => {
                         let name = f.id.as_ref().map(|id| id.name.as_str()).unwrap_or("");
                         if is_component_or_hook(name) {
-                            if let Some(body) = &f.body { bodies.push(&body.statements); }
+                            if let Some(body) = &f.body {
+                                if !body_is_opted_out(body) {
+                                    bodies.push(&body.statements);
+                                }
+                            }
                         }
                     }
                     Some(Declaration::VariableDeclaration(v)) => {
@@ -7345,10 +7851,16 @@ fn collect_component_hook_bodies<'a>(
                             if let Some(init) = &decl.init {
                                 match init {
                                     Expression::ArrowFunctionExpression(a) => {
-                                        bodies.push(&a.body.statements);
+                                        if !body_is_opted_out(&a.body) {
+                                            bodies.push(&a.body.statements);
+                                        }
                                     }
                                     Expression::FunctionExpression(f) => {
-                                        if let Some(body) = &f.body { bodies.push(&body.statements); }
+                                        if let Some(body) = &f.body {
+                                            if !body_is_opted_out(body) {
+                                                bodies.push(&body.statements);
+                                            }
+                                        }
                                     }
                                     _ => {}
                                 }
@@ -7368,10 +7880,16 @@ fn collect_component_hook_bodies<'a>(
                     if let Some(init) = &decl.init {
                         match init {
                             Expression::ArrowFunctionExpression(a) => {
-                                bodies.push(&a.body.statements);
+                                if !body_is_opted_out(&a.body) {
+                                    bodies.push(&a.body.statements);
+                                }
                             }
                             Expression::FunctionExpression(f) => {
-                                if let Some(body) = &f.body { bodies.push(&body.statements); }
+                                if let Some(body) = &f.body {
+                                    if !body_is_opted_out(body) {
+                                        bodies.push(&body.statements);
+                                    }
+                                }
                             }
                             _ => {}
                         }

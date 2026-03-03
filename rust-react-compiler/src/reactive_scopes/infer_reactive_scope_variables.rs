@@ -6,8 +6,8 @@ use std::collections::{HashMap, HashSet};
 use crate::hir::environment::Environment;
 use crate::hir::hir::{
     ArrayElement, DeclarationId, HIRFunction, IdentifierId, InstructionId,
-    InstructionValue, MutableRange, ObjectPatternProperty, Pattern,
-    ReactiveScope, ScopeId, SourceLocation,
+    InstructionValue, MutableRange, NonLocalBinding, ObjectPatternProperty, Pattern,
+    ReactiveScope, ReactiveScopeDeclaration, ScopeId, SourceLocation,
 };
 use crate::hir::visitors::each_instruction_value_operand;
 use crate::utils::disjoint_set::DisjointSet;
@@ -56,11 +56,18 @@ pub fn run_with_env(hir: &mut HIRFunction, env: &mut Environment) {
     let root_to_scope_id: HashMap<IdentifierId, ScopeId> =
         scopes.iter().map(|(&root, s)| (root, s.id)).collect();
 
-    // Write scope IDs back to identifiers.
+    // Write scope IDs back to identifiers AND populate scope.declarations.
     for (&id, &root) in &canonical {
         if let Some(&scope_id) = root_to_scope_id.get(&root) {
             if let Some(ident) = env.get_identifier_mut(id) {
+                if std::env::var("RC_DEBUG").is_ok() {
+                    eprintln!("[infer_scope_vars] ident {:?} (name={:?}) gets scope {:?}",
+                        id.0, ident.name.as_ref().map(|n| n.value()), scope_id.0);
+                }
                 ident.scope = Some(scope_id);
+            }
+            if let Some(scope) = scopes.get_mut(&root) {
+                scope.declarations.insert(id, ReactiveScopeDeclaration { identifier: id, scope: scope_id });
             }
         }
     }
@@ -78,6 +85,77 @@ fn find_disjoint_mutable_values(
 ) -> DisjointSet<IdentifierId> {
     let mut set = DisjointSet::new();
     let mut declarations: HashMap<DeclarationId, IdentifierId> = HashMap::new();
+
+    // Build a map: identifier id → binding name, for detecting hook calls.
+    // Covers all NonLocalBinding variants (Global, ImportSpecifier, etc.).
+    let mut global_names: HashMap<IdentifierId, String> = HashMap::new();
+    for (_, block) in &hir.body.blocks {
+        for instr in &block.instructions {
+            if let InstructionValue::LoadGlobal { binding, .. } = &instr.value {
+                let name = match binding {
+                    NonLocalBinding::Global { name } => name.clone(),
+                    NonLocalBinding::ImportSpecifier { name, .. } => name.clone(),
+                    NonLocalBinding::ImportDefault { name, .. } => name.clone(),
+                    NonLocalBinding::ImportNamespace { name, .. } => name.clone(),
+                    NonLocalBinding::ModuleLocal { name } => name.clone(),
+                };
+                if std::env::var("RC_DEBUG").is_ok() {
+                    eprintln!("[global_names] ident {} = {:?}", instr.lvalue.identifier.0, name);
+                }
+                global_names.insert(instr.lvalue.identifier, name);
+            }
+        }
+    }
+
+    // Build a set of identifiers that are results of hook calls.
+    // These must NOT be grouped into memoized scopes.
+    let mut hook_results: HashSet<IdentifierId> = HashSet::new();
+    // Track named variables (not temps) that hold hook results directly.
+    // When a variable is the target of StoreLocal(hook_result), loading it
+    // must not link it into a reactive scope (e.g. `ref2 = useRef(null);`).
+    let mut hook_result_vars: HashSet<IdentifierId> = HashSet::new();
+    // Track the SSA temps that are results of outlined FunctionExpressions.
+    // These are module-level stable stubs (e.g. `_temp`) — their holders must
+    // not be co-located with reactive scopes via the FunctionExpression capture union.
+    let mut outlined_fn_ids: HashSet<IdentifierId> = HashSet::new();
+    // Track named variables that hold outlined function references.
+    // e.g. `const setGlobal = _temp` → setGlobal should not be unioned via captures.
+    let mut outlined_fn_holder_vars: HashSet<IdentifierId> = HashSet::new();
+    // Build maps: identifier → may_allocate and identifier → reactive.
+    // Used to filter StoreLocal value operands: only link values that allocate or are reactive.
+    let mut ident_allocates: HashSet<IdentifierId> = HashSet::new();
+    let mut ident_reactive: HashSet<IdentifierId> = HashSet::new();
+    for (_, block) in &hir.body.blocks {
+        for instr in &block.instructions {
+            if let InstructionValue::CallExpression { callee, .. } = &instr.value {
+                if global_names.get(&callee.identifier).map_or(false, |n| is_hook_name(n)) {
+                    hook_results.insert(instr.lvalue.identifier);
+                }
+            }
+            // Track outlined FunctionExpression results (name_hint is set by outline_functions).
+            if let InstructionValue::FunctionExpression { name_hint, .. } = &instr.value {
+                if name_hint.is_some() {
+                    outlined_fn_ids.insert(instr.lvalue.identifier);
+                }
+            }
+            // Track named variables that hold hook results (e.g. `const ref2 = useRef(null)`)
+            // or outlined function references (e.g. `const setGlobal = _temp`).
+            if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
+                if hook_results.contains(&value.identifier) {
+                    hook_result_vars.insert(lvalue.place.identifier);
+                }
+                if outlined_fn_ids.contains(&value.identifier) {
+                    outlined_fn_holder_vars.insert(lvalue.place.identifier);
+                }
+            }
+            if may_allocate(&instr.value, &global_names) {
+                ident_allocates.insert(instr.lvalue.identifier);
+            }
+            if instr.lvalue.reactive {
+                ident_reactive.insert(instr.lvalue.identifier);
+            }
+        }
+    }
 
     for (_, block) in &hir.body.blocks {
         for phi in &block.phis {
@@ -115,11 +193,41 @@ fn find_disjoint_mutable_values(
                 .get_identifier(lvalue_id)
                 .map(|i| i.mutable_range.clone())
                 .unwrap_or_else(MutableRange::zero);
+            // `lvalue_reactive`: the place's reactive flag (set by infer_reactive_places).
+            // Non-reactive values (e.g. LoadGlobal of a non-hook) must not be added
+            // to the disjoint set unless they may_allocate — this prevents spurious
+            // scopes for transparent loads.
+            let lvalue_reactive = instr.lvalue.reactive;
             let lvalue_mutable = lvalue_range.end.0 > lvalue_range.start.0 + 1;
 
             let mut operands: Vec<IdentifierId> = Vec::new();
-            if lvalue_mutable || may_allocate(&instr.value) {
+            let may_alloc = may_allocate(&instr.value, &global_names);
+            // Transparent instructions (LoadLocal, LoadContext, PropertyLoad, LoadGlobal) are
+            // pure reads. Their SSA results should NOT get their own disjoint-set node just
+            // because of liveness range. They're handled by their match arms below if mutable.
+            let is_transparent_read = matches!(
+                &instr.value,
+                InstructionValue::LoadLocal { .. }
+                    | InstructionValue::LoadContext { .. }
+                    | InstructionValue::PropertyLoad { .. }
+                    | InstructionValue::ComputedLoad { .. }
+                    | InstructionValue::LoadGlobal { .. }
+            );
+            // Hook calls (useState, useEffect, useMemo, useCallback, etc.) must run
+            // unconditionally on every render (React's rules of hooks). Their lvalues
+            // must NOT be added to the disjoint set (no memoized scope created directly).
+            let is_hook_call = matches!(
+                &instr.value,
+                InstructionValue::CallExpression { callee, .. }
+                    if global_names.get(&callee.identifier).map_or(false, |n| is_hook_name(n))
+            );
+            if !is_hook_call && (may_alloc || (lvalue_mutable && lvalue_reactive && !is_transparent_read)) {
                 operands.push(lvalue_id);
+            }
+            if std::env::var("RC_DEBUG").is_ok() {
+                eprintln!("[scope_debug] instr {:?}: lvalue={}, may_alloc={}, lvalue_mutable={}, lvalue_reactive={}, discriminant={:?}",
+                    instr.id.0, lvalue_id.0, may_alloc, lvalue_mutable, lvalue_reactive,
+                    std::mem::discriminant(&instr.value));
             }
 
             match &instr.value {
@@ -140,15 +248,26 @@ fn find_disjoint_mutable_values(
                     let decl_id = env.get_identifier(pid).map(|i| i.declaration_id)
                         .unwrap_or(DeclarationId(pid.0));
                     declarations.entry(decl_id).or_insert(pid);
-                    let store_range = env.get_identifier(pid)
-                        .map(|i| i.mutable_range.clone()).unwrap_or_else(MutableRange::zero);
-                    if store_range.end.0 > store_range.start.0 + 1 {
-                        operands.push(pid);
-                    }
-                    let val_range = env.get_identifier(value.identifier)
-                        .map(|i| i.mutable_range.clone()).unwrap_or_else(MutableRange::zero);
-                    if is_mutable_at(instr.id, &val_range) && val_range.start.0 > 0 {
-                        operands.push(value.identifier);
+                    // If storing a hook result, skip the target variable too —
+                    // variables holding hook results must not be memoized.
+                    if !hook_results.contains(&value.identifier) {
+                        // Only create a scope for the stored variable when the value ALLOCATES.
+                        // Non-allocating reactive values (property accesses, binary ops, etc.)
+                        // do not need memoized scopes — they're cheap to recompute and serve
+                        // only as scope dependencies, not scope outputs.
+                        let val_allocates = ident_allocates.contains(&value.identifier);
+                        if val_allocates {
+                            let store_range = env.get_identifier(pid)
+                                .map(|i| i.mutable_range.clone()).unwrap_or_else(MutableRange::zero);
+                            if store_range.end.0 > store_range.start.0 + 1 {
+                                operands.push(pid);
+                            }
+                            let val_range = env.get_identifier(value.identifier)
+                                .map(|i| i.mutable_range.clone()).unwrap_or_else(MutableRange::zero);
+                            if is_mutable_at(instr.id, &val_range) && val_range.start.0 > 0 {
+                                operands.push(value.identifier);
+                            }
+                        }
                     }
                 }
                 InstructionValue::StoreContext { lvalue, value, .. } => {
@@ -156,42 +275,195 @@ fn find_disjoint_mutable_values(
                     let decl_id = env.get_identifier(pid).map(|i| i.declaration_id)
                         .unwrap_or(DeclarationId(pid.0));
                     declarations.entry(decl_id).or_insert(pid);
-                    let store_range = env.get_identifier(pid)
-                        .map(|i| i.mutable_range.clone()).unwrap_or_else(MutableRange::zero);
-                    if store_range.end.0 > store_range.start.0 + 1 {
-                        operands.push(pid);
-                    }
-                    let val_range = env.get_identifier(value.identifier)
-                        .map(|i| i.mutable_range.clone()).unwrap_or_else(MutableRange::zero);
-                    if is_mutable_at(instr.id, &val_range) && val_range.start.0 > 0 {
-                        operands.push(value.identifier);
+                    // If storing a hook result, skip the target variable too.
+                    if !hook_results.contains(&value.identifier) {
+                        let val_allocates = ident_allocates.contains(&value.identifier);
+                        if val_allocates {
+                            let store_range = env.get_identifier(pid)
+                                .map(|i| i.mutable_range.clone()).unwrap_or_else(MutableRange::zero);
+                            if store_range.end.0 > store_range.start.0 + 1 {
+                                operands.push(pid);
+                            }
+                            let val_range = env.get_identifier(value.identifier)
+                                .map(|i| i.mutable_range.clone()).unwrap_or_else(MutableRange::zero);
+                            if is_mutable_at(instr.id, &val_range) && val_range.start.0 > 0 {
+                                operands.push(value.identifier);
+                            }
+                        }
                     }
                 }
                 InstructionValue::Destructure { lvalue, value, .. } => {
+                    // When destructuring a hook result (useState, useReducer, etc.), the pattern
+                    // variables must NOT be placed in memoized reactive scopes — hooks run
+                    // unconditionally on every render. Register declarations but skip the disjoint set.
+                    let is_hook_result = hook_results.contains(&value.identifier);
                     for place_id in pattern_places(&lvalue.pattern) {
                         let decl_id = env
                             .get_identifier(place_id)
                             .map(|i| i.declaration_id)
                             .unwrap_or(DeclarationId(place_id.0));
                         declarations.entry(decl_id).or_insert(place_id);
-                        let pr = env
-                            .get_identifier(place_id)
-                            .map(|i| i.mutable_range.clone())
-                            .unwrap_or_else(MutableRange::zero);
-                        if pr.end.0 > pr.start.0 + 1 {
-                            operands.push(place_id);
+                        if !is_hook_result {
+                            let pr = env
+                                .get_identifier(place_id)
+                                .map(|i| i.mutable_range.clone())
+                                .unwrap_or_else(MutableRange::zero);
+                            if pr.end.0 > pr.start.0 + 1 {
+                                operands.push(place_id);
+                            }
                         }
                     }
-                    let val_range = env
-                        .get_identifier(value.identifier)
-                        .map(|i| i.mutable_range.clone())
-                        .unwrap_or_else(MutableRange::zero);
-                    if is_mutable_at(instr.id, &val_range) && val_range.start.0 > 0 {
-                        operands.push(value.identifier);
+                    // Don't group hook results into memoized scopes.
+                    if !is_hook_result {
+                        let val_allocates = ident_allocates.contains(&value.identifier);
+                        let val_reactive = ident_reactive.contains(&value.identifier);
+                        if val_allocates || val_reactive {
+                            let val_range = env
+                                .get_identifier(value.identifier)
+                                .map(|i| i.mutable_range.clone())
+                                .unwrap_or_else(MutableRange::zero);
+                            if is_mutable_at(instr.id, &val_range) && val_range.start.0 > 0 {
+                                operands.push(value.identifier);
+                            }
+                        }
                     }
+                }
+                // LoadLocal / LoadContext: link the SSA result with the source variable
+                // when the source is mutable. This mirrors the TS compiler's behavior
+                // where union(lvalue, operand) is called for every mutable operand,
+                // regardless of whether the lvalue itself is reactive.
+                // Without this, `t = LoadLocal(y)` won't link `t` with `y`, breaking
+                // downstream unions like PropertyStore(t, ...) that need to trace back
+                // through `t` to `y`.
+                // EXCEPT: if the source is a hook result variable (e.g. `ref2 = useRef(null)`),
+                // do NOT link it — hook results are stable and must not pull the loaded
+                // SSA temp into a reactive scope.
+                InstructionValue::LoadLocal { place, .. }
+                | InstructionValue::LoadContext { place, .. } => {
+                    if hook_result_vars.contains(&place.identifier) {
+                        // Hook result variable — skip, no scope membership propagation.
+                    } else {
+                        let src_range = env
+                            .get_identifier(place.identifier)
+                            .map(|i| i.mutable_range.clone())
+                            .unwrap_or_else(MutableRange::zero);
+                        if is_mutable_at(instr.id, &src_range) && src_range.start.0 > 0 {
+                            operands.push(place.identifier);
+                            // Also include the lvalue (SSA result) even if not reactive,
+                            // so mutations via this handle trace back to the source variable.
+                            if lvalue_mutable {
+                                operands.push(lvalue_id);
+                            }
+                        }
+                    }
+                }
+
+                // Hook calls (useRef, useState, useEffect, etc.) must run unconditionally
+                // and must NOT be grouped into memoized scopes.
+                // For hook calls, skip operand processing so their arguments don't
+                // accidentally pull in scope membership.
+                InstructionValue::CallExpression { callee, .. } => {
+                    let is_hook = global_names
+                        .get(&callee.identifier)
+                        .map_or(false, |n| is_hook_name(n));
+                    if !is_hook {
+                        for op in each_instruction_value_operand(&instr.value) {
+                            let op_range = env
+                                .get_identifier(op.identifier)
+                                .map(|i| i.mutable_range.clone())
+                                .unwrap_or_else(MutableRange::zero);
+                            if is_mutable_at(instr.id, &op_range) && op_range.start.0 > 0 {
+                                operands.push(op.identifier);
+                            }
+                        }
+                    }
+                    // For hook calls: no operand processing, no scope grouping.
+                }
+                // For MethodCall: only link the receiver (which is mutated), NOT the
+                // arguments (which are merely read). Linking args would incorrectly merge
+                // the arg's scope with the receiver's scope.
+                InstructionValue::MethodCall { receiver, property, .. } => {
+                    for id in [receiver.identifier, property.identifier] {
+                        let op_range = env
+                            .get_identifier(id)
+                            .map(|i| i.mutable_range.clone())
+                            .unwrap_or_else(MutableRange::zero);
+                        if is_mutable_at(instr.id, &op_range) && op_range.start.0 > 0 {
+                            operands.push(id);
+                        }
+                    }
+                }
+                // FunctionExpression: merge captured context variables into the same
+                // scope unconditionally. Captures may be declared after the function
+                // (due to JS hoisting) so the range-based check would miss them.
+                //
+                // EXCEPTION: skip captures of outlined function holder variables.
+                // An outlined FunctionExpression (name_hint set) becomes a stable
+                // module-level stub reference — its holder variable (e.g. `setGlobal`)
+                // does not need co-location with the capturing FunctionExpression's scope.
+                InstructionValue::FunctionExpression { lowered_func, name_hint, .. } => {
+                    if name_hint.is_none() {
+                        // Non-outlined function: union ALL non-parameter captures with the function.
+                        // This mirrors the TS compiler behavior: even immutable captures (const vars
+                        // that are only read inside the closure) are co-located in the same reactive
+                        // scope. This allows capturing-alias patterns like:
+                        //   const x = {foo};
+                        //   const f = () => { x.something = value; };
+                        // to produce a single merged scope with deps=[foo, ...] rather than
+                        // two separate scopes for x and f.
+                        // Parameters are excluded (cap_range.start=0) since they're stable deps,
+                        // not allocating values needing co-location.
+                        for ctx_place in &lowered_func.func.context {
+                            // Skip captures of outlined function holder vars: they're stable
+                            // module-level refs, not reactive values needing co-location.
+                            if outlined_fn_holder_vars.contains(&ctx_place.identifier) {
+                                continue;
+                            }
+                            // Skip hook result variables — they are stable across renders.
+                            if hook_result_vars.contains(&ctx_place.identifier) {
+                                continue;
+                            }
+                            let cap_range = env
+                                .get_identifier(ctx_place.identifier)
+                                .map(|i| i.mutable_range.clone())
+                                .unwrap_or_else(MutableRange::zero);
+                            // Exclude parameters (mutable_range.start=0) — they are reactive
+                            // deps, not allocating values to co-locate.
+                            // Also exclude non-allocating captures with no mutable range.
+                            if is_mutable_at(instr.id, &cap_range) && cap_range.start.0 > 0 {
+                                operands.push(ctx_place.identifier);
+                            }
+                        }
+                    }
+                    // Outlined FunctionExpressions: no operand processing at all.
+                    // They become stable module-level stubs and should not create scopes.
+                }
+                // PropertyLoad / ComputedLoad are transparent reads.
+                // Their object operand is a dependency (captured by propagate_scope_deps),
+                // NOT a co-location requirement. Do not union the object into the same scope
+                // as the result — this prevents spurious scopes for parameter-copy temps.
+                //
+                // PropertyStore / ComputedStore are property mutations.
+                // The scope that owns the object already encompasses the mutation via range
+                // extension. We must NOT union the value/property operand temps into the
+                // owning scope — that would incorrectly add non-allocating temps (like
+                // LoadLocal(arg)) to the scope's declarations, preventing always-inv detection
+                // and blocking inner scope merging.
+                InstructionValue::PropertyLoad { .. }
+                | InstructionValue::ComputedLoad { .. }
+                | InstructionValue::PropertyStore { .. }
+                | InstructionValue::ComputedStore { .. } => {
+                    // No operand unioning for property reads/writes.
                 }
                 _ => {
                     for op in each_instruction_value_operand(&instr.value) {
+                        // Skip inner always-allocating operands (e.g. `{}` or `[]` passed as
+                        // elements of an outer array/object). They form their own separate
+                        // memoized scopes and must not be merged into the containing scope
+                        // via SSA liveness overlap.
+                        if ident_allocates.contains(&op.identifier) {
+                            continue;
+                        }
                         let op_range = env
                             .get_identifier(op.identifier)
                             .map(|i| i.mutable_range.clone())
@@ -207,6 +479,13 @@ fn find_disjoint_mutable_values(
                 let mut seen = HashSet::new();
                 let dedup: Vec<_> =
                     operands.into_iter().filter(|&id| seen.insert(id)).collect();
+                if std::env::var("RC_DEBUG").is_ok() {
+                    let ids: Vec<_> = dedup.iter().map(|id| {
+                        let name = env.get_identifier(*id).and_then(|i| i.name.as_ref()).map(|n| n.value()).unwrap_or_default();
+                        format!("{}({:?})", id.0, name)
+                    }).collect();
+                    eprintln!("[union] instr {:?}: {:?}", instr.id.0, ids);
+                }
                 set.union(&dedup);
             }
         }
@@ -216,6 +495,10 @@ fn find_disjoint_mutable_values(
 
 fn is_mutable_at(instr_id: InstructionId, range: &MutableRange) -> bool {
     instr_id >= range.start && instr_id < range.end
+}
+
+pub fn pattern_places_pub(pattern: &Pattern) -> Vec<IdentifierId> {
+    pattern_places(pattern)
 }
 
 fn pattern_places(pattern: &Pattern) -> Vec<IdentifierId> {
@@ -242,7 +525,7 @@ fn pattern_places(pattern: &Pattern) -> Vec<IdentifierId> {
     out
 }
 
-fn may_allocate(value: &InstructionValue) -> bool {
+fn may_allocate(value: &InstructionValue, global_names: &HashMap<IdentifierId, String>) -> bool {
     match value {
         InstructionValue::PostfixUpdate { .. }
         | InstructionValue::PrefixUpdate { .. }
@@ -274,6 +557,7 @@ fn may_allocate(value: &InstructionValue) -> bool {
         | InstructionValue::StoreGlobal { .. }
         | InstructionValue::RegExpLiteral { .. }
         | InstructionValue::UnsupportedNode { .. }
+        | InstructionValue::InlineJs { .. }
         | InstructionValue::PropertyStore { .. }
         | InstructionValue::ComputedStore { .. } => false,
 
@@ -281,16 +565,72 @@ fn may_allocate(value: &InstructionValue) -> bool {
         | InstructionValue::ArrayExpression { .. }
         | InstructionValue::JsxExpression { .. }
         | InstructionValue::JsxFragment { .. }
-        | InstructionValue::FunctionExpression { .. }
         | InstructionValue::ObjectMethod { .. }
         | InstructionValue::NewExpression { .. }
-        | InstructionValue::TaggedTemplateExpression { .. }
-        | InstructionValue::CallExpression { .. }
-        | InstructionValue::MethodCall { .. } => true,
+        | InstructionValue::TaggedTemplateExpression { .. } => true,
+
+        // Outlined function expressions have name_hint set by outline_functions.
+        // They're equivalent to stable module-level references (like LoadGlobal),
+        // so they do NOT allocate and should not be placed in memoized scopes.
+        InstructionValue::FunctionExpression { name_hint, .. } => name_hint.is_none(),
+
+        // Hook calls (e.g. useRef, useEffect, useState) must run unconditionally
+        // (React's rules of hooks) — they must NOT be placed inside a memoized scope.
+        // Known primitive-returning builtins (String, Number, Boolean, etc.) return
+        // primitives that compare by value — no need to memoize them.
+        // Non-hook, non-primitive calls may allocate new values and should be memoized.
+        InstructionValue::CallExpression { callee, .. } => {
+            let callee_name = global_names.get(&callee.identifier).map(|s| s.as_str());
+            match callee_name {
+                Some(name) if is_hook_name(name) => false,
+                Some(name) if is_primitive_returning_builtin(name) => false,
+                _ => true,
+            }
+        }
+
+        InstructionValue::MethodCall { .. } => true,
 
         InstructionValue::Destructure { lvalue, .. } => match &lvalue.pattern {
             Pattern::Array(ap) => ap.items.iter().any(|e| matches!(e, ArrayElement::Spread(_))),
             Pattern::Object(op) => op.properties.iter().any(|p| matches!(p, ObjectPatternProperty::Spread(_))),
         },
     }
+}
+
+fn is_hook_name(name: &str) -> bool {
+    name.starts_with("use") && name[3..].chars().next().map_or(false, |c| c.is_uppercase())
+}
+
+/// Returns true for global functions that always return a primitive (string/number/boolean).
+/// These don't heap-allocate so they don't need memoization scopes.
+fn is_primitive_returning_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "String" | "Number" | "Boolean"
+        | "parseInt" | "parseFloat"
+        | "isNaN" | "isFinite"
+        | "encodeURI" | "encodeURIComponent"
+        | "decodeURI" | "decodeURIComponent"
+    )
+}
+
+/// Hooks whose results must NOT be placed in memoized scopes:
+/// - React-managed state (useState, useReducer, useContext)
+/// - Effect hooks that return void (useEffect, etc.)
+/// - Stable hooks (useRef, useId, etc.)
+/// Excluded: memoization hooks (useMemo, useCallback) whose results CAN be cached.
+fn is_non_memoizable_hook(name: &str) -> bool {
+    matches!(
+        name,
+        "useState"
+            | "useReducer"
+            | "useContext"
+            | "useEffect"
+            | "useLayoutEffect"
+            | "useInsertionEffect"
+            | "useRef"
+            | "useId"
+            | "useImperativeHandle"
+            | "useDebugValue"
+    )
 }

@@ -4,10 +4,11 @@ use std::collections::{HashMap, HashSet};
 use indexmap::IndexMap;
 
 use crate::hir::hir::{
-    BasicBlock, BlockId, Effect, HIR, HIRFunction, Identifier, IdentifierId,
+    BasicBlock, BlockId, DeclarationId, Effect, HIR, HIRFunction, Identifier, IdentifierId,
     InstructionId, InstructionValue, LValue, MutableRange, Param, Phi, Place,
     SourceLocation, SpreadPattern, Type,
 };
+use crate::hir::environment::Environment;
 
 // ---------------------------------------------------------------------------
 // State per basic block: holds the current SSA renaming for old -> new ids,
@@ -219,6 +220,7 @@ fn collect_operand_ids_from_value(val: &InstructionValue, visit: &mut impl FnMut
         | MetaProperty { .. }
         | Debugger { .. }
         | StartMemoize { .. }
+        | InlineJs { .. }
         | UnsupportedNode { .. }
         | ObjectMethod { .. }
         | FunctionExpression { .. } => {}
@@ -243,10 +245,14 @@ struct SsaBuilder {
     context: HashSet<IdentifierId>,
     /// Next fresh SSA id.
     next_id: u32,
+    /// Snapshot of identifier metadata at SSA entry time (for copying to new SSA IDs).
+    ident_snapshot: HashMap<IdentifierId, Identifier>,
+    /// New identifiers registered during SSA to be written back to env.
+    new_identifiers: Vec<Identifier>,
 }
 
 impl SsaBuilder {
-    fn new(max_existing_id: u32) -> Self {
+    fn new(max_existing_id: u32, ident_snapshot: HashMap<IdentifierId, Identifier>) -> Self {
         SsaBuilder {
             states: HashMap::new(),
             current: None,
@@ -254,6 +260,8 @@ impl SsaBuilder {
             unknown: HashSet::new(),
             context: HashSet::new(),
             next_id: max_existing_id + 1,
+            ident_snapshot,
+            new_identifiers: Vec::new(),
         }
     }
 
@@ -261,6 +269,31 @@ impl SsaBuilder {
         let id = IdentifierId(self.next_id);
         self.next_id += 1;
         id
+    }
+
+    /// Allocate a new SSA id for a phi node, copying name metadata from old_id.
+    /// Unlike `define_place`, this is used for phi-result IDs which need to be
+    /// registered in new_identifiers so codegen can find their names.
+    fn alloc_phi_id(&mut self, old_id: IdentifierId) -> IdentifierId {
+        let new_id = self.alloc_id();
+        let new_ident = if let Some(orig) = self.ident_snapshot.get(&old_id) {
+            let mut copy = orig.clone();
+            copy.id = new_id;
+            copy.declaration_id = orig.declaration_id;
+            copy
+        } else {
+            Identifier {
+                id: new_id,
+                declaration_id: DeclarationId(new_id.0),
+                name: None,
+                mutable_range: MutableRange::zero(),
+                scope: None,
+                type_: Type::default(),
+                loc: SourceLocation::Generated,
+            }
+        };
+        self.new_identifiers.push(new_ident);
+        new_id
     }
 
     fn state_mut(&mut self) -> &mut BlockState {
@@ -297,7 +330,7 @@ impl SsaBuilder {
         let unsealed = self.unsealed_preds.get(&block_id).copied().unwrap_or(0);
         if unsealed > 0 {
             // Block still has unvisited predecessors; insert incomplete phi.
-            let new_id = self.alloc_id();
+            let new_id = self.alloc_phi_id(old_id);
             let state = self.states.get_mut(&block_id).expect("state must exist");
             state.incomplete_phis.push(IncompletePhi {
                 old_id,
@@ -317,7 +350,7 @@ impl SsaBuilder {
         }
 
         // Multiple predecessors: may need a phi.
-        let new_id = self.alloc_id();
+        let new_id = self.alloc_phi_id(old_id);
         // Register before recursing to break cycles from loops.
         self.states.get_mut(&block_id).expect("state must exist").defs.insert(old_id, new_id);
         self.add_phi(block_id, old_id, new_id, blocks);
@@ -394,15 +427,31 @@ impl SsaBuilder {
     /// Context places (captured vars) are not redefined.
     fn define_place(&mut self, place: Place) -> Place {
         if self.context.contains(&place.identifier) {
-            // Context identifiers are not renamed; return via get_place path
-            // but we can't call get_place here (would need blocks). For context
-            // variables we simply preserve the existing id and record in defs.
             let state = self.state_mut();
             let existing = state.defs.get(&place.identifier).copied().unwrap_or(place.identifier);
             return Place { identifier: existing, ..place };
         }
         let new_id = self.alloc_id();
-        self.state_mut().defs.insert(place.identifier, new_id);
+        let old_id = place.identifier;
+        self.state_mut().defs.insert(old_id, new_id);
+        // Register new identifier copying metadata from original (if available).
+        let new_ident = if let Some(orig) = self.ident_snapshot.get(&old_id) {
+            let mut copy = orig.clone();
+            copy.id = new_id;
+            copy.declaration_id = orig.declaration_id; // keep same decl group
+            copy
+        } else {
+            Identifier {
+                id: new_id,
+                declaration_id: DeclarationId(new_id.0),
+                name: None,
+                mutable_range: MutableRange::zero(),
+                scope: None,
+                type_: Type::default(),
+                loc: place.loc.clone(),
+            }
+        };
+        self.new_identifiers.push(new_ident);
         Place { identifier: new_id, ..place }
     }
 
@@ -420,10 +469,18 @@ impl SsaBuilder {
 // ---------------------------------------------------------------------------
 
 pub fn enter_ssa(hir: &mut HIRFunction) {
+    enter_ssa_with_env(hir, None);
+}
+
+pub fn enter_ssa_with_env(hir: &mut HIRFunction, env: Option<&mut Environment>) {
     fix_predecessors(&mut hir.body);
 
     let max_id = find_max_identifier_id(&hir.body);
-    let mut builder = SsaBuilder::new(max_id);
+    let snapshot: HashMap<IdentifierId, Identifier> = env
+        .as_ref()
+        .map(|e| e.identifiers.clone())
+        .unwrap_or_default();
+    let mut builder = SsaBuilder::new(max_id, snapshot);
 
     let entry = hir.body.entry;
 
@@ -510,6 +567,13 @@ pub fn enter_ssa(hir: &mut HIRFunction) {
             if count == 0 && visited.contains(&succ) {
                 builder.fix_incomplete_phis(succ, &mut hir.body.blocks);
             }
+        }
+    }
+
+    // Write back newly created identifiers to env.
+    if let Some(e) = env {
+        for new_ident in builder.new_identifiers {
+            e.identifiers.insert(new_ident.id, new_ident);
         }
     }
 }
@@ -686,6 +750,13 @@ fn rename_operands_in_value(
         }
         FinishMemoize { decl, .. } => rp!(decl),
 
+        // Rename context places captured by function expressions.
+        FunctionExpression { lowered_func, .. } => {
+            for ctx_place in lowered_func.func.context.iter_mut() {
+                rp!(ctx_place);
+            }
+        }
+
         // No use-site places to rename:
         DeclareLocal { .. }
         | DeclareContext { .. }
@@ -696,9 +767,9 @@ fn rename_operands_in_value(
         | MetaProperty { .. }
         | Debugger { .. }
         | StartMemoize { .. }
+        | InlineJs { .. }
         | UnsupportedNode { .. }
-        | ObjectMethod { .. }
-        | FunctionExpression { .. } => {}
+        | ObjectMethod { .. } => {}
     }
 }
 

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use crate::hir::hir::{
     BlockId, DeclarationId, Identifier, IdentifierId, InstructionId,
     ReactFunctionType, ReactiveScope, ScopeId, SourceLocation,
@@ -94,6 +94,16 @@ pub struct Environment {
 
     // Accumulated non-fatal diagnostics
     errors: Vec<CompilerDiagnostic>,
+
+    // Outlined functions collected by the outline_functions pass.
+    // Each entry is (name, declaration_text) e.g. ("_temp", "function _temp(x_0) { return x_0; }")
+    pub outlined_functions: Vec<(String, String)>,
+
+    // Module-level variable names collected during lowering.
+    // These are let/const/var declarations at module scope (not inside any function).
+    // Used by outline_functions to determine if free variables are safe to capture
+    // from an outlined (hoisted) function.
+    pub module_level_names: HashSet<String>,
 }
 
 impl Environment {
@@ -114,6 +124,8 @@ impl Environment {
             identifiers: HashMap::new(),
             scopes: HashMap::new(),
             errors: Vec::new(),
+            outlined_functions: Vec::new(),
+            module_level_names: HashSet::new(),
         }
     }
 

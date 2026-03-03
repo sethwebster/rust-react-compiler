@@ -53,6 +53,7 @@ pub fn lower_identifier<'a>(
     semantic: &Semantic<'a>,
     ident: &IdentifierReference<'a>,
 ) -> Result<Place> {
+    use oxc_semantic::SymbolFlags;
     let loc = SourceLocation::source(ident.span.start, ident.span.end);
 
     // In oxc 0.69, reference_id is a Cell<Option<ReferenceId>>, accessed via .get().
@@ -61,12 +62,21 @@ pub fn lower_identifier<'a>(
 
     match symbol_id {
         Some(sym_id) => {
-            let id = ctx.get_or_create_symbol(sym_id.index() as u32, Some(ident.name.as_str()), loc.clone());
-            let load = InstructionValue::LoadLocal {
-                place: Place::new(id, loc.clone()),
-                loc: loc.clone(),
-            };
-            Ok(ctx.push(load, loc))
+            let flags = semantic.scoping().symbol_flags(sym_id);
+            if flags.intersects(SymbolFlags::Import) {
+                // Import bindings are module-level — emit LoadGlobal so downstream
+                // passes (hook detection, outlining) can identify them by name.
+                let binding = NonLocalBinding::Global { name: ident.name.to_string() };
+                let load = InstructionValue::LoadGlobal { binding, loc: loc.clone() };
+                Ok(ctx.push(load, loc))
+            } else {
+                let id = ctx.get_or_create_symbol(sym_id.index() as u32, Some(ident.name.as_str()), loc.clone());
+                let load = InstructionValue::LoadLocal {
+                    place: Place::new(id, loc.clone()),
+                    loc: loc.clone(),
+                };
+                Ok(ctx.push(load, loc))
+            }
         }
         None => {
             let binding = NonLocalBinding::Global { name: ident.name.to_string() };
@@ -141,9 +151,30 @@ pub fn lower_unary<'a>(
 ) -> Result<Place> {
     let loc = SourceLocation::source(expr.span.start, expr.span.end);
 
-    // delete is special — we emit an UnsupportedNode rather than a UnaryExpression
+    // delete is special — emit PropertyDelete or ComputedDelete
     if expr.operator == oxc_ast::ast::UnaryOperator::Delete {
-        return Ok(ctx.push(InstructionValue::UnsupportedNode { loc }, SourceLocation::Generated));
+        match &expr.argument {
+            Expression::StaticMemberExpression(m) => {
+                let object = lower_expr(&m.object, ctx)?;
+                let property = m.property.name.to_string();
+                return Ok(ctx.push(
+                    InstructionValue::PropertyDelete { object, property, loc: loc.clone() },
+                    loc,
+                ));
+            }
+            Expression::ComputedMemberExpression(m) => {
+                let object = lower_expr(&m.object, ctx)?;
+                let property = lower_expr(&m.expression, ctx)?;
+                return Ok(ctx.push(
+                    InstructionValue::ComputedDelete { object, property, loc: loc.clone() },
+                    loc,
+                ));
+            }
+            _ => {
+                // delete on a bare identifier or other unsupported form
+                return Ok(ctx.push(InstructionValue::UnsupportedNode { loc }, SourceLocation::Generated));
+            }
+        }
     }
 
     let value = lower_expr(&expr.argument, ctx)?;

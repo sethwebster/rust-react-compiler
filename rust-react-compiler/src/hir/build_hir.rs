@@ -14,3 +14,14 @@ pub fn lower_program(
 ) -> Result<HIRFunction> {
     crate::hir::lower::core::lower_program(source, source_type, env)
 }
+
+/// Like `lower_program` but skips the first `n` compilable function-like
+/// top-level statements and compiles the (n+1)th.
+pub fn lower_program_nth(
+    source: &str,
+    source_type: oxc_span::SourceType,
+    env: &mut Environment,
+    n: usize,
+) -> Result<HIRFunction> {
+    crate::hir::lower::core::lower_program_nth(source, source_type, env, n)
+}

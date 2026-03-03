@@ -19,6 +19,30 @@ pub fn each_instruction_value_operand(value: &InstructionValue) -> Vec<&Place> {
     out
 }
 
+/// Like `each_instruction_value_operand` but for dep-propagation purposes.
+/// For MethodCall, skips the `receiver` because the `property` operand already
+/// captures the full dep chain (e.g., `props.render` subsumes `props`).
+/// Processing receiver first would add `props` as dep, blocking `props.render`
+/// via the ancestor check.
+pub fn each_dep_operand(value: &InstructionValue) -> Vec<&Place> {
+    match value {
+        // For MethodCall, use the receiver as the dep (not the property accessor).
+        // e.g. `a.at(b)` → deps are [a, b], not [a.at, b].
+        // The receiver captures the full dependency on the base object.
+        InstructionValue::MethodCall { receiver, args, .. } => {
+            let mut out: Vec<&Place> = vec![receiver];
+            for arg in args {
+                match arg {
+                    CallArg::Place(p) => out.push(p),
+                    CallArg::Spread(s) => out.push(&s.place),
+                }
+            }
+            out
+        }
+        _ => each_instruction_value_operand(value),
+    }
+}
+
 fn collect_instruction_value_operands<'a>(
     value: &'a InstructionValue,
     out: &mut Vec<&'a Place>,
@@ -35,6 +59,7 @@ fn collect_instruction_value_operands<'a>(
         | InstructionValue::JsxText { .. }
         | InstructionValue::RegExpLiteral { .. }
         | InstructionValue::MetaProperty { .. }
+        | InstructionValue::InlineJs { .. }
         | InstructionValue::UnsupportedNode { .. }
         | InstructionValue::Debugger { .. } => {}
 
@@ -202,8 +227,13 @@ pub fn each_terminal_operand(terminal: &Terminal) -> Vec<&Place> {
         Terminal::If { test, .. } | Terminal::Branch { test, .. } => {
             out.push(test);
         }
-        Terminal::Switch { test, .. } => {
+        Terminal::Switch { test, cases, .. } => {
             out.push(test);
+            for case in cases {
+                if let Some(t) = &case.test {
+                    out.push(t);
+                }
+            }
         }
         // Block-level terminals don't carry Place operands directly
         Terminal::Goto { .. }
@@ -254,6 +284,7 @@ fn collect_instruction_value_operands_mut<'a>(
         | InstructionValue::JsxText { .. }
         | InstructionValue::RegExpLiteral { .. }
         | InstructionValue::MetaProperty { .. }
+        | InstructionValue::InlineJs { .. }
         | InstructionValue::UnsupportedNode { .. }
         | InstructionValue::Debugger { .. } => {}
 

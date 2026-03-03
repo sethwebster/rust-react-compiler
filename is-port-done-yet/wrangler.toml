@@ -1,7 +1,20 @@
 name = "rust-react-compiler"
+account_id = "76a59d239619ed344d267008c790ba18"
 main = "worker.ts"
 compatibility_date = "2025-11-01"
 compatibility_flags = ["nodejs_compat"]
 
 [assets]
 directory = "./public"
+
+[[kv_namespaces]]
+binding = "REACTIONS"
+id = "e8b9563972d74e96b95049042cdcd8c6"
+preview_id = "8db62fe040f0480da2acdb5755166d0c"
+
+[durable_objects]
+bindings = [{ name = "ROOM", class_name = "RoomDO" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RoomDO"]

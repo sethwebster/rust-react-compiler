@@ -74,7 +74,71 @@ fn make_stub_hir_body(
         directives: vec![],
         aliasing_effects: None,
         original_source: String::new(),
+        is_arrow: false,
+        is_named_export: false,
+        is_default_export: false,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: detect outer-scope variable captures via source text matching.
+// ---------------------------------------------------------------------------
+
+/// Returns true if `name` appears as a standalone identifier (word-boundary) in `source`.
+fn source_contains_identifier(source: &str, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let is_id_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+    let name_bytes = name.as_bytes();
+    let n = name.len();
+    let source_bytes = source.as_bytes();
+    let slen = source_bytes.len();
+    let mut i = 0;
+    while i + n <= slen {
+        if &source_bytes[i..i + n] == name_bytes {
+            let before_ok = i == 0 || !is_id_char(source_bytes[i - 1]);
+            let after_ok = i + n == slen || !is_id_char(source_bytes[i + n]);
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Collect all outer-scope variables that appear (by name) in `fn_source`.
+/// `excluded_params` — names of the function's own parameters (they shadow
+/// outer bindings and must NOT be treated as captures).
+/// Returns Places referencing the outer HIR identifiers.
+fn collect_captures(ctx: &LoweringContext, fn_source: &str, excluded_params: &std::collections::HashSet<String>) -> Vec<Place> {
+    let mut seen = std::collections::HashSet::new();
+    let mut result = Vec::new();
+    for (&_sym_id, &ident_id) in &ctx.symbol_map {
+        if seen.contains(&ident_id.0) {
+            continue;
+        }
+        if let Some(ident) = ctx.env.get_identifier(ident_id) {
+            let name = match &ident.name {
+                Some(n) => n.value().to_string(),
+                None => continue,
+            };
+            // Skip names that are parameters of this function — they shadow outer vars.
+            if excluded_params.contains(&name) {
+                continue;
+            }
+            if source_contains_identifier(fn_source, &name) {
+                seen.insert(ident_id.0);
+                let loc = ident.loc.clone();
+                if std::env::var("RC_DEBUG").is_ok() {
+                    eprintln!("[capture] found capture: '{}' (id={})", name, ident_id.0);
+                }
+                result.push(Place::new(ident_id, loc));
+            }
+        }
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -103,13 +167,29 @@ pub fn lower_function_expr<'a>(
         ));
     }
 
-    let lowered_fn = make_stub_hir_body(
+    // Capture the original source text of the function expression.
+    let original_src = semantic.source_text()
+        .get(func.span.start as usize..func.span.end as usize)
+        .unwrap_or("")
+        .to_string();
+
+    // Collect this function's own parameter names so they're excluded from capture detection.
+    let param_names: std::collections::HashSet<String> = func.params.items.iter()
+        .filter_map(|p| match &p.pattern.kind {
+            BindingPatternKind::BindingIdentifier(bi) => Some(bi.name.to_string()),
+            _ => None,
+        })
+        .collect();
+
+    let mut lowered_fn = make_stub_hir_body(
         ctx,
         &loc,
         func.r#async,
         func.generator,
         name.clone(),
     );
+    lowered_fn.original_source = original_src.clone();
+    lowered_fn.context = collect_captures(ctx, &original_src, &param_names);
 
     let result = ctx.push(
         InstructionValue::FunctionExpression {
@@ -142,13 +222,29 @@ pub fn lower_arrow<'a>(
 ) -> Result<Place> {
     let loc = SourceLocation::source(expr.span.start, expr.span.end);
 
-    let lowered_fn = make_stub_hir_body(
+    // Capture the original source text of the arrow function.
+    let original_src = semantic.source_text()
+        .get(expr.span.start as usize..expr.span.end as usize)
+        .unwrap_or("")
+        .to_string();
+
+    // Collect this arrow's own parameter names so they're excluded from capture detection.
+    let param_names: std::collections::HashSet<String> = expr.params.items.iter()
+        .filter_map(|p| match &p.pattern.kind {
+            BindingPatternKind::BindingIdentifier(bi) => Some(bi.name.to_string()),
+            _ => None,
+        })
+        .collect();
+
+    let mut lowered_fn = make_stub_hir_body(
         ctx,
         &loc,
         expr.r#async,
         false, // arrows are never generators
         None,  // arrows are always anonymous
     );
+    lowered_fn.original_source = original_src.clone();
+    lowered_fn.context = collect_captures(ctx, &original_src, &param_names);
 
     let result = ctx.push(
         InstructionValue::FunctionExpression {

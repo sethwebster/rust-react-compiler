@@ -742,12 +742,15 @@ impl Terminal {
                 if let Some(u) = update { succs.push(*u); }
                 succs
             }
-            Terminal::ForOf { test, loop_, fallthrough, .. } => {
-                // `init` == the block containing this terminal; omit to avoid self-predecessor loop.
-                vec![*test, *loop_, *fallthrough]
+            Terminal::ForOf { test, fallthrough, .. } => {
+                // `init` == the block containing this terminal; the loop body (loop_)
+                // is only reachable via the test block's Branch, NOT directly from init.
+                // Including loop_ here would give loop_ a spurious predecessor (init),
+                // causing SSA to insert phi nodes for loop-body bindings unnecessarily.
+                vec![*test, *fallthrough]
             }
             Terminal::ForIn { loop_, fallthrough, .. } => {
-                // `init` == the block containing this terminal; omit to avoid self-predecessor loop.
+                // ForIn: loop_ IS a direct successor of init (no separate test block).
                 vec![*loop_, *fallthrough]
             }
             Terminal::Logical { test, fallthrough, .. } => vec![*test, *fallthrough],
@@ -905,6 +908,7 @@ pub enum InstructionValue {
     TypeCastExpression {
         value: Place,
         type_: Type,
+        source_annotation: Option<String>,
         loc: SourceLocation,
     },
 
@@ -1074,6 +1078,12 @@ pub enum InstructionValue {
         loc: SourceLocation,
     },
 
+    // --- Inline verbatim JS source (e.g. optional-chaining expressions) ---
+    InlineJs {
+        source: String,
+        loc: SourceLocation,
+    },
+
     // --- Fallback ---
     UnsupportedNode {
         loc: SourceLocation,
@@ -1125,6 +1135,7 @@ impl InstructionValue {
             | InstructionValue::Debugger { loc }
             | InstructionValue::StartMemoize { loc, .. }
             | InstructionValue::FinishMemoize { loc, .. }
+            | InstructionValue::InlineJs { loc, .. }
             | InstructionValue::UnsupportedNode { loc } => loc,
         }
     }
@@ -1280,6 +1291,15 @@ pub struct HIRFunction {
     /// The original source re-emitted as clean JS (TS types stripped).
     /// Used as passthrough output while full codegen is not yet implemented.
     pub original_source: String,
+    /// True if this function was originally declared as an arrow function
+    /// (`const F = () => ...` or `() => ...`). Used in codegen to emit
+    /// the correct output form: `const F = (params) => { ... }` vs `function F(params) { ... }`.
+    pub is_arrow: bool,
+    /// True if the function was declared with `export function` or `export const`.
+    /// False for `export default function` (which uses a different keyword).
+    pub is_named_export: bool,
+    /// True if the function was declared with `export default function` or `export default () =>`.
+    pub is_default_export: bool,
 }
 
 // ---------------------------------------------------------------------------

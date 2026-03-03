@@ -3,7 +3,119 @@ const GITHUB_RAW =
 
 interface Env {
   GITHUB_TOKEN?: string
+  REACTIONS?: KVNamespace
+  ROOM: DurableObjectNamespace
   ASSETS: Fetcher
+}
+
+// ── Durable Object: Room ───────────────────────────────────────────────────────
+
+const ALLOWED_EMOJIS = new Set(["🚀", "🔥", "❤️", "🎉", "👀", "💯"])
+
+interface SessionMeta { id: string; country: string; city: string; x: number; y: number }
+
+export class RoomDO implements DurableObject {
+  private state: DurableObjectState
+  private counts: Record<string, number> = {}
+  private countsLoaded = false
+  private checkedTodos: Set<string> = new Set()
+  private checkedLoaded = false
+
+  constructor(state: DurableObjectState) { this.state = state }
+
+  async fetch(request: Request): Promise<Response> {
+    if (request.headers.get("Upgrade") !== "websocket")
+      return new Response("Expected WebSocket", { status: 426 })
+
+    if (!this.countsLoaded) {
+      this.counts = (await this.state.storage.get<Record<string, number>>("counts")) ?? {}
+      this.countsLoaded = true
+    }
+    if (!this.checkedLoaded) {
+      this.checkedTodos = new Set(await this.state.storage.get<string[]>("checked-todos") ?? [])
+      this.checkedLoaded = true
+    }
+
+    const pair = new WebSocketPair()
+    const [client, server] = Object.values(pair)
+
+    const cf = (request as any).cf ?? {}
+    const meta: SessionMeta = { id: crypto.randomUUID(), country: cf.country ?? "", city: cf.city ?? "", x: 0.5, y: 0.5 }
+
+    // serializeAttachment persists meta with the WS — survives DO hibernation
+    this.state.acceptWebSocket(server)
+    server.serializeAttachment(meta)
+
+    server.send(JSON.stringify({ type: "init", id: meta.id }))
+    server.send(JSON.stringify({ type: "counts", counts: this.counts }))
+    server.send(JSON.stringify({ type: "todo-state", checked: [...this.checkedTodos] }))
+    this.broadcastCursors()
+
+    return new Response(null, { status: 101, webSocket: client })
+  }
+
+  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
+    try {
+      // Reload counts if DO woke from hibernation
+      if (!this.countsLoaded) {
+        this.counts = (await this.state.storage.get<Record<string, number>>("counts")) ?? {}
+        this.countsLoaded = true
+      }
+
+      const msg = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message))
+      const meta: SessionMeta = ws.deserializeAttachment()
+      if (!meta) return
+
+      if (msg.type === "cursor") {
+        meta.x = clamp01(msg.x)
+        meta.y = clamp01(msg.y)
+        ws.serializeAttachment(meta)
+        this.broadcastCursors()
+      } else if (msg.type === "react" && ALLOWED_EMOJIS.has(msg.emoji)) {
+        this.counts[msg.emoji] = (this.counts[msg.emoji] ?? 0) + 1
+        this.state.storage.put("counts", this.counts)
+        this.broadcast({ type: "counts", counts: this.counts })
+        // Don't echo reaction back to sender — they already spawned it optimistically
+        this.broadcastExcept(ws, { type: "reaction", id: crypto.randomUUID(), emoji: msg.emoji })
+      } else if (msg.type === "todo-toggle" && typeof msg.text === "string") {
+        if (!this.checkedLoaded) {
+          this.checkedTodos = new Set(await this.state.storage.get<string[]>("checked-todos") ?? [])
+          this.checkedLoaded = true
+        }
+        if (this.checkedTodos.has(msg.text)) this.checkedTodos.delete(msg.text)
+        else this.checkedTodos.add(msg.text)
+        const checked = [...this.checkedTodos]
+        this.state.storage.put("checked-todos", checked)
+        this.broadcast({ type: "todo-state", checked })
+      }
+    } catch {}
+  }
+
+  webSocketClose(_ws: WebSocket) { this.broadcastCursors() }
+  webSocketError(_ws: WebSocket) { this.broadcastCursors() }
+
+  private broadcast(msg: object) {
+    const data = JSON.stringify(msg)
+    for (const ws of this.state.getWebSockets()) { try { ws.send(data) } catch {} }
+  }
+
+  private broadcastExcept(skip: WebSocket, msg: object) {
+    const data = JSON.stringify(msg)
+    for (const ws of this.state.getWebSockets()) { if (ws !== skip) try { ws.send(data) } catch {} }
+  }
+
+  private broadcastCursors() {
+    const cursors = this.state.getWebSockets()
+      .map(ws => ws.deserializeAttachment() as SessionMeta | null)
+      .filter((m): m is SessionMeta => m !== null)
+      .map(({ id, x, y, country, city }) => ({ id, x, y, country, city }))
+    this.broadcast({ type: "cursors", cursors })
+  }
+}
+
+function clamp01(n: unknown): number {
+  const v = typeof n === "number" ? n : 0
+  return Math.max(0, Math.min(1, v))
 }
 
 // ── Parser ────────────────────────────────────────────────────────────────────
@@ -61,6 +173,19 @@ function parseHistory(content: string) {
     .filter(Boolean) as { date: string; compileRate: number; correctRate: number; overallCompletion: number; passesReal: number; stubs: number }[]
 }
 
+function parseTodoList(content: string): { text: string; agentDone: boolean }[] {
+  const src = extractSection(content, "Todo List")
+  return src
+    .split("\n")
+    .filter(l => /^[-*]/.test(l))
+    .map(l => {
+      const done = /^[-*]\s+\[x\]/i.test(l)
+      const text = l.replace(/^[-*]\s+\[[ x]\]\s*/i, "").replace(/\*\*/g, "").trim()
+      return text ? { text, agentDone: done } : null
+    })
+    .filter((x): x is { text: string; agentDone: boolean } => x !== null)
+}
+
 function parseState(content: string) {
   const s = extractSection(content, "Metrics.*?")
   const n = (rx: RegExp) => parseFloat(content.match(rx)?.[1] ?? "0") || 0
@@ -94,6 +219,7 @@ function parseState(content: string) {
     completedThisSession: parseBulletList(extractSection(content, "Completed This Session")),
     blockedOn:            parseBulletList(extractSection(content, "Blocked On")),
     nextActions:          parseBulletList(extractSection(content, "Next 3 Actions")),
+    todoItems:            parseTodoList(content),
     passes,
     overallCompletion,
     passStats: { real, partial, stub, total },
@@ -197,6 +323,11 @@ export default {
       }
     }
 
+    if (pathname === "/api/ws") {
+      const id = env.ROOM.idFromName("main")
+      return env.ROOM.get(id).fetch(request)
+    }
+
     if (pathname === "/api/events") {
       try {
         const state = parseState(await fetchStateFile(env.GITHUB_TOKEN))
@@ -218,6 +349,24 @@ export default {
         })
       } catch (e) {
         return Response.json({ error: String(e) }, { status: 500, headers: cors })
+      }
+    }
+
+    if (pathname === "/" || pathname === "") {
+      try {
+        const [htmlRes, state, history] = await Promise.all([
+          env.ASSETS.fetch(request),
+          fetchStateFile(env.GITHUB_TOKEN).then(parseState),
+          fetchGitHistory(env.GITHUB_TOKEN),
+        ])
+        const html = await htmlRes.text()
+        const script = `<script>window.__INITIAL_STATE__=${JSON.stringify(state)};window.__INITIAL_HISTORY__=${JSON.stringify(history)}</script>`
+        const injected = html.replace("</head>", script + "\n</head>")
+        return new Response(injected, {
+          headers: { "Content-Type": "text/html;charset=UTF-8", "Cache-Control": "no-store" },
+        })
+      } catch {
+        return env.ASSETS.fetch(request)
       }
     }
 
