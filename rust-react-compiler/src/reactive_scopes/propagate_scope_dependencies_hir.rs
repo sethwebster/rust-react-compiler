@@ -230,6 +230,19 @@ fn resolve_dep_path_inner(
                     }
                     return None;
                 }
+                // NewExpression allocates — trace through args.
+                InstructionValue::NewExpression { args, .. } => {
+                    for arg in args {
+                        let val_id = match arg {
+                            crate::hir::hir::CallArg::Place(p) => p.identifier,
+                            crate::hir::hir::CallArg::Spread(s) => s.place.identifier,
+                        };
+                        if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, range_start, depth + 1) {
+                            return Some(result);
+                        }
+                    }
+                    return None;
+                }
                 _ => {}
             }
         }
@@ -279,6 +292,18 @@ fn resolve_dep_path_inner(
                         crate::hir::hir::ArrayElement::Place(p) => p.identifier,
                         crate::hir::hir::ArrayElement::Spread(s) => s.place.identifier,
                         crate::hir::hir::ArrayElement::Hole => continue,
+                    };
+                    if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, range_start, depth + 1) {
+                        return Some(result);
+                    }
+                }
+                return None;
+            }
+            InstructionValue::NewExpression { args, .. } => {
+                for arg in args {
+                    let val_id = match arg {
+                        crate::hir::hir::CallArg::Place(p) => p.identifier,
+                        crate::hir::hir::CallArg::Spread(s) => s.place.identifier,
                     };
                     if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, range_start, depth + 1) {
                         return Some(result);
