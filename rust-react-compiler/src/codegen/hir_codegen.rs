@@ -1262,8 +1262,11 @@ impl<'a> Codegen<'a> {
                     let mut vis2 = visited.clone();
                     if let Some(ubid) = update_bid { vis2.insert(ubid); }
                     vis2.insert(test_bid);
+                    // stop_at = update block (if present), so the body's implicit
+                    // continue to the update block doesn't emit a spurious `continue;`.
+                    let body_stop = update_bid.unwrap_or(test_bid);
                     self.emit_cfg_region(
-                        loop_bid, Some(test_bid), body_pad, out,
+                        loop_bid, Some(body_stop), body_pad, out,
                         &mut vis2, emitted_scopes, scope_index, instr_scope, inlined_ids, scope_instrs,
                     );
                     let _ = writeln!(out, "{pad}}}");

@@ -91,8 +91,16 @@ fn remove_dead_instructions(hir: &mut HIRFunction, env: Option<&Environment>) {
     }
 
     // Collect uses from terminals and instructions in all reachable blocks.
+    // Also collect for-loop update block identifiers separately (below).
+    let mut for_update_blocks: Vec<BlockId> = Vec::new();
     for block in hir.body.blocks.values() {
         collect_terminal_uses(&block.terminal, &mut used);
+        // For-loop update blocks must survive DCE — the update expression
+        // (e.g. `i = i + 1`) is semantically required even if the loop
+        // variable doesn't escape.
+        if let Terminal::For { update: Some(ubid), .. } = &block.terminal {
+            for_update_blocks.push(*ubid);
+        }
         for instr in &block.instructions {
             collect_instruction_uses(&instr.value, &mut used);
         }
@@ -100,6 +108,15 @@ fn remove_dead_instructions(hir: &mut HIRFunction, env: Option<&Environment>) {
         for phi in &block.phis {
             for (_, operand) in &phi.operands {
                 used.insert(operand.identifier);
+            }
+        }
+    }
+    // Mark all identifiers in for-loop update blocks as used.
+    for ubid in &for_update_blocks {
+        if let Some(block) = hir.body.blocks.get(ubid) {
+            for instr in &block.instructions {
+                used.insert(instr.lvalue.identifier);
+                collect_instruction_uses(&instr.value, &mut used);
             }
         }
     }
