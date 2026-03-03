@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::hir::environment::Environment;
 use crate::hir::hir::{
-    HIRFunction, IdentifierId, InstructionValue, NonLocalBinding, ScopeId, Terminal,
+    ArrayElement, DeclarationId, HIRFunction, IdentifierId, InstructionValue, NonLocalBinding,
+    ObjectPatternProperty, Pattern, ScopeId, Terminal,
 };
 use crate::hir::visitors::each_instruction_value_operand;
 
@@ -20,8 +21,16 @@ enum MemoLevel {
     Never,
 }
 
+fn join_levels(a: MemoLevel, b: MemoLevel) -> MemoLevel {
+    match (a, b) {
+        (MemoLevel::Memoized, _) | (_, MemoLevel::Memoized) => MemoLevel::Memoized,
+        (MemoLevel::Conditional, _) | (_, MemoLevel::Conditional) => MemoLevel::Conditional,
+        (MemoLevel::Unmemoized, _) | (_, MemoLevel::Unmemoized) => MemoLevel::Unmemoized,
+        _ => MemoLevel::Never,
+    }
+}
+
 fn is_hook_name(name: &str) -> bool {
-    // Strip at most one leading _ (matches TS behavior).
     let n = name.strip_prefix('_').unwrap_or(name);
     if let Some(rest) = n.strip_prefix("use") {
         rest.starts_with(|c: char| c.is_uppercase())
@@ -86,16 +95,44 @@ fn instruction_memo_level(value: &InstructionValue) -> MemoLevel {
     }
 }
 
+/// A node in the graph, keyed by DeclarationId (groups all SSA versions of the same var).
+/// This mirrors the TS compiler's use of DeclarationId over IdentifierId.
+struct Node {
+    level: MemoLevel,
+    deps: Vec<DeclarationId>,
+    scopes: HashSet<ScopeId>,
+    seen: bool,
+    memoized: bool,
+}
+
+/// Scope node tracking its dependencies (for force-memoization).
+/// At prune_non_escaping time, scope.dependencies may be empty (propagate_scope_dependencies
+/// hasn't run yet), so we build our own dep graph from instruction operands.
+struct ScopeNode {
+    deps: Vec<DeclarationId>,
+    seen: bool,
+}
+
 /// Prune reactive scopes whose outputs don't need memoization.
 ///
 /// Port of the TS compiler's PruneNonEscapingScopes pass.
-/// Key insight: `Never` level nodes (BinaryExpression, Primitive, etc.) have
-/// no deps — they stop backward traversal. So `bar(props)` result won't be
-/// discovered through a BinaryExpression barrier.
+/// Uses DeclarationId (not IdentifierId) to correctly group SSA versions of the same
+/// variable, matching the TS compiler's approach.
 pub fn run_with_env(hir: &HIRFunction, env: &mut Environment) {
     if env.scopes.is_empty() {
         return;
     }
+
+    // Build IdentifierId → DeclarationId map from the environment.
+    let id_to_decl: HashMap<IdentifierId, DeclarationId> = env
+        .identifiers
+        .iter()
+        .map(|(&iid, ident)| (iid, ident.declaration_id))
+        .collect();
+
+    let decl_for = |iid: IdentifierId| -> DeclarationId {
+        id_to_decl.get(&iid).copied().unwrap_or(DeclarationId(iid.0))
+    };
 
     // Build global name map for hook detection.
     let mut id_to_global_name: HashMap<IdentifierId, String> = HashMap::new();
@@ -114,59 +151,199 @@ pub fn run_with_env(hir: &HIRFunction, env: &mut Environment) {
         }
     }
 
-    // Build memo nodes for every instruction.
-    // For `Never` level nodes, deps are EMPTY (no rvalues) — they're barriers.
-    // For `Unmemoized` and above, deps are populated from operands.
-    let mut nodes: HashMap<IdentifierId, (MemoLevel, Vec<IdentifierId>, Option<ScopeId>)> = HashMap::new();
-    let mut store_targets: HashMap<IdentifierId, IdentifierId> = HashMap::new();
+    // Build per-scope dependency lists from instructions.
+    // We track which declarations are read as operands while inside a scope's range.
+    // Keyed by ScopeId → set of decl_ids that are deps.
+    // We approximate: for each instruction whose lvalue belongs to a scope, its operands
+    // are deps of that scope.
+    let mut scope_dep_decls: HashMap<ScopeId, HashSet<DeclarationId>> = HashMap::new();
+    for (_, block) in &hir.body.blocks {
+        for instr in &block.instructions {
+            let lv_decl = decl_for(instr.lvalue.identifier);
+            // Look up this instruction's lvalue scope.
+            let lv_scope = env
+                .get_identifier(instr.lvalue.identifier)
+                .and_then(|i| i.scope);
+
+            if let Some(sid) = lv_scope {
+                // Add all operand decl_ids as scope deps.
+                let entry = scope_dep_decls.entry(sid).or_default();
+                for op in each_instruction_value_operand(&instr.value) {
+                    let op_decl = decl_for(op.identifier);
+                    if op_decl != lv_decl {
+                        entry.insert(op_decl);
+                    }
+                }
+                // For StoreLocal, also add the stored value's decl.
+                if let InstructionValue::StoreLocal { value, lvalue, .. } = &instr.value {
+                    entry.insert(decl_for(value.identifier));
+                    entry.insert(decl_for(lvalue.place.identifier));
+                }
+                // For Destructure, add the source value's decl.
+                if let InstructionValue::Destructure { value, .. } = &instr.value {
+                    entry.insert(decl_for(value.identifier));
+                }
+            }
+        }
+    }
+
+    // Build the nodes graph, keyed by DeclarationId.
+    // For each instruction, we add entries for:
+    //  - The instruction's lvalue (keyed by its decl_id)
+    //  - For StoreLocal: also the target variable's decl_id
+    //  - For Destructure: also each pattern-bound variable's decl_id (Conditional)
+    let mut nodes: HashMap<DeclarationId, Node> = HashMap::new();
+
+    // Definitions: LoadLocal/LoadContext maps lvalue decl_id → source decl_id.
+    // This lets us resolve indirections: `t = LoadLocal(x)` means visiting t traces to x.
+    let mut definitions: HashMap<DeclarationId, DeclarationId> = HashMap::new();
 
     for (_, block) in &hir.body.blocks {
         for instr in &block.instructions {
             let lv = instr.lvalue.identifier;
+            let lv_decl = decl_for(lv);
             let level = instruction_memo_level(&instr.value);
             let scope = env.get_identifier(lv).and_then(|i| i.scope);
 
-            let deps = match level {
+            let deps: Vec<DeclarationId> = match level {
                 MemoLevel::Never => {
                     // Never nodes have NO deps — barrier to backward traversal.
                     vec![]
                 }
                 _ => {
-                    // Memoized, Conditional, and Unmemoized nodes propagate through operands.
                     match &instr.value {
-                        InstructionValue::StoreLocal { value, .. } => {
-                            vec![value.identifier]
-                        }
-                        InstructionValue::StoreContext { value, .. } => {
-                            vec![value.identifier]
-                        }
                         InstructionValue::LoadLocal { place, .. }
                         | InstructionValue::LoadContext { place, .. } => {
-                            vec![place.identifier]
+                            let src_decl = decl_for(place.identifier);
+                            // Record this as a definition alias.
+                            definitions.insert(lv_decl, src_decl);
+                            vec![src_decl]
+                        }
+                        InstructionValue::StoreLocal { value, lvalue, .. } => {
+                            let val_decl = decl_for(value.identifier);
+                            let target_decl = decl_for(lvalue.place.identifier);
+                            // The StoreLocal instruction itself is Conditional.
+                            // Also ensure the target variable node exists and points to value.
+                            let target_node = nodes.entry(target_decl).or_insert_with(|| Node {
+                                level: MemoLevel::Conditional,
+                                deps: vec![],
+                                scopes: HashSet::new(),
+                                seen: false,
+                                memoized: false,
+                            });
+                            if !target_node.deps.contains(&val_decl) {
+                                target_node.deps.push(val_decl);
+                            }
+                            if let Some(sid) = scope {
+                                target_node.scopes.insert(sid);
+                            }
+                            vec![val_decl]
+                        }
+                        InstructionValue::StoreContext { value, lvalue, .. } => {
+                            let val_decl = decl_for(value.identifier);
+                            let target_decl = decl_for(lvalue.place.identifier);
+                            let target_node = nodes.entry(target_decl).or_insert_with(|| Node {
+                                level: MemoLevel::Conditional,
+                                deps: vec![],
+                                scopes: HashSet::new(),
+                                seen: false,
+                                memoized: false,
+                            });
+                            if !target_node.deps.contains(&val_decl) {
+                                target_node.deps.push(val_decl);
+                            }
+                            if let Some(sid) = scope {
+                                target_node.scopes.insert(sid);
+                            }
+                            vec![val_decl]
+                        }
+                        InstructionValue::Destructure { value, lvalue, .. } => {
+                            let val_decl = decl_for(value.identifier);
+                            // Register each pattern-bound variable as a Conditional node
+                            // that depends on the source value.
+                            let pattern_decls = collect_pattern_decls(&lvalue.pattern, &id_to_decl);
+                            for pd in &pattern_decls {
+                                let pnode = nodes.entry(*pd).or_insert_with(|| Node {
+                                    level: MemoLevel::Conditional,
+                                    deps: vec![],
+                                    scopes: HashSet::new(),
+                                    seen: false,
+                                    memoized: false,
+                                });
+                                if !pnode.deps.contains(&val_decl) {
+                                    pnode.deps.push(val_decl);
+                                }
+                                if let Some(sid) = scope {
+                                    pnode.scopes.insert(sid);
+                                }
+                            }
+                            vec![val_decl]
                         }
                         _ => {
                             each_instruction_value_operand(&instr.value)
                                 .into_iter()
-                                .map(|op| op.identifier)
+                                .map(|op| decl_for(op.identifier))
                                 .collect()
                         }
                     }
                 }
             };
 
-            if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
-                store_targets.insert(lvalue.place.identifier, value.identifier);
+            // Insert or join node for this instruction's lvalue decl.
+            let node = nodes.entry(lv_decl).or_insert_with(|| Node {
+                level,
+                deps: vec![],
+                scopes: HashSet::new(),
+                seen: false,
+                memoized: false,
+            });
+            node.level = join_levels(node.level, level);
+            for d in &deps {
+                if !node.deps.contains(d) {
+                    node.deps.push(*d);
+                }
             }
+            if let Some(sid) = scope {
+                node.scopes.insert(sid);
+            }
+        }
 
-            nodes.insert(lv, (level, deps, scope));
+        // Also process phi nodes: phi result depends on all operands.
+        for phi in &block.phis {
+            let phi_decl = decl_for(phi.place.identifier);
+            let phi_scope = env.get_identifier(phi.place.identifier).and_then(|i| i.scope);
+            let node = nodes.entry(phi_decl).or_insert_with(|| Node {
+                level: MemoLevel::Conditional,
+                deps: vec![],
+                scopes: HashSet::new(),
+                seen: false,
+                memoized: false,
+            });
+            for (_, op_place) in &phi.operands {
+                let op_decl = decl_for(op_place.identifier);
+                if !node.deps.contains(&op_decl) {
+                    node.deps.push(op_decl);
+                }
+            }
+            if let Some(sid) = phi_scope {
+                node.scopes.insert(sid);
+            }
         }
     }
 
-    // Collect escaping identifiers.
-    let mut escaping: Vec<IdentifierId> = Vec::new();
+    // Build scope nodes from scope_dep_decls.
+    let mut scope_nodes: HashMap<ScopeId, ScopeNode> = scope_dep_decls
+        .into_iter()
+        .map(|(sid, deps)| {
+            (sid, ScopeNode { deps: deps.into_iter().collect(), seen: false })
+        })
+        .collect();
+
+    // Collect escaping identifiers (as DeclarationIds).
+    let mut escaping: Vec<DeclarationId> = Vec::new();
     for (_, block) in &hir.body.blocks {
         if let Terminal::Return { value, .. } = &block.terminal {
-            escaping.push(value.identifier);
+            escaping.push(decl_for(value.identifier));
         }
         for instr in &block.instructions {
             if let InstructionValue::CallExpression { callee, args, .. } = &instr.value {
@@ -178,8 +355,8 @@ pub fn run_with_env(hir: &HIRFunction, env: &mut Environment) {
                     for arg in args {
                         use crate::hir::hir::CallArg;
                         match arg {
-                            CallArg::Place(p) => { escaping.push(p.identifier); }
-                            CallArg::Spread(s) => { escaping.push(s.place.identifier); }
+                            CallArg::Place(p) => { escaping.push(decl_for(p.identifier)); }
+                            CallArg::Spread(s) => { escaping.push(decl_for(s.place.identifier)); }
                         }
                     }
                 }
@@ -187,27 +364,36 @@ pub fn run_with_env(hir: &HIRFunction, env: &mut Environment) {
         }
     }
 
-    // Visit each escaping identifier and propagate memoization.
-    let mut memoized_set: HashSet<IdentifierId> = HashSet::new();
-    let mut visited: HashSet<IdentifierId> = HashSet::new();
-
     if std::env::var("RC_DEBUG").is_ok() {
-        eprintln!("[prune_non_escaping] escaping ids: {:?}", escaping.iter().map(|id| id.0).collect::<Vec<_>>());
-        eprintln!("[prune_non_escaping] store_targets: {:?}", store_targets.iter().map(|(k, v)| (k.0, v.0)).collect::<Vec<_>>());
-    }
-    for &id in &escaping {
-        visit(id, false, &nodes, &store_targets, &mut memoized_set, &mut visited, env);
-    }
-    if std::env::var("RC_DEBUG").is_ok() {
-        eprintln!("[prune_non_escaping] memoized: {:?}", memoized_set.iter().map(|id| id.0).collect::<Vec<_>>());
+        eprintln!("[prune_non_escaping] escaping decls: {:?}", escaping.iter().map(|id| id.0).collect::<Vec<_>>());
+        eprintln!("[prune_non_escaping] definitions: {:?}", definitions.iter().map(|(k, v)| (k.0, v.0)).collect::<Vec<_>>());
     }
 
-    // Prune scopes where no declaration is memoized.
+    // Visit each escaping decl and propagate memoization.
+    for &decl in &escaping {
+        visit(decl, false, &mut nodes, &mut scope_nodes, &definitions);
+    }
+
+    // Collect memoized decl ids.
+    let memoized_decls: HashSet<DeclarationId> = nodes
+        .iter()
+        .filter(|(_, n)| n.memoized)
+        .map(|(&d, _)| d)
+        .collect();
+
+    if std::env::var("RC_DEBUG").is_ok() {
+        eprintln!("[prune_non_escaping] memoized decls: {:?}", memoized_decls.iter().map(|id| id.0).collect::<Vec<_>>());
+    }
+
+    // Prune scopes where no declaration's decl_id is in memoized_decls.
     let scopes_to_prune: Vec<ScopeId> = env
         .scopes
         .iter()
         .filter_map(|(&sid, scope)| {
-            let any_memoized = scope.declarations.keys().any(|id| memoized_set.contains(id));
+            let any_memoized = scope.declarations.keys().any(|iid| {
+                let d = id_to_decl.get(iid).copied().unwrap_or(DeclarationId(iid.0));
+                memoized_decls.contains(&d)
+            });
             if !any_memoized {
                 if std::env::var("RC_DEBUG").is_ok() {
                     eprintln!(
@@ -233,38 +419,89 @@ pub fn run_with_env(hir: &HIRFunction, env: &mut Environment) {
     }
 }
 
-fn visit(
-    id: IdentifierId,
-    force: bool,
-    nodes: &HashMap<IdentifierId, (MemoLevel, Vec<IdentifierId>, Option<ScopeId>)>,
-    store_targets: &HashMap<IdentifierId, IdentifierId>,
-    memoized_set: &mut HashSet<IdentifierId>,
-    visited: &mut HashSet<IdentifierId>,
-    env: &Environment,
-) -> bool {
-    if !visited.insert(id) {
-        return memoized_set.contains(&id);
-    }
-
-    let (level, deps, scope) = if let Some(node) = nodes.get(&id) {
-        (node.0, node.1.clone(), node.2)
-    } else if let Some(&val_id) = store_targets.get(&id) {
-        // Named variable (StoreLocal target) — trace to stored value.
-        // If the value is memoized, also add this id to memoized_set
-        // so scope declarations using this var id are preserved.
-        let result = visit(val_id, force, nodes, store_targets, memoized_set, visited, env);
-        if result {
-            memoized_set.insert(id);
+/// Collect DeclarationIds from all pattern-bound variables in a Destructure pattern.
+fn collect_pattern_decls(
+    pattern: &Pattern,
+    id_to_decl: &HashMap<IdentifierId, DeclarationId>,
+) -> Vec<DeclarationId> {
+    let mut out = Vec::new();
+    match pattern {
+        Pattern::Object(obj) => {
+            for prop in &obj.properties {
+                match prop {
+                    ObjectPatternProperty::Property(p) => {
+                        let d = id_to_decl.get(&p.place.identifier)
+                            .copied()
+                            .unwrap_or(DeclarationId(p.place.identifier.0));
+                        out.push(d);
+                    }
+                    ObjectPatternProperty::Spread(s) => {
+                        let d = id_to_decl.get(&s.place.identifier)
+                            .copied()
+                            .unwrap_or(DeclarationId(s.place.identifier.0));
+                        out.push(d);
+                    }
+                }
+            }
         }
-        return result;
-    } else {
-        return false;
+        Pattern::Array(arr) => {
+            for item in &arr.items {
+                match item {
+                    ArrayElement::Place(p) => {
+                        let d = id_to_decl.get(&p.identifier)
+                            .copied()
+                            .unwrap_or(DeclarationId(p.identifier.0));
+                        out.push(d);
+                    }
+                    ArrayElement::Spread(s) => {
+                        let d = id_to_decl.get(&s.place.identifier)
+                            .copied()
+                            .unwrap_or(DeclarationId(s.place.identifier.0));
+                        out.push(d);
+                    }
+                    ArrayElement::Hole => {}
+                }
+            }
+        }
+    }
+    out
+}
+
+fn visit(
+    id: DeclarationId,
+    force: bool,
+    nodes: &mut HashMap<DeclarationId, Node>,
+    scope_nodes: &mut HashMap<ScopeId, ScopeNode>,
+    definitions: &HashMap<DeclarationId, DeclarationId>,
+) -> bool {
+    // Resolve definition aliases (LoadLocal indirections).
+    let resolved = definitions.get(&id).copied().unwrap_or(id);
+
+    let node = match nodes.get(&resolved) {
+        Some(_) => resolved,
+        None => {
+            // Unknown id (e.g., params not tracked). Return false.
+            return false;
+        }
     };
 
-    // Visit ALL dependencies (don't short-circuit — need to visit every path).
+    // If already seen, return cached result.
+    // Note: we use seen=true to prevent infinite loops.
+    if nodes[&node].seen {
+        return nodes[&node].memoized;
+    }
+    nodes.get_mut(&node).unwrap().seen = true;
+    nodes.get_mut(&node).unwrap().memoized = false; // Temporary
+
+    // Clone deps and scopes to avoid borrow conflicts.
+    let deps: Vec<DeclarationId> = nodes[&node].deps.clone();
+    let scopes: Vec<ScopeId> = nodes[&node].scopes.iter().copied().collect();
+    let level = nodes[&node].level;
+
+    // Visit all dependencies.
     let mut has_memoized_dep = false;
-    for &dep_id in &deps {
-        if visit(dep_id, false, nodes, store_targets, memoized_set, visited, env) {
+    for dep_id in &deps {
+        if visit(*dep_id, false, nodes, scope_nodes, definitions) {
             has_memoized_dep = true;
         }
     }
@@ -277,17 +514,37 @@ fn visit(
     };
 
     if should_memoize {
-        memoized_set.insert(id);
+        nodes.get_mut(&node).unwrap().memoized = true;
 
         // Force-memoize all scope dependencies.
-        if let Some(sid) = scope {
-            if let Some(scope_data) = env.scopes.get(&sid) {
-                for dep in &scope_data.dependencies {
-                    visit(dep.place.identifier, true, nodes, store_targets, memoized_set, visited, env);
-                }
-            }
+        for sid in &scopes {
+            force_memoize_scope(*sid, nodes, scope_nodes, definitions);
         }
     }
 
     should_memoize
+}
+
+fn force_memoize_scope(
+    sid: ScopeId,
+    nodes: &mut HashMap<DeclarationId, Node>,
+    scope_nodes: &mut HashMap<ScopeId, ScopeNode>,
+    definitions: &HashMap<DeclarationId, DeclarationId>,
+) {
+    let already_seen = match scope_nodes.get_mut(&sid) {
+        Some(sn) => {
+            if sn.seen {
+                return;
+            }
+            sn.seen = true;
+            false
+        }
+        None => return,
+    };
+    let _ = already_seen;
+
+    let deps: Vec<DeclarationId> = scope_nodes[&sid].deps.clone();
+    for dep in deps {
+        visit(dep, true, nodes, scope_nodes, definitions);
+    }
 }

@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 22.1% (275/1244) |
+| Correct rate | 22.7% (282/1244) |
 | Error (expected) | 196 |
 | Error (unexpected) | 0 |
 | Uncommitted changes | 0 |
@@ -72,10 +72,10 @@ Completed:
 
 ## Completed This Session
 
-- `prune_non_escaping_scopes.rs`: STUB → REAL (282 LOC) — memoization-level scope pruning
+- `prune_non_escaping_scopes.rs`: STUB → REAL — DeclarationId-based memoization-level scope pruning
 - `hir_codegen.rs`: dep expression hoisting for non-trivial deps (function calls)
 - `pipeline.rs`: moved prune_non_escaping_scopes before dep propagation
-- Correct rate: 22.0% → 22.1% (274 → 275, net +1)
+- Correct rate: 22.0% → 22.7% (274 → 282, net +8)
 
 ---
 
@@ -185,4 +185,4 @@ codegen (currently bypasses ReactiveFunction) → oxc_codegen → JS output
 | 2026-03-02 | 84.2 | 17.3 | 29 | 14 | 38 |
 | 2026-03-02 | 84.2 | 21.5 | — | 14 | 38 | codegen, SSA, scope passes |
 | 2026-03-02 | 84.2 | 22.0 | — | 15 | 37 | drop_manual_memoization, IIFE unwrap |
-| 2026-03-03 | 84.2 | 22.1 | — | 16 | 36 | PruneNonEscapingScopes, dep hoisting |
+| 2026-03-03 | 84.2 | 22.7 | — | 16 | 36 | PruneNonEscapingScopes (DeclarationId), dep hoisting |
