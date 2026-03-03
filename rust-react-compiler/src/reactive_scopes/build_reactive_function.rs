@@ -384,6 +384,36 @@ impl<'a> Context<'a> {
                 Some(*fallthrough)
             }
 
+            Terminal::ReactiveScope { scope, block: scope_block, fallthrough, .. } => {
+                self.close_scope(&mut scope_body, out);
+                self.scheduled.insert(*fallthrough);
+
+                let body = self.hir.body.blocks.get(scope_block)
+                    .map(|b| self.traverse_block(b)).unwrap_or_default();
+
+                self.scheduled.remove(fallthrough);
+                out.push(ReactiveStatement::Scope(ReactiveScopeBlock {
+                    scope: scope.clone(),
+                    instructions: body,
+                }));
+                Some(*fallthrough)
+            }
+
+            Terminal::PrunedScope { scope, block: scope_block, fallthrough, .. } => {
+                self.close_scope(&mut scope_body, out);
+                self.scheduled.insert(*fallthrough);
+
+                let body = self.hir.body.blocks.get(scope_block)
+                    .map(|b| self.traverse_block(b)).unwrap_or_default();
+
+                self.scheduled.remove(fallthrough);
+                out.push(ReactiveStatement::PrunedScope(PrunedReactiveScopeBlock {
+                    scope: scope.clone(),
+                    instructions: body,
+                }));
+                Some(*fallthrough)
+            }
+
             // Terminals handled as inner blocks or lowered away.
             _ => {
                 self.close_scope(&mut scope_body, out);

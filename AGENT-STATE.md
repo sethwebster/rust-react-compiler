@@ -38,7 +38,7 @@ Update the following before stopping:
 | Correct rate | 24.1% (300/1244) |
 | Error (expected) | 196 |
 | Error (unexpected) | 0 |
-| Uncommitted changes | 10 files (8 modified, 2 untracked) |
+| Uncommitted changes | 6 files (5 modified, 1 untracked) |
 
 ---
 
@@ -47,7 +47,7 @@ Update the following before stopping:
 **Active plan**: [`plans/correctness-300-to-500.md`](./plans/correctness-300-to-500.md)
 
 Next up: **Phase 3 — ReactiveFunction Critical Path** (target: 300 → 400+)
-- [ ] 3a. Implement `build_reactive_scope_terminals_hir` from TS `BuildReactiveScopeTerminalsHIR.ts`
+- [ ] 3a. Stabilize `build_reactive_scope_terminals_hir` (implemented behind feature flag; currently regresses output when enabled)
 - [ ] 3b. Continue `build_reactive_function` from skeleton to full CFG→tree conversion
 - [ ] 3c. Implement `codegen_reactive_function` and wire dual codegen fallback
 
@@ -81,6 +81,8 @@ Next up: **Phase 3 — ReactiveFunction Critical Path** (target: 300 → 400+)
 - [ ] Fix `prune_non_reactive_dependencies` (PARTIAL → REAL)
 - [ ] Fix `constant_propagation` (PARTIAL → REAL)
 - [x] Fix compile regression: thread `phi_operands` through dep-resolution callsites
+- [x] Port `build_reactive_scope_terminals_hir` (guarded by `RC_ENABLE_SCOPE_TERMINALS_HIR`)
+- [x] Port `flatten_reactive_loops_hir` (guarded by `RC_ENABLE_FLATTEN_REACTIVE_LOOPS`)
 
 ---
 
@@ -99,6 +101,10 @@ Next up: **Phase 3 — ReactiveFunction Critical Path** (target: 300 → 400+)
 - `propagate_scope_dependencies_hir.rs`: added phi tracing map and fixed missing `phi_operands` call plumbing
 - Fixture suite compile restored after propagation-signature regression
 - `is-port-done-yet`: added push API + realtime agent activity strip + milestone reaction burst
+- `build_reactive_scope_terminals_hir.rs`: implemented TS-style block rewrite pipeline (scope start/end rewrites, phi predecessor remap, RPO reorder, predecessor fixup)
+- `flatten_reactive_loops_hir.rs`: implemented TS loop-pruning behavior (`ReactiveScope` → `PrunedScope` inside active loops)
+- `build_reactive_function.rs`: added explicit handling for `Terminal::ReactiveScope` and `Terminal::PrunedScope`
+- `pipeline.rs`: wired scope-terminal pass to env-aware entrypoint (`run_with_env`)
 
 ---
 
@@ -109,6 +115,9 @@ Next up: **Phase 3 — ReactiveFunction Critical Path** (target: 300 → 400+)
   - Needs: scope terminals + full terminal/branch/loop coverage in tree builder
 - Codegen (`hir_codegen.rs`) currently operates on raw `HIR`, not `ReactiveFunction`
   - Fix requires full tree build + dual codegen integration first
+- Enabling `RC_ENABLE_SCOPE_TERMINALS_HIR=1` currently regresses correctness (24.1% → 20.2%)
+  - Known symptom: some loops emit incorrect iterator source (`for...of undefined`) and duplicate returns (`return x; return x;`)
+  - Example fixture: `for-of-simple.js` (correct baseline, regresses under scope-terminals flag)
 
 ---
 
@@ -141,14 +150,14 @@ Next up: **Phase 3 — ReactiveFunction Critical Path** (target: 300 → 400+)
 | promote_used_temporaries | reactive_scopes/promote_used_temporaries.rs | REAL | 45 |
 | prune_non_reactive_dependencies | reactive_scopes/prune_non_reactive_dependencies.rs | PARTIAL | 15 |
 | **build_reactive_function** | reactive_scopes/build_reactive_function.rs | **PARTIAL** | **~500** |
-| build_reactive_scope_terminals_hir | reactive_scopes/build_reactive_scope_terminals_hir.rs | STUB | 2 |
+| build_reactive_scope_terminals_hir | reactive_scopes/build_reactive_scope_terminals_hir.rs | PARTIAL (flagged) | ~320 |
 | codegen_reactive_function | reactive_scopes/codegen_reactive_function.rs | STUB | 14 |
 | align_method_call_scopes | reactive_scopes/align_method_call_scopes.rs | STUB | 2 |
 | align_object_method_scopes | reactive_scopes/align_object_method_scopes.rs | STUB | 2 |
 | align_reactive_scopes_to_block_scopes_hir | reactive_scopes/align_reactive_scopes... | STUB | 2 |
 | assert_well_formed_break_targets | reactive_scopes/assert_well_formed_break_targets.rs | STUB | 2 |
 | extract_scope_declarations_from_destructuring | reactive_scopes/extract_scope_decl... | STUB | 2 |
-| flatten_reactive_loops_hir | reactive_scopes/flatten_reactive_loops_hir.rs | STUB | 2 |
+| flatten_reactive_loops_hir | reactive_scopes/flatten_reactive_loops_hir.rs | PARTIAL (flagged) | ~50 |
 | flatten_scopes_with_hooks_or_use_hir | reactive_scopes/flatten_scopes... | STUB | 2 |
 | memoize_fbt_and_macro_operands | reactive_scopes/memoize_fbt_and_macro_operands.rs | STUB | 2 |
 | propagate_early_returns | reactive_scopes/propagate_early_returns.rs | STUB | 2 |
@@ -216,3 +225,4 @@ codegen (currently bypasses ReactiveFunction) → oxc_codegen → JS output
 | 2026-03-03 | 84.2 | 24.1 | — | 16 | 36 | ralph-loop iter2: alloc dep tracing (+4), rename_variables deferred |
 | 2026-03-03 | 84.2 | 24.1 | — | 16 | 36 | ralph-loop iter3: tree builder skeleton, scope inference investigation |
 | 2026-03-03 | 84.2 | 24.1 | — | 16 | 36 | fixed propagate_scope_dependencies compile regression (`phi_operands` threading) |
+| 2026-03-03 | 84.2 | 24.1 | — | 16 | 36 | implemented scope-terminals + loop-flatten passes behind flags; scoped regression isolated (`for-of`/duplicate return under flag) |

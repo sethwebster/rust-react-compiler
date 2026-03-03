@@ -46,7 +46,7 @@ use crate::reactive_scopes::{
     prune_unused_labels_hir::run as prune_unused_labels_hir,
     align_reactive_scopes_to_block_scopes_hir::run_with_env as align_reactive_scopes_to_block_scopes_hir,
     merge_overlapping_reactive_scopes_hir::run_with_env as merge_overlapping_reactive_scopes_hir,
-    build_reactive_scope_terminals_hir::run as build_reactive_scope_terminals_hir,
+    build_reactive_scope_terminals_hir::run_with_env as build_reactive_scope_terminals_hir,
     flatten_reactive_loops_hir::run_with_env as flatten_reactive_loops_hir,
     flatten_scopes_with_hooks_or_use_hir::run_with_env as flatten_scopes_with_hooks_or_use_hir,
     propagate_scope_dependencies_hir::run as propagate_scope_dependencies_hir,
@@ -465,7 +465,7 @@ pub fn run_with_environment(
     prune_unused_labels_hir(hir);
     align_reactive_scopes_to_block_scopes_hir(hir, Some(env));
     merge_overlapping_reactive_scopes_hir(hir, env);
-    build_reactive_scope_terminals_hir(hir);
+    build_reactive_scope_terminals_hir(hir, env);
     flatten_reactive_loops_hir(hir, env);
     flatten_scopes_with_hooks_or_use_hir(hir, env);
     prune_non_escaping_scopes(hir, env);
