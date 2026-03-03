@@ -62,7 +62,7 @@ use crate::reactive_scopes::{
     promote_used_temporaries::run_with_env as promote_used_temporaries,
     extract_scope_declarations_from_destructuring::run as extract_scope_declarations_from_destructuring,
     stabilize_block_ids::run as stabilize_block_ids,
-    rename_variables::run as rename_variables,
+    rename_variables::run_with_env as rename_variables,
     prune_hoisted_contexts::run as prune_hoisted_contexts,
     codegen_reactive_function::{codegen_reactive_function, CodegenOutput},
 };
@@ -478,7 +478,7 @@ pub fn run_with_environment(
     promote_used_temporaries(hir, env);
     extract_scope_declarations_from_destructuring(hir);
     stabilize_block_ids(hir);
-    rename_variables(hir);
+    rename_variables(hir, env);
     prune_hoisted_contexts(hir);
     prune_unused_scopes(hir, env);
     prune_unused_labels(hir);
