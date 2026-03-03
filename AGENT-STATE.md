@@ -220,3 +220,4 @@ codegen (currently bypasses ReactiveFunction) → oxc_codegen → JS output
 | 2026-03-03 | 84.2 | 22.8 | — | 16 | 36 | optional chaining fix, mismatch analysis, plan |
 | 2026-03-03 | 84.2 | 23.1 | — | 16 | 36 | Phase 1 codegen: $tN leak, for-init, lambda hoisting |
 | 2026-03-03 | 84.2 | 23.8 | — | 16 | 36 | switch braces (+3), for-loop update DCE + continue (+6) |
+| 2026-03-03 | 84.2 | 23.8 | — | 16 | 36 | ralph-loop: flatten_reactive_loops attempted/deferred, near-miss analysis |
