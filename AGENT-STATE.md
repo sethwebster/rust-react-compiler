@@ -222,3 +222,4 @@ codegen (currently bypasses ReactiveFunction) → oxc_codegen → JS output
 | 2026-03-03 | 84.2 | 23.8 | — | 16 | 36 | switch braces (+3), for-loop update DCE + continue (+6) |
 | 2026-03-03 | 84.2 | 23.8 | — | 16 | 36 | ralph-loop iter1: flatten_reactive_loops deferred, near-miss analysis |
 | 2026-03-03 | 84.2 | 24.1 | — | 16 | 36 | ralph-loop iter2: alloc dep tracing (+4), rename_variables deferred |
+| 2026-03-03 | 84.2 | 24.1 | — | 16 | 36 | ralph-loop iter3: tree builder skeleton, scope inference investigation |
