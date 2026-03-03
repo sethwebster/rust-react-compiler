@@ -1852,7 +1852,9 @@ impl<'a> Codegen<'a> {
             for (output, cache_var) in analysis.outputs.iter().zip(&output_cache_vars) {
                 if !output.is_named_var {
                     if let Some(ref name) = output.out_name {
-                        let _ = writeln!(out, "{pad}{} {name} = {cache_var};", output.out_kw);
+                        if name != cache_var {
+                            let _ = writeln!(out, "{pad}{} {name} = {cache_var};", output.out_kw);
+                        }
                     }
                 }
             }
