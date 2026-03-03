@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 22.0% (274/1244) |
+| Correct rate | 22.1% (275/1244) |
 | Error (expected) | 196 |
 | Error (unexpected) | 0 |
 | Uncommitted changes | 0 |
@@ -44,12 +44,13 @@ Update the following before stopping:
 
 ## Current Task
 
-**Driving up correctness rate** — drop_manual_memoization done, IIFE unwrap in codegen done.
-Next: analyze remaining 774 mismatches for highest-impact patterns.
+**Driving up correctness rate** — PruneNonEscapingScopes + dep hoisting done.
+Next: analyze remaining 773 mismatches for highest-impact patterns.
 
 Completed:
+- `prune_non_escaping_scopes`: STUB → REAL (memoization-level-based scope pruning)
+- codegen dep hoisting: hoist non-trivial dep expressions before scope guards
 - `drop_manual_memoization`: STUB → REAL (useMemo/useCallback dropping)
-- `enable_drop_manual_memoization`: default false → true
 - codegen IIFE unwrap: expression-body arrows + second CallExpression path
 - `count_scope_outputs`: fix multi-output scope counting (val_is_scope_owned)
 
@@ -71,10 +72,10 @@ Completed:
 
 ## Completed This Session
 
-- `drop_manual_memoization.rs`: STUB → REAL (126 LOC) — useMemo/useCallback dropping
-- `environment.rs`: enable_drop_manual_memoization default true
-- `hir_codegen.rs`: fix extract_iife_return_expr for expression-body arrows, add IIFE unwrap to second CallExpression path, fix count_scope_outputs val_is_scope_owned
-- Correct rate: 17.3% → 22.0%
+- `prune_non_escaping_scopes.rs`: STUB → REAL (282 LOC) — memoization-level scope pruning
+- `hir_codegen.rs`: dep expression hoisting for non-trivial deps (function calls)
+- `pipeline.rs`: moved prune_non_escaping_scopes before dep propagation
+- Correct rate: 22.0% → 22.1% (274 → 275, net +1)
 
 ---
 
@@ -130,7 +131,7 @@ Completed:
 | propagate_early_returns | reactive_scopes/propagate_early_returns.rs | STUB | 2 |
 | prune_always_invalidating_scopes | reactive_scopes/prune_always_invalidating_scopes.rs | STUB | 2 |
 | prune_hoisted_contexts | reactive_scopes/prune_hoisted_contexts.rs | STUB | 2 |
-| prune_non_escaping_scopes | reactive_scopes/prune_non_escaping_scopes.rs | STUB | 2 |
+| prune_non_escaping_scopes | reactive_scopes/prune_non_escaping_scopes.rs | REAL | 282 |
 | prune_unused_labels | reactive_scopes/prune_unused_labels.rs | STUB | 2 |
 | prune_unused_labels_hir | reactive_scopes/prune_unused_labels_hir.rs | STUB | 2 |
 | prune_unused_lvalues | reactive_scopes/prune_unused_lvalues.rs | STUB | 2 |
@@ -184,3 +185,4 @@ codegen (currently bypasses ReactiveFunction) → oxc_codegen → JS output
 | 2026-03-02 | 84.2 | 17.3 | 29 | 14 | 38 |
 | 2026-03-02 | 84.2 | 21.5 | — | 14 | 38 | codegen, SSA, scope passes |
 | 2026-03-02 | 84.2 | 22.0 | — | 15 | 37 | drop_manual_memoization, IIFE unwrap |
+| 2026-03-03 | 84.2 | 22.1 | — | 16 | 36 | PruneNonEscapingScopes, dep hoisting |

@@ -1625,7 +1625,45 @@ impl<'a> Codegen<'a> {
             }
         }
 
-        let analysis = self.analyze_scope(scope_id, instrs, inlined_ids, None);
+        // Pre-compute dep expressions and allocate hoisted names BEFORE analyze_scope.
+        // This ensures hoisted dep temps get lower indices (t0) and scope outputs get higher (t1).
+        let mut hoisted_dep_info: Vec<(String, String)> = Vec::new();
+        if has_deps {
+            for (di, dep) in scope_deps.iter().enumerate() {
+                let raw = dep_expr_overrides.get(di)
+                    .and_then(|o| o.clone())
+                    .unwrap_or_else(|| self.dep_expr(dep));
+                let name = self.ident_name(scope_deps[di].place.identifier);
+                let is_unnamed = name.starts_with("$t");
+                if is_unnamed && raw.contains('(') {
+                    let hoisted_name = format!("t{}", *scope_index + self.param_name_offset);
+                    *scope_index += 1;
+                    self.inlined_exprs.insert(scope_deps[di].place.identifier.0, hoisted_name.clone());
+                    let old_expr = raw.clone();
+                    let to_remove: Vec<u32> = self.inlined_exprs.iter()
+                        .filter(|(_, v)| v.contains(&old_expr))
+                        .map(|(&k, _)| k)
+                        .collect();
+                    for k in to_remove {
+                        self.inlined_exprs.remove(&k);
+                    }
+                    hoisted_dep_info.push((raw, hoisted_name));
+                } else {
+                    hoisted_dep_info.push((raw.clone(), raw));
+                }
+            }
+        }
+
+        let mut analysis = self.analyze_scope(scope_id, instrs, inlined_ids, None);
+
+        // After hoisting, update analysis.outputs.cache_expr to replace old expressions.
+        for (orig, hoisted) in &hoisted_dep_info {
+            if orig != hoisted {
+                for output in &mut analysis.outputs {
+                    output.cache_expr = output.cache_expr.replace(orig.as_str(), hoisted.as_str());
+                }
+            }
+        }
 
         // Assign temp names to outputs.
         let mut output_cache_vars: Vec<String> = Vec::new();
@@ -1640,13 +1678,10 @@ impl<'a> Codegen<'a> {
                 output_cache_vars.push(t);
             }
         }
-        // For terminal replacement: use the first temp output's name.
         if let Some(term_id) = analysis.terminal_place_id {
             let term_var = output_cache_vars.first().cloned().unwrap_or_else(|| {
                 format!("t{}", *scope_index + self.param_name_offset - 1)
             });
-            // If the terminal feed was a TypeCastExpression, append the annotation to the
-            // replacement expression so that `return tN as const` is emitted.
             let term_expr = if let Some(ann) = &analysis.terminal_type_cast_annotation {
                 format!("{term_var} as {ann}")
             } else {
@@ -1670,7 +1705,7 @@ impl<'a> Codegen<'a> {
             let _ = writeln!(out, "{}", line);
         }
 
-        // Build body lines.
+        // Build body lines (after hoisting so inlined_exprs is updated).
         let mut body_lines: Vec<String> = Vec::new();
         for (i, instr) in instrs.iter().enumerate() {
             if skip_set.contains(&i) { continue; }
@@ -1679,15 +1714,12 @@ impl<'a> Codegen<'a> {
             }
             if intra_set.contains(&i) {
                 if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
-                    // Use ident_name so name_overrides (shadowing renaming) is applied.
                     let var_name = self.env
                         .get_identifier(lvalue.place.identifier)
                         .and_then(|id| id.name.as_ref())
                         .map(|_| self.ident_name(lvalue.place.identifier));
                     if let Some(n) = var_name {
                         let val_expr = self.expr(value);
-                        // If this variable is a hoisted named output (let ret; outside),
-                        // emit a plain assignment rather than a declaration.
                         let stmt = if all_out_names.contains(&n) {
                             format!("{n} = {val_expr};")
                         } else {
@@ -1708,14 +1740,17 @@ impl<'a> Codegen<'a> {
         }
 
         if has_deps {
+            // Emit hoisted dep const declarations.
+            for (orig, hoisted) in &hoisted_dep_info {
+                if orig != hoisted {
+                    let _ = writeln!(out, "{pad}const {hoisted} = {orig};");
+                }
+            }
             for cache_var in &output_cache_vars {
                 let _ = writeln!(out, "{pad}let {cache_var};");
             }
-            let cond_parts: Vec<String> = scope_deps.iter().enumerate().zip(&dep_slot_list)
-                .map(|((di, dep), &slot)| {
-                    let dep_str = dep_expr_overrides.get(di)
-                        .and_then(|o| o.clone())
-                        .unwrap_or_else(|| self.dep_expr(dep));
+            let cond_parts: Vec<String> = hoisted_dep_info.iter().zip(&dep_slot_list)
+                .map(|((_, dep_str), &slot)| {
                     format!("$[{slot}] !== {dep_str}")
                 })
                 .collect();
@@ -1732,10 +1767,7 @@ impl<'a> Codegen<'a> {
                     let _ = writeln!(out, "{body_pad}{cache_var} = {};", reindented);
                 }
             }
-            for ((di, dep), &slot) in scope_deps.iter().enumerate().zip(&dep_slot_list) {
-                let dep_str = dep_expr_overrides.get(di)
-                    .and_then(|o| o.clone())
-                    .unwrap_or_else(|| self.dep_expr(dep));
+            for ((_, dep_str), &slot) in hoisted_dep_info.iter().zip(&dep_slot_list) {
                 let _ = writeln!(out, "{body_pad}$[{slot}] = {dep_str};");
             }
             for (cache_var, &slot) in output_cache_vars.iter().zip(&out_slot_list) {

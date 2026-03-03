@@ -52,7 +52,7 @@ use crate::reactive_scopes::{
     propagate_scope_dependencies_hir::run as propagate_scope_dependencies_hir,
     build_reactive_function::run as build_reactive_function,
     prune_unused_labels::run as prune_unused_labels,
-    prune_non_escaping_scopes::run as prune_non_escaping_scopes,
+    prune_non_escaping_scopes::run_with_env as prune_non_escaping_scopes,
     prune_non_reactive_dependencies::run as prune_non_reactive_dependencies,
     prune_unused_scopes::run_with_env as prune_unused_scopes,
     merge_reactive_scopes_that_invalidate_together::run_with_env as merge_reactive_scopes_that_invalidate_together,
@@ -465,6 +465,7 @@ pub fn run_with_environment(
     build_reactive_scope_terminals_hir(hir);
     flatten_reactive_loops_hir(hir);
     flatten_scopes_with_hooks_or_use_hir(hir, env);
+    prune_non_escaping_scopes(hir, env);
     propagate_scope_dependencies_hir(hir, env);
     merge_reactive_scopes_that_invalidate_together(hir, env);
     prune_non_reactive_dependencies(hir, env);
@@ -477,7 +478,6 @@ pub fn run_with_environment(
     rename_variables(hir);
     prune_hoisted_contexts(hir);
     prune_unused_scopes(hir, env);
-    prune_non_escaping_scopes(hir);
     prune_unused_labels(hir);
 
     // --- Phase: Reactive function construction ---
