@@ -2283,11 +2283,9 @@ impl<'a> Codegen<'a> {
             }
             InstructionValue::MethodCall { receiver, property, args, .. } => {
                 let recv = self.expr(receiver);
-                // `property` is a place holding the method function loaded via PropertyLoad.
-                // We need just the method name, not the full `obj.method` expression.
-                let method_name = self.method_name_from_place(property);
+                let method_suffix = self.method_suffix_from_place(property);
                 let args_expr = self.call_args(args);
-                Some(format!("{recv}.{method_name}({args_expr})"))
+                Some(format!("{recv}{method_suffix}({args_expr})"))
             }
             InstructionValue::ArrayExpression { elements, .. } => {
                 let elems = elements.iter().map(|e| match e {
@@ -3256,8 +3254,8 @@ impl<'a> Codegen<'a> {
 
             InstructionValue::MethodCall { receiver, property, args, .. } => {
                 let recv = self.expr(receiver);
-                let method_name = self.method_name_from_place(property);
-                let call = format!("{recv}.{method_name}({})", self.call_args(args));
+                let method_suffix = self.method_suffix_from_place(property);
+                let call = format!("{recv}{method_suffix}({})", self.call_args(args));
                 Some(format!("{call};"))
             }
 
@@ -3773,18 +3771,40 @@ impl<'a> Codegen<'a> {
 
     /// For a MethodCall's `property` place: extract just the method name.
     /// The property place is typically produced by a PropertyLoad instruction.
-    fn method_name_from_place(&self, place: &Place) -> String {
+    /// Returns the method accessor suffix for a MethodCall property.
+    /// Dot notation: `.methodName`; computed: `[expr]`.
+    fn method_suffix_from_place(&self, place: &Place) -> String {
         if let Some(src_instr) = self.instr_map.get(&place.identifier.0) {
-            if let InstructionValue::PropertyLoad { property, .. } = &src_instr.value {
-                return property.clone();
+            match &src_instr.value {
+                InstructionValue::PropertyLoad { property, .. } => {
+                    return format!(".{property}");
+                }
+                InstructionValue::ComputedLoad { property, .. } => {
+                    let prop_expr = self.expr(property);
+                    // If the computed property is a string literal that's a valid
+                    // JS identifier, use dot notation (matches TS compiler behavior
+                    // for constant-folded computed properties).
+                    if let Some(name) = prop_expr.strip_prefix('"')
+                        .and_then(|s| s.strip_suffix('"'))
+                    {
+                        if !name.is_empty()
+                            && name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_' || c == '$')
+                            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+                        {
+                            return format!(".{name}");
+                        }
+                    }
+                    return format!("[{prop_expr}]");
+                }
+                _ => {}
             }
         }
-        // Fallback: use the inlined expression (may be "obj.method" — strip prefix).
+        // Fallback: dot notation using inlined expression.
         let expr = self.expr(place);
         if let Some(dot_pos) = expr.rfind('.') {
-            expr[dot_pos + 1..].to_string()
+            format!(".{}", &expr[dot_pos + 1..])
         } else {
-            expr
+            format!(".{expr}")
         }
     }
 
