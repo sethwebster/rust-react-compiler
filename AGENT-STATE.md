@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 22.8% (284/1244) |
+| Correct rate | 23.1% (287/1244) |
 | Error (expected) | 196 |
 | Error (unexpected) | 0 |
 | Uncommitted changes | 0 |
@@ -72,9 +72,9 @@ Previously completed:
 > Format: `- [ ] pending` / `- [x] done`. Maintain throughout your session, not just at the end.
 
 ### Phase 1: Codegen Quick Wins (target: 284 → 310-320)
-- [ ] Fix `$tN` internal temp leak in codegen (46 files, 13 exclusive)
-- [ ] For-loop init/update reassembly in codegen (26 files, 14 exclusive)
-- [ ] Lambda hoisting to `_temp` form (41 files, 14 exclusive)
+- [x] Fix `$tN` internal temp leak in codegen — name_hint resolution (+1)
+- [x] For-loop init reassembly in codegen (+1, update blocked by DCE)
+- [x] Lambda hoisting to `_temp` form — pipeline reorder + DCE protection (+1)
 
 ### Phase 2: Codegen Naming + Control Flow (target: → 350)
 - [ ] Use original identifier in memo blocks instead of `tN` alias (94 files, 22 exclusive)
@@ -98,10 +98,15 @@ Previously completed:
 
 ## Completed This Session
 
-- `prune_non_escaping_scopes.rs`: optional chaining fix — InlineJs dep bridging (+2 fixtures, 282→284)
+- `prune_non_escaping_scopes.rs`: optional chaining fix — InlineJs dep bridging (+2, 282→284)
 - Mismatch analysis: categorized 764 wrong-output fixtures into 9 root causes
 - Created plan: `plans/correctness-284-to-350.md`
-- Updated AGENT-STATE.md with phased todo list
+- `hir_codegen.rs`: ident_name resolves FunctionExpression name_hint (+1)
+- `hir_codegen.rs`: for-loop init reassembly into for-header (+1)
+- `pipeline.rs`: outline_functions before DCE; DCE protects outlined FunctionExpression (+1)
+- `hir_codegen.rs`: skip outlined FunctionExpression stmt, self-assignment guards
+- Investigated is_named_var for const outputs — deferred (regresses 50+ fixtures)
+- 284 → 287 correct (+3 net)
 
 ---
 
@@ -213,3 +218,4 @@ codegen (currently bypasses ReactiveFunction) → oxc_codegen → JS output
 | 2026-03-02 | 84.2 | 22.0 | — | 15 | 37 | drop_manual_memoization, IIFE unwrap |
 | 2026-03-03 | 84.2 | 22.7 | — | 16 | 36 | PruneNonEscapingScopes (DeclarationId), dep hoisting |
 | 2026-03-03 | 84.2 | 22.8 | — | 16 | 36 | optional chaining fix, mismatch analysis, plan |
+| 2026-03-03 | 84.2 | 23.1 | — | 16 | 36 | Phase 1 codegen: $tN leak, for-init, lambda hoisting |
