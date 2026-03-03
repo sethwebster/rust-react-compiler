@@ -35,21 +35,23 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 17.3% |
+| Correct rate | 22.0% (274/1244) |
 | Error (expected) | 196 |
 | Error (unexpected) | 0 |
-| Uncommitted changes | 25 files, +4386/-265 lines |
+| Uncommitted changes | 0 |
 
 ---
 
 ## Current Task
 
-**Fixing destructured parameter lowering** (in progress by another agent)
+**Driving up correctness rate** — drop_manual_memoization done, IIFE unwrap in codegen done.
+Next: analyze remaining 774 mismatches for highest-impact patterns.
 
-Relevant files:
-- `rust-react-compiler/src/hir/lower/core.rs`
-- `rust-react-compiler/src/hir/lower/expressions.rs`
-- `rust-react-compiler/src/hir/lower/functions.rs`
+Completed:
+- `drop_manual_memoization`: STUB → REAL (useMemo/useCallback dropping)
+- `enable_drop_manual_memoization`: default false → true
+- codegen IIFE unwrap: expression-body arrows + second CallExpression path
+- `count_scope_outputs`: fix multi-output scope counting (val_is_scope_owned)
 
 ---
 
@@ -69,15 +71,10 @@ Relevant files:
 
 ## Completed This Session
 
-- `prune_unused_scopes.rs`: expanded from stub to real implementation
-- `codegen/hir_codegen.rs`: major expansion (1,816 → 2,902 LOC)
-- `pipeline.rs`: wired additional passes (433 → 677 LOC)
-- `enter_ssa.rs`: extended (+93 lines)
-- `infer_reactive_scope_variables.rs`: expanded (467 → 540 LOC)
-- `propagate_scope_dependencies_hir.rs`: expanded (174 → 274 LOC)
-- `merge_overlapping_reactive_scopes_hir.rs`: expanded (103 → 125 LOC)
-- `prune_non_reactive_dependencies.rs`: expanded (2 → 15 LOC)
-- Introduced **Correct rate** metric to fixture harness
+- `drop_manual_memoization.rs`: STUB → REAL (126 LOC) — useMemo/useCallback dropping
+- `environment.rs`: enable_drop_manual_memoization default true
+- `hir_codegen.rs`: fix extract_iife_return_expr for expression-body arrows, add IIFE unwrap to second CallExpression path, fix count_scope_outputs val_is_scope_owned
+- Correct rate: 17.3% → 22.0%
 
 ---
 
@@ -102,8 +99,8 @@ Relevant files:
 | infer_reactive_places | inference/infer_reactive_places.rs | REAL | 331 |
 | aliasing_effects | inference/aliasing_effects.rs | REAL | 98 |
 | analyse_functions | inference/analyse_functions.rs | STUB | 5 |
-| drop_manual_memoization | inference/drop_manual_memoization.rs | STUB | 5 |
-| inline_iife | inference/inline_iife.rs | STUB | 5 |
+| drop_manual_memoization | inference/drop_manual_memoization.rs | REAL | 126 |
+| inline_iife | inference/inline_iife.rs | DEFERRED | 7 |
 | infer_mutation_aliasing_effects | inference/infer_mutation_aliasing_effects.rs | STUB | 7 |
 | dead_code_elimination | optimization/dead_code_elimination.rs | REAL | 331 |
 | outline_functions | optimization/outline_functions.rs | REAL | 353 |
@@ -185,3 +182,5 @@ codegen (currently bypasses ReactiveFunction) → oxc_codegen → JS output
 | Date | Compile % | Correct % | Overall % | Passes Real | Stubs |
 |------|-----------|-----------|-----------|-------------|-------|
 | 2026-03-02 | 84.2 | 17.3 | 29 | 14 | 38 |
+| 2026-03-02 | 84.2 | 21.5 | — | 14 | 38 | codegen, SSA, scope passes |
+| 2026-03-02 | 84.2 | 22.0 | — | 15 | 37 | drop_manual_memoization, IIFE unwrap |
