@@ -1471,15 +1471,16 @@ impl<'a> Codegen<'a> {
                     let case_pad = "  ".repeat(body_pad);
                     for case in cases {
                         if let Some(t) = &case.test {
-                            let _ = writeln!(out, "{case_pad}case {}:", self.expr(t));
+                            let _ = writeln!(out, "{case_pad}case {}: {{", self.expr(t));
                         } else {
-                            let _ = writeln!(out, "{case_pad}default:");
+                            let _ = writeln!(out, "{case_pad}default: {{");
                         }
                         let mut vis2 = visited.clone();
                         self.emit_cfg_region(
                             case.block, Some(fall_bid), body_pad + 1, out,
                             &mut vis2, emitted_scopes, scope_index, instr_scope, inlined_ids, scope_instrs,
                         );
+                        let _ = writeln!(out, "{case_pad}}}");
                     }
                     let _ = writeln!(out, "{pad}}}");
                     if Some(fall_bid) == stop_at {
