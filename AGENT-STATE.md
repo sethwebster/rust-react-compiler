@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 22.7% (282/1244) |
+| Correct rate | 22.8% (284/1244) |
 | Error (expected) | 196 |
 | Error (unexpected) | 0 |
 | Uncommitted changes | 0 |
@@ -44,11 +44,21 @@ Update the following before stopping:
 
 ## Current Task
 
-**Driving up correctness rate** — PruneNonEscapingScopes + dep hoisting done.
-Next: analyze remaining 773 mismatches for highest-impact patterns.
+**Active plan**: [`plans/correctness-284-to-350.md`](./plans/correctness-284-to-350.md)
 
-Completed:
+Next up: **Phase 1 — Codegen Quick Wins** (~41 exclusive fixtures, target 284 → 310-320)
+- [ ] 1a. Fix `$tN` internal temp leak in codegen (46 files, 13 exclusive)
+- [ ] 1b. For-loop init/update reassembly (26 files, 14 exclusive)
+- [ ] 1c. Lambda hoisting to `_temp` form (41 files, 14 exclusive)
+
+Then: **Phase 2 — Codegen Naming + Control Flow** (~32 exclusive, target → 350)
+- [ ] 2a. Use original identifier in memo blocks (94 files, 22 exclusive)
+- [ ] 2b. Switch codegen cleanup (11 files, 7 exclusive)
+- [ ] 2c. Try/catch codegen (6 files, 3 exclusive)
+
+Previously completed:
 - `prune_non_escaping_scopes`: STUB → REAL (memoization-level-based scope pruning)
+- optional chaining fix: InlineJs dep bridging in prune_non_escaping_scopes (+2 fixtures)
 - codegen dep hoisting: hoist non-trivial dep expressions before scope guards
 - `drop_manual_memoization`: STUB → REAL (useMemo/useCallback dropping)
 - codegen IIFE unwrap: expression-body arrows + second CallExpression path
@@ -61,6 +71,22 @@ Completed:
 > This list is displayed live at https://rust-react-compiler.sethwebster.workers.dev
 > Format: `- [ ] pending` / `- [x] done`. Maintain throughout your session, not just at the end.
 
+### Phase 1: Codegen Quick Wins (target: 284 → 310-320)
+- [ ] Fix `$tN` internal temp leak in codegen (46 files, 13 exclusive)
+- [ ] For-loop init/update reassembly in codegen (26 files, 14 exclusive)
+- [ ] Lambda hoisting to `_temp` form (41 files, 14 exclusive)
+
+### Phase 2: Codegen Naming + Control Flow (target: → 350)
+- [ ] Use original identifier in memo blocks instead of `tN` alias (94 files, 22 exclusive)
+- [ ] Switch codegen cleanup — remove `bb0:` labels (11 files, 7 exclusive)
+- [ ] Try/catch codegen (6 files, 3 exclusive)
+
+### Phase 3: Scope Analysis (target: → 400+)
+- [ ] Scope merging — merge scopes that invalidate on same deps
+- [ ] Reactive dep propagation through while/for loops (sentinel overuse)
+- [ ] Cache slot count correction (downstream of scope fixes)
+
+### Ongoing / Deferred
 - [ ] Fix destructured parameter lowering (`lower/core.rs`, `lower/functions.rs`)
 - [ ] Define `ReactiveFunction` / `ReactiveScope` types in `hir.rs`
 - [ ] Implement `build_reactive_function` — wire into `pipeline.rs` after scope inference
@@ -72,10 +98,10 @@ Completed:
 
 ## Completed This Session
 
-- `prune_non_escaping_scopes.rs`: STUB → REAL — DeclarationId-based memoization-level scope pruning
-- `hir_codegen.rs`: dep expression hoisting for non-trivial deps (function calls)
-- `pipeline.rs`: moved prune_non_escaping_scopes before dep propagation
-- Correct rate: 22.0% → 22.7% (274 → 282, net +8)
+- `prune_non_escaping_scopes.rs`: optional chaining fix — InlineJs dep bridging (+2 fixtures, 282→284)
+- Mismatch analysis: categorized 764 wrong-output fixtures into 9 root causes
+- Created plan: `plans/correctness-284-to-350.md`
+- Updated AGENT-STATE.md with phased todo list
 
 ---
 
@@ -186,3 +212,4 @@ codegen (currently bypasses ReactiveFunction) → oxc_codegen → JS output
 | 2026-03-02 | 84.2 | 21.5 | — | 14 | 38 | codegen, SSA, scope passes |
 | 2026-03-02 | 84.2 | 22.0 | — | 15 | 37 | drop_manual_memoization, IIFE unwrap |
 | 2026-03-03 | 84.2 | 22.7 | — | 16 | 36 | PruneNonEscapingScopes (DeclarationId), dep hoisting |
+| 2026-03-03 | 84.2 | 22.8 | — | 16 | 36 | optional chaining fix, mismatch analysis, plan |
