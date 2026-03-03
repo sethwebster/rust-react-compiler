@@ -214,6 +214,10 @@ fn remove_dead_instructions(hir: &mut HIRFunction, env: Option<&Environment>) {
 // ---------------------------------------------------------------------------
 
 fn has_side_effects(value: &InstructionValue) -> bool {
+    // Outlined FunctionExpressions (name_hint set by outline_functions) must survive DCE.
+    if let InstructionValue::FunctionExpression { name_hint: Some(_), .. } = value {
+        return true;
+    }
     matches!(
         value,
         InstructionValue::CallExpression { .. }

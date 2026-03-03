@@ -415,6 +415,15 @@ pub fn run_with_environment(
         optimize_for_ssr(hir);
     }
 
+    // --- Phase: Pre-DCE outlining ---
+    // outline_functions must run BEFORE DCE so that FunctionExpressions passed to
+    // hooks (useCallback, etc.) are outlined before DCE can eliminate them.
+    // It also must run BEFORE infer_reactive_scope_variables so that outlined arrow
+    // functions (name_hint set) are treated as non-allocating by scope inference.
+    if env.config.enable_function_outlining {
+        outline_functions(hir, env);
+    }
+
     // --- Phase: DCE + cleanup ---
     dead_code_elimination_with_env(hir, Some(env));
     prune_maybe_throws(hir);
@@ -433,17 +442,11 @@ pub fn run_with_environment(
     // validate_no_set_state_in_render(hir)              -- TODO
 
     // --- Phase: Pre-reactivity optimizations ---
-    // outline_functions must run BEFORE infer_reactive_scope_variables so that
-    // outlined arrow functions (name_hint set) are treated as non-allocating
-    // (may_alloc=false) by scope inference and don't get their own reactive scopes.
     if env.config.enable_jsx_outlining {
         outline_jsx(hir);
     }
     if env.config.enable_name_anonymous_functions {
         name_anonymous_functions(hir);
-    }
-    if env.config.enable_function_outlining {
-        outline_functions(hir, env);
     }
 
     // --- Phase: Reactivity ---

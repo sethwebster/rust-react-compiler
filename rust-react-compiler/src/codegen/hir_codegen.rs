@@ -953,6 +953,21 @@ impl<'a> Codegen<'a> {
                         }
                     }
                 }
+                Terminal::For { .. } => {
+                    // For-loop init instructions are at the END of the current block
+                    // (emitted by lower_for before the For terminal). Walk backwards
+                    // from the end and collect DeclareLocal/StoreLocal pairs that
+                    // form `let i = 0` style init declarations.
+                    for instr in block.instructions.iter().rev() {
+                        match &instr.value {
+                            InstructionValue::DeclareLocal { .. }
+                            | InstructionValue::StoreLocal { .. } => {
+                                inlined_ids.insert(instr.lvalue.identifier.0);
+                            }
+                            _ => break, // Stop at first non-decl/store instruction
+                        }
+                    }
+                }
                 _ => {}
             }
 
@@ -1196,7 +1211,8 @@ impl<'a> Codegen<'a> {
                     continue;
                 }
 
-                Terminal::For { test, update, loop_, fallthrough, .. } => {
+                Terminal::For { init, test, update, loop_, fallthrough, .. } => {
+                    let init_bid = *init;
                     let test_bid = *test;
                     let update_bid = *update;
                     let loop_bid = *loop_;
@@ -1206,6 +1222,19 @@ impl<'a> Codegen<'a> {
                     if let Some(ubid) = update_bid {
                         visited.insert(ubid);
                     }
+
+                    // Reconstruct init expression from the init block's inlined
+                    // instructions (only those pre-marked as inlined above).
+                    let init_expr = self.hir.body.blocks.get(&init_bid).map(|b| {
+                        let parts: Vec<String> = b.instructions.iter()
+                            .filter(|instr| inlined_ids.contains(&instr.lvalue.identifier.0))
+                            .filter_map(|instr| {
+                                self.emit_stmt(instr, None, &[])
+                                    .map(|s| s.trim_end_matches(';').to_string())
+                            }).collect();
+                        parts.join(", ")
+                    }).unwrap_or_default();
+
                     let test_expr = self.hir.body.blocks.get(&test_bid).and_then(|b| {
                         if let Terminal::Branch { test, .. } = &b.terminal {
                             Some(self.expr(test))
@@ -1213,15 +1242,22 @@ impl<'a> Codegen<'a> {
                             None
                         }
                     }).unwrap_or_else(|| "true".to_string());
+
+                    // Reconstruct update expression from the update block.
+                    // Find the last emittable instruction (typically StoreLocal i = i + 1).
                     let update_expr = update_bid.and_then(|ubid| {
                         self.hir.body.blocks.get(&ubid).and_then(|b| {
-                            b.instructions.last().and_then(|instr| {
-                                self.emit_stmt(instr, None, &[])
-                                    .map(|s| s.trim_end_matches(';').to_string())
-                            })
+                            let mut last = None;
+                            for instr in &b.instructions {
+                                if let Some(s) = self.emit_stmt(instr, None, &[]) {
+                                    last = Some(s.trim_end_matches(';').to_string());
+                                }
+                            }
+                            last
                         })
                     }).unwrap_or_default();
-                    let _ = writeln!(out, "{pad}for (; {test_expr}; {update_expr}) {{");
+
+                    let _ = writeln!(out, "{pad}for ({init_expr}; {test_expr}; {update_expr}) {{");
                     let body_pad = indent + 1;
                     let mut vis2 = visited.clone();
                     if let Some(ubid) = update_bid { vis2.insert(ubid); }
@@ -1720,6 +1756,10 @@ impl<'a> Codegen<'a> {
                         .map(|_| self.ident_name(lvalue.place.identifier));
                     if let Some(n) = var_name {
                         let val_expr = self.expr(value);
+                        // Skip self-assignments (e.g. `const _temp = _temp` from outlined fns).
+                        if n == val_expr {
+                            continue;
+                        }
                         let stmt = if all_out_names.contains(&n) {
                             format!("{n} = {val_expr};")
                         } else {
@@ -2030,6 +2070,10 @@ impl<'a> Codegen<'a> {
                         .map(|_| self.ident_name(lvalue.place.identifier));
                     if let Some(n) = var_name {
                         let val_expr = self.expr(value);
+                        // Skip self-assignments (e.g. `const _temp = _temp` from outlined fns).
+                        if n == val_expr {
+                            continue;
+                        }
                         // If this variable is a hoisted named output (let ret; outside),
                         // emit a plain assignment rather than a declaration.
                         let stmt = if all_out_names.contains(&n) {
@@ -3236,6 +3280,10 @@ impl<'a> Codegen<'a> {
                     _ => "let",
                 };
                 if let Some(n) = name {
+                    // Skip self-assignments like `const _temp = _temp`.
+                    if n == val_expr {
+                        return None;
+                    }
                     Some(format!("{kw} {n} = {val_expr};"))
                 } else {
                     None
@@ -3279,7 +3327,7 @@ impl<'a> Codegen<'a> {
                     Some(format!("{call};"))
                 } else {
                     // Unnamed temp that couldn't be inlined — emit with temp name.
-                    let lv = format!("$t{}", instr.lvalue.identifier.0);
+                    let lv = self.ident_name(instr.lvalue.identifier);
                     Some(format!("const {lv} = {call};"))
                 }
             }
@@ -3490,11 +3538,11 @@ impl<'a> Codegen<'a> {
                 if self.inlined_exprs.contains_key(&instr.lvalue.identifier.0) {
                     return None;
                 }
-                // If outlined, the name_hint is already in inlined_exprs via try_inline_instr.
-                // This branch only runs if the instruction was NOT inlined; emit named binding.
-                if let Some(hint) = name_hint {
-                    let lv = self.lvalue_name(&instr.lvalue);
-                    return Some(format!("const {lv} = {hint};"));
+                // If outlined, the function body is emitted separately after the component.
+                // The name resolves via ident_name → name_hint, so any LoadLocal of this
+                // instruction's lvalue will inline to the hint name. No statement needed.
+                if name_hint.is_some() {
+                    return None;
                 }
                 let lv = self.lvalue_name(&instr.lvalue);
                 let async_kw = if lowered_func.func.async_ { "async " } else { "" };
@@ -3783,6 +3831,12 @@ impl<'a> Codegen<'a> {
         // Fall back to ssa_value_to_name for SSA temps that flow into named variables.
         if let Some(name) = self.ssa_value_to_name.get(&id.0) {
             return name.clone();
+        }
+        // Check if this identifier is the lvalue of an outlined FunctionExpression.
+        if let Some(instr) = self.instr_map.get(&id.0) {
+            if let InstructionValue::FunctionExpression { name_hint: Some(hint), .. } = &instr.value {
+                return hint.clone();
+            }
         }
         format!("$t{}", id.0)
     }
