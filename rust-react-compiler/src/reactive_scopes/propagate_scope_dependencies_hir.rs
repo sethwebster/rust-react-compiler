@@ -260,6 +260,32 @@ fn resolve_dep_path_inner(
             | InstructionValue::LoadContext { place, .. } => {
                 return resolve_dep_path_inner(place.identifier, def_at, instr_map, store_local_value, range_start, depth + 1);
             }
+            // Internal allocations: trace through to operands.
+            InstructionValue::ObjectExpression { properties, .. } => {
+                for prop in properties {
+                    let val_id = match prop {
+                        crate::hir::hir::ObjectExpressionProperty::Property(p) => p.place.identifier,
+                        crate::hir::hir::ObjectExpressionProperty::Spread(s) => s.place.identifier,
+                    };
+                    if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, range_start, depth + 1) {
+                        return Some(result);
+                    }
+                }
+                return None;
+            }
+            InstructionValue::ArrayExpression { elements, .. } => {
+                for elem in elements {
+                    let val_id = match elem {
+                        crate::hir::hir::ArrayElement::Place(p) => p.identifier,
+                        crate::hir::hir::ArrayElement::Spread(s) => s.place.identifier,
+                        crate::hir::hir::ArrayElement::Hole => continue,
+                    };
+                    if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, range_start, depth + 1) {
+                        return Some(result);
+                    }
+                }
+                return None;
+            }
             _ => {}
         }
     }
