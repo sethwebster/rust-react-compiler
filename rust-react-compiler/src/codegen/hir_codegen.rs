@@ -1505,7 +1505,7 @@ impl<'a> Codegen<'a> {
                     let block_bid = *block;
                     let handler_bid = *handler;
                     let fall_bid = *fallthrough;
-                    let binding_name = handler_binding.as_ref().map(|p| self.expr(p));
+                    let binding_name = handler_binding.as_ref().map(|p| self.lvalue_name(p));
                     let _ = writeln!(out, "{pad}try {{");
                     let body_pad = indent + 1;
                     let mut vis2 = visited.clone();

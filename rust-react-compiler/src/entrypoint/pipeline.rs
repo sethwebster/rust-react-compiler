@@ -117,22 +117,41 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CodegenOutput> {
     let infer_mode = first_line.contains("@compilationMode:\"infer\"")
         || first_line.contains("@compilationMode:'infer'");
 
+    // Whether the file already uses useMemoCache (already compiled — skip).
+    let has_use_memo_cache = source.contains("useMemoCache");
+
+    // Parse @customOptOutDirectives:["directive1", "directive2"] from pragma.
+    let custom_opt_out_directives = parse_custom_opt_out_directives(first_line);
+
+    // @expectNothingCompiled means the whole file should passthrough.
+    let expect_nothing = first_line.contains("@expectNothingCompiled");
+
     for (i, &(start, end)) in fn_spans.iter().enumerate() {
-        // In lint mode, passthrough all functions without transformation.
-        if lint_mode {
-            let fn_src = source.get(start as usize..end as usize).unwrap_or("").to_string();
-            let pt = emit_passthrough(&fn_src, source_type);
+        let fn_src = source.get(start as usize..end as usize).unwrap_or("");
+
+        // In lint mode or @expectNothingCompiled, passthrough all functions.
+        if lint_mode || expect_nothing {
+            let pt = emit_passthrough(fn_src, source_type);
+            compiled_fns.push((start, end, pt.to_string()));
+            continue;
+        }
+        // Skip functions that already use useMemoCache.
+        if has_use_memo_cache {
+            let pt = emit_passthrough(fn_src, source_type);
             compiled_fns.push((start, end, pt));
             continue;
         }
-        // In infer mode, skip functions that don't contain hooks or JSX.
-        if infer_mode {
-            let fn_src = source.get(start as usize..end as usize).unwrap_or("");
-            if !fn_body_has_hooks_or_jsx(fn_src) {
-                let pt = emit_passthrough(fn_src, source_type);
-                compiled_fns.push((start, end, pt));
-                continue;
-            }
+        // Check custom opt-out directives in function body.
+        if !custom_opt_out_directives.is_empty() && fn_has_custom_opt_out(fn_src, &custom_opt_out_directives) {
+            let pt = emit_passthrough(fn_src, source_type);
+            compiled_fns.push((start, end, pt));
+            continue;
+        }
+        // In infer mode, skip functions that don't look like components or hooks.
+        if infer_mode && !fn_looks_like_component_or_hook(fn_src) {
+            let pt = emit_passthrough(fn_src, source_type);
+            compiled_fns.push((start, end, pt));
+            continue;
         }
         let mut env = Environment::new(options.fn_type, options.config.clone(), options.filename.clone());
         match lower_program_nth(source, source_type, &mut env, i) {
@@ -419,6 +438,159 @@ fn fn_body_has_hooks_or_jsx(fn_src: &str) -> bool {
             }
         }
         pos = abs + 3;
+    }
+    false
+}
+
+/// Check if a function looks like a component or hook (for infer mode).
+/// More sophisticated than fn_body_has_hooks_or_jsx — also checks the function signature.
+fn fn_looks_like_component_or_hook(fn_src: &str) -> bool {
+    let trimmed = fn_src.trim();
+
+    // Extract function name (if any)
+    let fn_name = extract_fn_name(trimmed);
+
+    // Check if it's a hook (name starts with "use" + uppercase)
+    if let Some(name) = fn_name {
+        if name.len() >= 4 && name.starts_with("use") {
+            let fourth = name.as_bytes()[3];
+            if fourth.is_ascii_uppercase() {
+                return true;
+            }
+        }
+    }
+
+    // Check if body has hooks
+    if fn_body_has_hooks_or_jsx(fn_src) {
+        // Has JSX or hooks — but if it has multiple params (>1), it's not a component
+        let param_count = count_fn_params(trimmed);
+        if param_count <= 1 {
+            return true; // Looks like a component (0-1 params + JSX)
+        }
+        // Multiple params with JSX — still might be valid if it has hooks
+        // Check specifically for hook calls
+        let src = fn_src;
+        let mut pos = 0;
+        while let Some(idx) = src[pos..].find("use") {
+            let abs = pos + idx;
+            let at_boundary = abs == 0 || !src.as_bytes()[abs - 1].is_ascii_alphanumeric();
+            if at_boundary && abs + 3 < src.len() {
+                let after = src.as_bytes()[abs + 3];
+                if after.is_ascii_uppercase() {
+                    return true; // Has hook call — compile it
+                }
+            }
+            pos = abs + 3;
+        }
+        return false; // Multiple params + JSX but no hooks — skip
+    }
+
+    false
+}
+
+/// Extract the function name from a function source string.
+fn extract_fn_name(fn_src: &str) -> Option<&str> {
+    // Match "function Name(" or "const Name =" or "export function Name("
+    let src = fn_src.trim_start();
+    // Try "function Name"
+    if let Some(rest) = src.strip_prefix("function ").or_else(|| src.strip_prefix("export function ").or_else(|| src.strip_prefix("export default function "))) {
+        let rest = rest.trim_start();
+        let end = rest.find(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '$').unwrap_or(rest.len());
+        if end > 0 {
+            return Some(&rest[..end]);
+        }
+    }
+    // Try "const Name ="
+    if let Some(rest) = src.strip_prefix("const ").or_else(|| src.strip_prefix("export const ")) {
+        let rest = rest.trim_start();
+        let end = rest.find(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '$').unwrap_or(rest.len());
+        if end > 0 {
+            return Some(&rest[..end]);
+        }
+    }
+    None
+}
+
+/// Count function parameters (heuristic based on commas in the parameter list).
+fn count_fn_params(fn_src: &str) -> usize {
+    // Find the first '(' after "function name" or in arrow function
+    if let Some(open) = fn_src.find('(') {
+        // Find matching ')'
+        let after = &fn_src[open + 1..];
+        let mut depth = 1;
+        let mut close_idx = 0;
+        for (i, c) in after.char_indices() {
+            match c {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => {
+                    depth -= 1;
+                    if depth == 0 { close_idx = i; break; }
+                }
+                _ => {}
+            }
+        }
+        let params_str = after[..close_idx].trim();
+        if params_str.is_empty() {
+            return 0;
+        }
+        // Count commas at depth 0
+        let mut count = 1;
+        let mut d = 0;
+        for c in params_str.chars() {
+            match c {
+                '(' | '[' | '{' => d += 1,
+                ')' | ']' | '}' => d -= 1,
+                ',' if d == 0 => count += 1,
+                _ => {}
+            }
+        }
+        return count;
+    }
+    0
+}
+
+/// Parse @customOptOutDirectives:["dir1", "dir2"] from the pragma line.
+fn parse_custom_opt_out_directives(line: &str) -> Vec<String> {
+    let marker = "@customOptOutDirectives:";
+    if let Some(pos) = line.find(marker) {
+        let rest = &line[pos + marker.len()..];
+        // Find the JSON array
+        if let Some(start) = rest.find('[') {
+            if let Some(end) = rest[start..].find(']') {
+                let array_str = &rest[start + 1..start + end];
+                // Parse quoted strings
+                let mut directives = Vec::new();
+                let mut in_quote = false;
+                let mut quote_char = '"';
+                let mut current = String::new();
+                for c in array_str.chars() {
+                    if !in_quote {
+                        if c == '"' || c == '\'' {
+                            in_quote = true;
+                            quote_char = c;
+                            current.clear();
+                        }
+                    } else if c == quote_char {
+                        in_quote = false;
+                        directives.push(current.clone());
+                    } else {
+                        current.push(c);
+                    }
+                }
+                return directives;
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Check if a function body contains any of the custom opt-out directives.
+fn fn_has_custom_opt_out(fn_src: &str, directives: &[String]) -> bool {
+    for directive in directives {
+        // Check for 'directive' or "directive" in the function source
+        if fn_src.contains(&format!("'{directive}'")) || fn_src.contains(&format!("\"{directive}\"")) {
+            return true;
+        }
     }
     false
 }
