@@ -124,7 +124,9 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CodegenOutput> {
     let custom_opt_out_directives = parse_custom_opt_out_directives(first_line);
 
     // @expectNothingCompiled means the whole file should passthrough.
-    let expect_nothing = first_line.contains("@expectNothingCompiled");
+    // @gating also means passthrough (compiler is gated/disabled).
+    let expect_nothing = first_line.contains("@expectNothingCompiled")
+        || first_line.contains("@gating");
 
     for (i, &(start, end)) in fn_spans.iter().enumerate() {
         let fn_src = source.get(start as usize..end as usize).unwrap_or("");
