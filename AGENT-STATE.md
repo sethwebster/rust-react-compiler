@@ -35,10 +35,10 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 26.4% (328/1244) |
-| Error (expected) | 196 |
-| Error (unexpected) | 0 |
-| Uncommitted changes | example files only |
+| Correct rate | 27.6% (343/1244) |
+| Error (expected) | 194 |
+| Error (unexpected) | 2 (JSX-in-try validation not implemented) |
+| Uncommitted changes | update expr result capture, destructuring defaults (in progress) |
 
 ---
 
@@ -202,6 +202,7 @@ Completed:
 - **serde** on all HIR types — requires `indexmap = { features = ["serde"] }`.
 - **TS source**: `react/compiler/packages/babel-plugin-react-compiler/src/`
 - **Fixtures**: `react/compiler/packages/babel-plugin-react-compiler/src/__tests__/fixtures/compiler/`
+- **`react/` is NOT part of this repo** — it is a local reference checkout only (for reading source/fixtures). Never `git add` or commit anything under `react/`.
 - **inlined_exprs propagation**: After scope emission assigns tN names, must propagate through inlined_exprs to update stale $tN references. Done at both emit_scope_block_inner sites.
 
 ---

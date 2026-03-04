@@ -9,3 +9,6 @@ rust-react-compiler/target/
 
 # OS
 .DS_Store
+
+# React source checkout (reference only, not part of this repo)
+react/
