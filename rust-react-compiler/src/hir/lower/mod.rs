@@ -96,6 +96,9 @@ pub struct LoweringContext<'env> {
 
     /// Exception handler stack (innermost try's catch block)
     pub exception_handler_stack: Vec<BlockId>,
+
+    /// True when the current block is a dead placeholder (after terminate() with no live successor)
+    pub current_dead: bool,
 }
 
 impl<'env> LoweringContext<'env> {
@@ -109,7 +112,12 @@ impl<'env> LoweringContext<'env> {
             entry: entry_id,
             scopes: Vec::new(),
             exception_handler_stack: Vec::new(),
+            current_dead: false,
         }
+    }
+
+    pub fn is_current_dead(&self) -> bool {
+        self.current_dead
     }
 
     // -----------------------------------------------------------------------
@@ -126,6 +134,7 @@ impl<'env> LoweringContext<'env> {
     pub fn terminate_with_fallthrough(&mut self, terminal: Terminal, next_id: BlockId, next_kind: BlockKind) {
         self.seal_current(terminal);
         self.current = WipBlock::new(next_id, next_kind);
+        self.current_dead = false;
     }
 
     /// Seal the current block with `terminal`. Does NOT start a new block.
@@ -135,6 +144,7 @@ impl<'env> LoweringContext<'env> {
         // Start a dead block so push() calls after this don't panic
         let dead_id = self.env.new_block_id();
         self.current = WipBlock::new(dead_id, BlockKind::Block);
+        self.current_dead = true;
     }
 
     fn seal_current(&mut self, terminal: Terminal) {
@@ -167,6 +177,7 @@ impl<'env> LoweringContext<'env> {
     /// The caller must have already terminated the current block.
     pub fn switch_to(&mut self, id: BlockId, kind: BlockKind) {
         self.current = WipBlock::new(id, kind);
+        self.current_dead = false;
     }
 
     // -----------------------------------------------------------------------

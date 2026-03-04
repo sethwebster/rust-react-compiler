@@ -149,20 +149,23 @@ pub fn lower_switch_statement<'a>(
 
         for consequent_stmt in &case.consequent {
             lower_stmt(consequent_stmt, ctx)?;
-            // Stop if a statement already terminated this block (break/return/throw).
-            if ctx.current_block_id() != case_block_id {
+            // Stop only when control flow is truly dead (break/return/throw).
+            // Inner if/while/etc. change current_block_id but are NOT dead ends.
+            if ctx.is_current_dead() {
                 break;
             }
         }
 
         // If the block is still open, emit implicit fallthrough to the next
         // case block or to the switch fallthrough.
-        if ctx.current_block_id() == case_block_id {
+        // Use GotoVariant::Try (natural flow) — NOT Break — so codegen can
+        // distinguish implicit fallthrough from an explicit `break;` statement.
+        if !ctx.is_current_dead() {
             let next_block = case_ids.get(i + 1).copied().unwrap_or(fall_id);
             let goto_id = ctx.next_instruction_id();
             ctx.terminate(Terminal::Goto {
                 block: next_block,
-                variant: GotoVariant::Break,
+                variant: GotoVariant::Try,
                 id: goto_id,
                 loc: loc.clone(),
             });

@@ -317,6 +317,38 @@ struct Codegen<'a> {
     /// Maps IdentifierId.0 → renamed string (e.g., "x" → "x_0").
     /// Built during Codegen::new() by detecting naming conflicts in program order.
     name_overrides: HashMap<u32, String>,
+    /// Maps switch terminal InstructionId → sequential label number (bb0, bb1, ...).
+    /// Only populated for switches that need explicit labels (where at least one
+    /// case has an explicit Break goto to the switch fallthrough).
+    switch_labels: HashMap<InstructionId, u32>,
+    /// Maps switch fallthrough BlockId → label string (e.g., "bb0").
+    /// Used during emit to produce `break <label>;` inside case bodies.
+    switch_fallthrough_labels: HashMap<BlockId, String>,
+}
+
+/// Traverse blocks reachable from `start` (not crossing `fall_bid`) and check
+/// if any has a Goto(fall_bid, Break) terminal — indicating an explicit `break;`.
+fn case_subgraph_has_explicit_break(
+    blocks: &indexmap::IndexMap<BlockId, crate::hir::hir::BasicBlock>,
+    start: BlockId,
+    fall_bid: BlockId,
+) -> bool {
+    use std::collections::HashSet;
+    let mut visited: HashSet<BlockId> = HashSet::new();
+    let mut stack = vec![start];
+    while let Some(bid) = stack.pop() {
+        if bid == fall_bid || !visited.insert(bid) { continue; }
+        let Some(block) = blocks.get(&bid) else { continue; };
+        if let Terminal::Goto { block: dest, variant, .. } = &block.terminal {
+            if *dest == fall_bid && *variant == GotoVariant::Break {
+                return true;
+            }
+        }
+        for succ in block.terminal.successors() {
+            stack.push(succ);
+        }
+    }
+    false
 }
 
 /// Helper: determine if an instruction is assigned to scope `sid`.
@@ -745,10 +777,31 @@ impl<'a> Codegen<'a> {
             within_loop_scopes: std::collections::HashSet::new(),
             inline_js_referenced_ids,
             name_overrides,
+            switch_labels: HashMap::new(),
+            switch_fallthrough_labels: HashMap::new(),
         }
     }
 
     fn emit(&mut self) -> String {
+        // Assign sequential label numbers to switches that need labels.
+        // A switch needs a label when any block in any case subgraph has an
+        // explicit Break goto to the fallthrough (i.e., source had `break;`).
+        let mut label_counter: u32 = 0;
+        for (_, block) in &self.hir.body.blocks {
+            if let Terminal::Switch { cases, fallthrough, id: switch_id, .. } = &block.terminal {
+                let fall_bid = *fallthrough;
+                let needs_label = cases.iter().any(|c| {
+                    case_subgraph_has_explicit_break(&self.hir.body.blocks, c.block, fall_bid)
+                });
+                if needs_label {
+                    let label_str = format!("bb{label_counter}");
+                    self.switch_labels.insert(*switch_id, label_counter);
+                    self.switch_fallthrough_labels.insert(fall_bid, label_str);
+                    label_counter += 1;
+                }
+            }
+        }
+
         // Collect instructions in block order.
         let ordered = self.collect_instructions_in_order();
 
@@ -1037,9 +1090,16 @@ impl<'a> Codegen<'a> {
                 Terminal::Goto { block: next, variant, .. } => {
                     match variant {
                         GotoVariant::Break => {
-                            // Emit `break;` when inside a loop/switch body and the
-                            // target is NOT the current stop boundary (the loop test).
-                            if stop_at.is_some() && Some(*next) != stop_at {
+                            if Some(*next) == stop_at {
+                                // Exiting the current control structure.
+                                // If this is a labeled switch exit, emit `break <label>;`.
+                                if let Some(label) = self.switch_fallthrough_labels.get(next).cloned() {
+                                    let _ = writeln!(out, "{pad}break {label};");
+                                }
+                                // else: natural fallthrough — emit nothing.
+                                return;
+                            } else if stop_at.is_some() {
+                                // Breaking out of an inner structure (loop inside switch, etc.)
                                 let _ = writeln!(out, "{pad}break;");
                                 return;
                             }
@@ -1466,12 +1526,19 @@ impl<'a> Codegen<'a> {
                     continue;
                 }
 
-                Terminal::Switch { test, cases, fallthrough, .. } => {
+                Terminal::Switch { test, cases, fallthrough, id: switch_id, .. } => {
                     let test_expr = self.expr(test);
                     let fall_bid = *fallthrough;
-                    let _ = writeln!(out, "{pad}switch ({test_expr}) {{");
+                    let switch_label_opt = self.switch_labels.get(switch_id).copied();
+                    let switch_label = switch_label_opt.map(|n| format!("bb{n}"));
+                    if let Some(ref label) = switch_label {
+                        let _ = writeln!(out, "{pad}{label}: switch ({test_expr}) {{");
+                    } else {
+                        let _ = writeln!(out, "{pad}switch ({test_expr}) {{");
+                    }
                     let body_pad = indent + 1;
                     let case_pad = "  ".repeat(body_pad);
+                    let inner_pad = "  ".repeat(body_pad + 1);
                     for case in cases {
                         if let Some(t) = &case.test {
                             let _ = writeln!(out, "{case_pad}case {}: {{", self.expr(t));
