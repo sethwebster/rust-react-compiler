@@ -38,7 +38,7 @@ Update the following before stopping:
 | Correct rate | 24.4% (304/1244) |
 | Error (expected) | 196 |
 | Error (unexpected) | 0 |
-| Uncommitted changes | 1 file (align_reactive_scopes_to_block_scopes_hir.rs) |
+| Uncommitted changes | none |
 
 ---
 
@@ -46,10 +46,7 @@ Update the following before stopping:
 
 **Active plan**: [`plans/correctness-300-to-500.md`](./plans/correctness-300-to-500.md)
 
-Next up: **Phase 3 — ReactiveFunction Critical Path** (target: 300 → 400+)
-- [ ] 3a. Stabilize `build_reactive_scope_terminals_hir` (implemented behind feature flag; currently regresses output when enabled)
-- [ ] 3b. Continue `build_reactive_function` from skeleton to full CFG→tree conversion
-- [ ] 3c. Implement `codegen_reactive_function` and wire dual codegen fallback
+Investigating highest-impact improvements to correctness. Attempted full SCCP constant propagation (branch pruning, phi eval, unary folding) but it regressed 304→299 — reverted. Now analyzing 744 mismatch fixtures to find the most impactful category to fix.
 
 ---
 
@@ -88,24 +85,9 @@ Next up: **Phase 3 — ReactiveFunction Critical Path** (target: 300 → 400+)
 
 ## Completed This Session
 
-- `prune_non_escaping_scopes.rs`: optional chaining fix — InlineJs dep bridging (+2, 282→284)
-- Mismatch analysis: categorized 764 wrong-output fixtures into 9 root causes
-- Created plan: `plans/correctness-284-to-350.md`
-- `hir_codegen.rs`: ident_name resolves FunctionExpression name_hint (+1)
-- `hir_codegen.rs`: for-loop init reassembly into for-header (+1)
-- `pipeline.rs`: outline_functions before DCE; DCE protects outlined FunctionExpression (+1)
-- `hir_codegen.rs`: skip outlined FunctionExpression stmt, self-assignment guards
-- Investigated is_named_var for const outputs — deferred (regresses 50+ fixtures)
-- 284 → 287 correct (+3 net)
-- `build_reactive_function.rs`: implemented initial ReactiveFunction tree builder skeleton (WIP)
-- `propagate_scope_dependencies_hir.rs`: added phi tracing map and fixed missing `phi_operands` call plumbing
-- Fixture suite compile restored after propagation-signature regression
-- `is-port-done-yet`: added push API + realtime agent activity strip + milestone reaction burst
-- `build_reactive_scope_terminals_hir.rs`: implemented TS-style block rewrite pipeline (scope start/end rewrites, phi predecessor remap, RPO reorder, predecessor fixup)
-- `flatten_reactive_loops_hir.rs`: implemented TS loop-pruning behavior (`ReactiveScope` → `PrunedScope` inside active loops)
-- `build_reactive_function.rs`: added explicit handling for `Terminal::ReactiveScope` and `Terminal::PrunedScope`
-- `pipeline.rs`: wired scope-terminal pass to env-aware entrypoint (`run_with_env`)
-
+- Previous sessions: see History table below
+- Attempted full SCCP constant_propagation rewrite (branch pruning, phi eval, unary/binary folding, graph cleanup) — regressed 304→299, reverted
+- Analyzing 744 mismatch fixtures to identify highest-impact fix category
 ---
 
 ## Blocked On
