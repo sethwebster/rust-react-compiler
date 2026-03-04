@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::fmt::Write;
 
 use crate::hir::hir::{
-    ArrayElement, BlockId, BinaryOperator, CallArg, FunctionExpressionType,
+    ArrayElement, BlockId, BinaryOperator, CallArg, DeclarationId, FunctionExpressionType,
     GotoVariant, HIRFunction, Instruction, InstructionId, InstructionKind, InstructionValue,
     JsxAttribute, JsxTag, NonLocalBinding, ObjectExpressionProperty, ObjectProperty,
     ObjectPropertyKey, ObjectPatternProperty, Param, Pattern, Place, PrimitiveValue,
@@ -328,10 +328,10 @@ struct Codegen<'a> {
     /// Populated during scope emission so that references to scope outputs
     /// outside the scope resolve to the correct temp name instead of "$tN".
     scope_output_names: HashMap<u32, String>,
-    /// Set of identifier names that are targets of reassignment or update expressions.
+    /// Set of DeclarationIds that are targets of reassignment or update expressions.
     /// Used to emit `let` instead of `const` for destructuring patterns whose
     /// bound variables are later mutated (e.g., `let { c } = t0` when `c++` follows).
-    reassigned_names: std::collections::HashSet<String>,
+    reassigned_decl_ids: std::collections::HashSet<DeclarationId>,
 }
 
 /// Traverse blocks reachable from `start` (not crossing `fall_bid`) and check
@@ -769,27 +769,23 @@ impl<'a> Codegen<'a> {
             }
         }
 
-        // Precompute names of variables that are reassigned or mutated via update
-        // expressions. Destructuring bindings whose names appear here should use `let`.
-        let mut reassigned_names = std::collections::HashSet::new();
+        // Precompute DeclarationIds of variables that are reassigned or mutated via
+        // update expressions. Destructuring bindings with these IDs should use `let`.
+        let mut reassigned_decl_ids = std::collections::HashSet::new();
         for (_, block) in &hir.body.blocks {
             for instr in &block.instructions {
                 match &instr.value {
                     InstructionValue::StoreLocal { lvalue, .. }
                         if matches!(lvalue.kind, InstructionKind::Reassign) =>
                     {
-                        if let Some(name) = env.get_identifier(lvalue.place.identifier)
-                            .and_then(|i| i.name.as_ref())
-                        {
-                            reassigned_names.insert(name.value().to_string());
+                        if let Some(ident) = env.get_identifier(lvalue.place.identifier) {
+                            reassigned_decl_ids.insert(ident.declaration_id);
                         }
                     }
                     InstructionValue::PrefixUpdate { lvalue, .. }
                     | InstructionValue::PostfixUpdate { lvalue, .. } => {
-                        if let Some(name) = env.get_identifier(lvalue.identifier)
-                            .and_then(|i| i.name.as_ref())
-                        {
-                            reassigned_names.insert(name.value().to_string());
+                        if let Some(ident) = env.get_identifier(lvalue.identifier) {
+                            reassigned_decl_ids.insert(ident.declaration_id);
                         }
                     }
                     _ => {}
@@ -816,7 +812,7 @@ impl<'a> Codegen<'a> {
             switch_labels: HashMap::new(),
             switch_fallthrough_labels: HashMap::new(),
             scope_output_names: HashMap::new(),
-            reassigned_names,
+            reassigned_decl_ids,
         }
     }
 
@@ -3760,22 +3756,23 @@ impl<'a> Codegen<'a> {
                 let any_reassigned = match &lvalue.pattern {
                     Pattern::Array(ap) => ap.items.iter().any(|e| match e {
                         ArrayElement::Place(p) => {
-                            let name = self.ident_name(p.identifier);
-                            self.reassigned_names.contains(&name)
+                            self.env.get_identifier(p.identifier)
+                                .map(|i| self.reassigned_decl_ids.contains(&i.declaration_id))
+                                .unwrap_or(false)
                         }
                         _ => false,
                     }),
                     Pattern::Object(op) => op.properties.iter().any(|p| match p {
                         ObjectPatternProperty::Property(prop) => {
-                            let name = self.ident_name(prop.place.identifier);
-                            self.reassigned_names.contains(&name)
+                            self.env.get_identifier(prop.place.identifier)
+                                .map(|i| self.reassigned_decl_ids.contains(&i.declaration_id))
+                                .unwrap_or(false)
                         }
                         _ => false,
                     }),
                 };
                 let kw = match lvalue.kind {
                     InstructionKind::Reassign => "",
-                    InstructionKind::Let => "let",
                     _ if any_reassigned => "let",
                     _ => "const",
                 };
