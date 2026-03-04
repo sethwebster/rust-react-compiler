@@ -113,6 +113,10 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CodegenOutput> {
         || first_line.contains("@outputMode: \"lint\"")
         || first_line.contains("@outputMode: 'lint'");
 
+    // Whether the file uses @compilationMode:"infer" (only compile components/hooks).
+    let infer_mode = first_line.contains("@compilationMode:\"infer\"")
+        || first_line.contains("@compilationMode:'infer'");
+
     for (i, &(start, end)) in fn_spans.iter().enumerate() {
         // In lint mode, passthrough all functions without transformation.
         if lint_mode {
@@ -120,6 +124,15 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CodegenOutput> {
             let pt = emit_passthrough(&fn_src, source_type);
             compiled_fns.push((start, end, pt));
             continue;
+        }
+        // In infer mode, skip functions that don't contain hooks or JSX.
+        if infer_mode {
+            let fn_src = source.get(start as usize..end as usize).unwrap_or("");
+            if !fn_body_has_hooks_or_jsx(fn_src) {
+                let pt = emit_passthrough(fn_src, source_type);
+                compiled_fns.push((start, end, pt));
+                continue;
+            }
         }
         let mut env = Environment::new(options.fn_type, options.config.clone(), options.filename.clone());
         match lower_program_nth(source, source_type, &mut env, i) {
@@ -373,6 +386,41 @@ fn splice_compiled_fns(
     }
 
     output
+}
+
+/// Quick heuristic check: does a function body source string contain hook calls or JSX?
+/// Used for @compilationMode:"infer" to skip non-component/non-hook functions.
+fn fn_body_has_hooks_or_jsx(fn_src: &str) -> bool {
+    // Check for JSX: any `<` followed by an uppercase letter or lowercase identifier
+    // This is a heuristic — not a full parse.
+    let bytes = fn_src.as_bytes();
+    for i in 0..bytes.len() {
+        if bytes[i] == b'<' && i + 1 < bytes.len() {
+            let next = bytes[i + 1];
+            // JSX tags: <Foo, <div, <Component.X, etc.
+            // But not <=/< operators. A letter after < suggests JSX.
+            if next.is_ascii_alphabetic() {
+                return true;
+            }
+        }
+    }
+    // Check for hook calls: useXxx( pattern
+    // Match word boundary + "use" + uppercase letter
+    let src = fn_src;
+    let mut pos = 0;
+    while let Some(idx) = src[pos..].find("use") {
+        let abs = pos + idx;
+        // Check word boundary before "use"
+        let at_boundary = abs == 0 || !src.as_bytes()[abs - 1].is_ascii_alphanumeric();
+        if at_boundary && abs + 3 < src.len() {
+            let after = src.as_bytes()[abs + 3];
+            if after.is_ascii_uppercase() {
+                return true;
+            }
+        }
+        pos = abs + 3;
+    }
+    false
 }
 
 /// Re-emit source as clean JS using oxc_codegen (strips TypeScript type annotations).
