@@ -35,10 +35,10 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 24.1% (300/1244) |
+| Correct rate | 24.4% (304/1244) |
 | Error (expected) | 196 |
 | Error (unexpected) | 0 |
-| Uncommitted changes | 6 files (5 modified, 1 untracked) |
+| Uncommitted changes | 1 file (align_reactive_scopes_to_block_scopes_hir.rs) |
 
 ---
 
@@ -154,7 +154,7 @@ Next up: **Phase 3 — ReactiveFunction Critical Path** (target: 300 → 400+)
 | codegen_reactive_function | reactive_scopes/codegen_reactive_function.rs | STUB | 14 |
 | align_method_call_scopes | reactive_scopes/align_method_call_scopes.rs | STUB | 2 |
 | align_object_method_scopes | reactive_scopes/align_object_method_scopes.rs | STUB | 2 |
-| align_reactive_scopes_to_block_scopes_hir | reactive_scopes/align_reactive_scopes... | STUB | 2 |
+| align_reactive_scopes_to_block_scopes_hir | reactive_scopes/align_reactive_scopes... | REAL | ~305 |
 | assert_well_formed_break_targets | reactive_scopes/assert_well_formed_break_targets.rs | STUB | 2 |
 | extract_scope_declarations_from_destructuring | reactive_scopes/extract_scope_decl... | STUB | 2 |
 | flatten_reactive_loops_hir | reactive_scopes/flatten_reactive_loops_hir.rs | PARTIAL (flagged) | ~50 |
@@ -226,3 +226,4 @@ codegen (currently bypasses ReactiveFunction) → oxc_codegen → JS output
 | 2026-03-03 | 84.2 | 24.1 | — | 16 | 36 | ralph-loop iter3: tree builder skeleton, scope inference investigation |
 | 2026-03-03 | 84.2 | 24.1 | — | 16 | 36 | fixed propagate_scope_dependencies compile regression (`phi_operands` threading) |
 | 2026-03-03 | 84.2 | 24.1 | — | 16 | 36 | implemented scope-terminals + loop-flatten passes behind flags; scoped regression isolated (`for-of`/duplicate return under flag) |
+| 2026-03-04 | 84.2 | 24.4 | — | 17 | 35 | align_reactive_scopes_to_block_scopes_hir: stub→REAL (+4 correct, 300→304) |
