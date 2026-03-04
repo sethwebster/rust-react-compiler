@@ -3776,12 +3776,28 @@ impl<'a> Codegen<'a> {
 
             InstructionValue::PrefixUpdate { lvalue, operation, .. } => {
                 let op = update_op_str(operation);
-                Some(format!("{}{}; ", op, self.expr(lvalue)))
+                let expr_str = format!("{}{}", op, self.expr(lvalue));
+                // Check if the result is captured into a different variable
+                let result_lv = self.lvalue_name(&instr.lvalue);
+                let target_name = self.expr(lvalue);
+                if result_lv != target_name && !result_lv.starts_with("$t") {
+                    Some(format!("const {result_lv} = {expr_str};"))
+                } else {
+                    Some(format!("{expr_str};"))
+                }
             }
 
             InstructionValue::PostfixUpdate { lvalue, operation, .. } => {
                 let op = update_op_str(operation);
-                Some(format!("{}{};", self.expr(lvalue), op))
+                let expr_str = format!("{}{}", self.expr(lvalue), op);
+                // Check if the result is captured into a different variable
+                let result_lv = self.lvalue_name(&instr.lvalue);
+                let target_name = self.expr(lvalue);
+                if result_lv != target_name && !result_lv.starts_with("$t") {
+                    Some(format!("const {result_lv} = {expr_str};"))
+                } else {
+                    Some(format!("{expr_str};"))
+                }
             }
 
             InstructionValue::RegExpLiteral { pattern, flags, .. } => {
