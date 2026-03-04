@@ -65,6 +65,20 @@ pub fn constant_propagation(hir: &mut HIRFunction) {
                 }
             }
 
+            // Constant folding for UnaryExpression where operand is known.
+            if let InstructionValue::UnaryExpression { value, operator, loc } = &instr.value {
+                let val = ssa_constants.get(&value.identifier)
+                    .or_else(|| local_constants.get(&value.identifier))
+                    .cloned();
+                if let Some(val) = val {
+                    let loc = loc.clone();
+                    if let Some(result) = fold_unary(val, operator) {
+                        instr.value = InstructionValue::Primitive { value: result.clone(), loc };
+                        ssa_constants.insert(instr.lvalue.identifier, result);
+                    }
+                }
+            }
+
             // Constant folding for BinaryExpression where both operands are known.
             if let InstructionValue::BinaryExpression { left, right, operator, loc } = &instr.value {
                 let lv = ssa_constants.get(&left.identifier)
@@ -86,16 +100,74 @@ pub fn constant_propagation(hir: &mut HIRFunction) {
     }
 }
 
+fn fold_unary(val: PrimitiveValue, op: &UnaryOperator) -> Option<PrimitiveValue> {
+    match op {
+        UnaryOperator::Not => {
+            let b = match &val {
+                PrimitiveValue::Boolean(b) => !b,
+                PrimitiveValue::Number(n) => *n == 0.0 || n.is_nan(),
+                PrimitiveValue::String(s) => s.is_empty(),
+                PrimitiveValue::Null | PrimitiveValue::Undefined => true,
+            };
+            Some(PrimitiveValue::Boolean(b))
+        }
+        UnaryOperator::Minus => match val {
+            PrimitiveValue::Number(n) => Some(PrimitiveValue::Number(-n)),
+            _ => None,
+        },
+        UnaryOperator::Plus => match val {
+            PrimitiveValue::Number(n) => Some(PrimitiveValue::Number(n)),
+            PrimitiveValue::Boolean(b) => Some(PrimitiveValue::Number(if b { 1.0 } else { 0.0 })),
+            _ => None,
+        },
+        UnaryOperator::BitNot => match val {
+            PrimitiveValue::Number(n) => Some(PrimitiveValue::Number(!(n as i32) as f64)),
+            _ => None,
+        },
+        UnaryOperator::Typeof => {
+            let t = match &val {
+                PrimitiveValue::Number(_) => "number",
+                PrimitiveValue::Boolean(_) => "boolean",
+                PrimitiveValue::String(_) => "string",
+                PrimitiveValue::Null => "object",
+                PrimitiveValue::Undefined => "undefined",
+            };
+            Some(PrimitiveValue::String(t.to_string()))
+        }
+        UnaryOperator::Void => Some(PrimitiveValue::Undefined),
+    }
+}
+
 fn fold_binary(left: PrimitiveValue, right: PrimitiveValue, op: BinaryOperator) -> Option<PrimitiveValue> {
+    // Strict equality/inequality works across all primitive types
+    match op {
+        BinaryOperator::StrictEq => return Some(PrimitiveValue::Boolean(left == right)),
+        BinaryOperator::StrictNEq => return Some(PrimitiveValue::Boolean(left != right)),
+        _ => {}
+    }
+
     match (left, right) {
         (PrimitiveValue::String(a), PrimitiveValue::String(b)) => {
-            if op == BinaryOperator::Add {
-                Some(PrimitiveValue::String(a + &b))
-            } else {
-                None
+            match op {
+                BinaryOperator::Add => Some(PrimitiveValue::String(a + &b)),
+                BinaryOperator::Lt => Some(PrimitiveValue::Boolean(a < b)),
+                BinaryOperator::LtEq => Some(PrimitiveValue::Boolean(a <= b)),
+                BinaryOperator::Gt => Some(PrimitiveValue::Boolean(a > b)),
+                BinaryOperator::GtEq => Some(PrimitiveValue::Boolean(a >= b)),
+                _ => None,
             }
         }
         (PrimitiveValue::Number(a), PrimitiveValue::Number(b)) => {
+            // Comparison operators return boolean
+            match op {
+                BinaryOperator::Lt => return Some(PrimitiveValue::Boolean(a < b)),
+                BinaryOperator::LtEq => return Some(PrimitiveValue::Boolean(a <= b)),
+                BinaryOperator::Gt => return Some(PrimitiveValue::Boolean(a > b)),
+                BinaryOperator::GtEq => return Some(PrimitiveValue::Boolean(a >= b)),
+                BinaryOperator::Eq => return Some(PrimitiveValue::Boolean(a == b)),
+                BinaryOperator::NEq => return Some(PrimitiveValue::Boolean(a != b)),
+                _ => {}
+            }
             let result = match op {
                 BinaryOperator::Add => a + b,
                 BinaryOperator::Sub => a - b,

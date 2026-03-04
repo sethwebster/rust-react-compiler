@@ -20,19 +20,26 @@ pub fn run_with_env(hir: &mut HIRFunction, env: &mut Environment) {
         return;
     }
 
-    // Build map: hook-producing identifiers (LoadGlobal of hook names).
+    // Build map: identifiers → names (from LoadGlobal and PropertyLoad).
     let mut global_names: std::collections::HashMap<IdentifierId, String> = std::collections::HashMap::new();
     for (_, block) in &hir.body.blocks {
         for instr in &block.instructions {
-            if let InstructionValue::LoadGlobal { binding, .. } = &instr.value {
-                let name = match binding {
-                    NonLocalBinding::Global { name } => name.clone(),
-                    NonLocalBinding::ModuleLocal { name } => name.clone(),
-                    NonLocalBinding::ImportDefault { name, .. }
-                    | NonLocalBinding::ImportNamespace { name, .. }
-                    | NonLocalBinding::ImportSpecifier { name, .. } => name.clone(),
-                };
-                global_names.insert(instr.lvalue.identifier, name);
+            match &instr.value {
+                InstructionValue::LoadGlobal { binding, .. } => {
+                    let name = match binding {
+                        NonLocalBinding::Global { name } => name.clone(),
+                        NonLocalBinding::ModuleLocal { name } => name.clone(),
+                        NonLocalBinding::ImportDefault { name, .. }
+                        | NonLocalBinding::ImportNamespace { name, .. }
+                        | NonLocalBinding::ImportSpecifier { name, .. } => name.clone(),
+                    };
+                    global_names.insert(instr.lvalue.identifier, name);
+                }
+                // Track property names for method calls like React.useState
+                InstructionValue::PropertyLoad { property, .. } => {
+                    global_names.insert(instr.lvalue.identifier, property.clone());
+                }
+                _ => {}
             }
         }
     }
@@ -64,8 +71,15 @@ pub fn run_with_env(hir: &mut HIRFunction, env: &mut Environment) {
                             }
                         }
                     }
-                    // Also check for direct DestructuredHookCall / array-pattern destructuring
-                    // of hook results if they appear as instructions.
+                    InstructionValue::MethodCall { property, .. } => {
+                        // Method calls like React.useState(), obj.useHook()
+                        if let Some(name) = global_names.get(&property.identifier) {
+                            if is_hook_name(name) {
+                                scopes_with_hooks.insert(sid);
+                                break 'instr;
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }

@@ -1145,7 +1145,7 @@ impl InstructionValue {
 // Helper enums for InstructionValue
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PrimitiveValue {
     Number(f64),
     Boolean(bool),
