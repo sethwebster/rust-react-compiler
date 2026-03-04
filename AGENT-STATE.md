@@ -35,10 +35,10 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 27.6% (343/1244) |
+| Correct rate | 27.9% (347/1244) |
 | Error (expected) | 194 |
 | Error (unexpected) | 2 (JSX-in-try validation not implemented) |
-| Uncommitted changes | update expr result capture, destructuring defaults (in progress) |
+| Uncommitted changes | none |
 
 ---
 
@@ -46,20 +46,20 @@ Update the following before stopping:
 
 **Active work**: Improving correctness rate through targeted fixes.
 
-Session progress: 304 → 307 → 311 → 328 (+24 correct fixtures total this session).
+Session progress: 328 → 335 → 341 → 343 → 344 → 347 (across multiple sessions).
 
-Completed:
-- Constant propagation comparison/unary folding (+1, 304→305)
-- Hook method call scope flattening (+2, 305→307)
-- Scope output name propagation for $tN→tN resolution (+4, 307→311)
-- @outputMode:"lint" pragma + module-level 'use no memo' passthrough (+17, 311→328)
+Recent completed:
+- Pragma support + improved infer mode (+6, 335→341)
+- Update expression result capture (+2, 341→343)
+- @gating pragma passthrough (+1, 343→344)
+- Destructuring const→let for mutated bindings (+2, 345→347)
 
 **Next priorities** (by impact):
-1. Scope pruning for always-invalidating scopes (~5 fixtures)
-2. Compilation bailout for conditional hooks / global mutation (~4 fixtures)
-3. useMemo preservation in validation modes (~7 fixtures)
-4. Remaining $tN naming issues (67 fixtures with $tN in output)
-5. Try-catch variable naming (2 fixtures)
+1. Missing memoization (56 fixtures) — scope inference gaps for optional calls, closures
+2. Passthrough DCE/const-prop improvements (72 fixtures)
+3. Remaining $tN naming issues (67 fixtures with $tN in output)
+4. Scope slot count mismatches (337 fixtures) — scope merging issues
+5. Function outlining naming (_temp→_ComponentOnClick, 1 fixture)
 
 ---
 
@@ -123,7 +123,7 @@ Completed:
 - Codegen (`hir_codegen.rs`) currently operates on raw `HIR`, not `ReactiveFunction`
   - Fix requires full tree build + dual codegen integration first
 - Enabling `RC_ENABLE_SCOPE_TERMINALS_HIR=1` currently regresses correctness (24.1% → 20.2%)
-- SSH push fails — no SSH key for `claude-code` user (remote: git@github.com:sethwebster/rust-react-compiler.git)
+- Git push now works (SSH key configured)
 
 ---
 
@@ -236,3 +236,5 @@ codegen (currently bypasses ReactiveFunction) → oxc_codegen → JS output
 | 2026-03-03 | 84.2 | 24.1 | — | 16 | 36 | scope-terminals + loop-flatten passes behind flags |
 | 2026-03-04 | 84.2 | 24.4 | — | 17 | 35 | align_reactive_scopes_to_block_scopes_hir: stub→REAL (+4) |
 | 2026-03-04 | 84.2 | 26.4 | — | 17 | 35 | const-prop folding (+1), hook method call (+2), scope output naming (+4), lint mode + use-no-memo (+17) |
+| 2026-03-04 | 84.2 | 27.7 | — | 17 | 35 | pragma support (+6), update expr results (+2), @gating (+1) |
+| 2026-03-04 | 84.2 | 27.9 | — | 17 | 35 | destructuring const→let for mutated bindings (+2) |
