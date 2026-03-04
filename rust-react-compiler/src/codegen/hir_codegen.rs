@@ -324,6 +324,10 @@ struct Codegen<'a> {
     /// Maps switch fallthrough BlockId → label string (e.g., "bb0").
     /// Used during emit to produce `break <label>;` inside case bodies.
     switch_fallthrough_labels: HashMap<BlockId, String>,
+    /// Maps identifier id → scope output temp name (e.g., "t0", "t1").
+    /// Populated during scope emission so that references to scope outputs
+    /// outside the scope resolve to the correct temp name instead of "$tN".
+    scope_output_names: HashMap<u32, String>,
 }
 
 /// Traverse blocks reachable from `start` (not crossing `fall_bid`) and check
@@ -779,6 +783,7 @@ impl<'a> Codegen<'a> {
             name_overrides,
             switch_labels: HashMap::new(),
             switch_fallthrough_labels: HashMap::new(),
+            scope_output_names: HashMap::new(),
         }
     }
 
@@ -1782,6 +1787,16 @@ impl<'a> Codegen<'a> {
             } else {
                 let t = format!("t{}", *scope_index + self.param_name_offset);
                 *scope_index += 1;
+                // Map the value identifier of the skipped instruction to this temp name,
+                // so references outside the scope resolve to tN instead of $tN.
+                if let Some(skip_idx) = output.skip_idx {
+                    if let Some(instr) = instrs.get(skip_idx) {
+                        if let InstructionValue::StoreLocal { value, .. } = &instr.value {
+                            self.scope_output_names.insert(value.identifier.0, t.clone());
+                        }
+                        self.scope_output_names.insert(instr.lvalue.identifier.0, t.clone());
+                    }
+                }
                 output_cache_vars.push(t);
             }
         }
@@ -1932,10 +1947,24 @@ impl<'a> Codegen<'a> {
         }
 
         // After scope emission, override inlined_exprs for each skipped instruction.
+        // Collect the old->new mappings so we can propagate them.
+        let mut old_to_new: Vec<(String, String)> = Vec::new();
         for (output, cache_var) in analysis.outputs.iter().zip(&output_cache_vars) {
             if let Some(skip_i) = output.skip_idx {
                 if let Some(skip_instr) = instrs.get(skip_i) {
+                    let old_name = format!("$t{}", skip_instr.lvalue.identifier.0);
+                    old_to_new.push((old_name, cache_var.clone()));
                     self.inlined_exprs.insert(skip_instr.lvalue.identifier.0, cache_var.clone());
+                }
+            }
+        }
+        // Propagate: update any inlined_exprs entries that still reference old $tN names.
+        if !old_to_new.is_empty() {
+            for value in self.inlined_exprs.values_mut() {
+                for (old_name, new_name) in &old_to_new {
+                    if value == old_name {
+                        *value = new_name.clone();
+                    }
                 }
             }
         }
@@ -2059,6 +2088,14 @@ impl<'a> Codegen<'a> {
             } else {
                 let t = format!("t{}", *scope_index + self.param_name_offset);
                 *scope_index += 1;
+                if let Some(skip_idx) = output.skip_idx {
+                    if let Some(instr) = scope_instr_refs.get(skip_idx) {
+                        if let InstructionValue::StoreLocal { value, .. } = &instr.value {
+                            self.scope_output_names.insert(value.identifier.0, t.clone());
+                        }
+                        self.scope_output_names.insert(instr.lvalue.identifier.0, t.clone());
+                    }
+                }
                 output_cache_vars.push(t);
             }
         }
@@ -2308,10 +2345,22 @@ impl<'a> Codegen<'a> {
         }
 
         // Override inlined_exprs for skipped instructions.
+        let mut old_to_new: Vec<(String, String)> = Vec::new();
         for (output, cache_var) in analysis.outputs.iter().zip(&output_cache_vars) {
             if let Some(skip_i) = output.skip_idx {
                 if let Some(skip_instr) = scope_instr_refs.get(skip_i) {
+                    let old_name = format!("$t{}", skip_instr.lvalue.identifier.0);
+                    old_to_new.push((old_name, cache_var.clone()));
                     self.inlined_exprs.insert(skip_instr.lvalue.identifier.0, cache_var.clone());
+                }
+            }
+        }
+        if !old_to_new.is_empty() {
+            for value in self.inlined_exprs.values_mut() {
+                for (old_name, new_name) in &old_to_new {
+                    if value == old_name {
+                        *value = new_name.clone();
+                    }
                 }
             }
         }
@@ -3903,6 +3952,10 @@ impl<'a> Codegen<'a> {
         }
         // Fall back to ssa_value_to_name for SSA temps that flow into named variables.
         if let Some(name) = self.ssa_value_to_name.get(&id.0) {
+            return name.clone();
+        }
+        // Check scope output temp names (tN assigned during scope emission).
+        if let Some(name) = self.scope_output_names.get(&id.0) {
             return name.clone();
         }
         // Check if this identifier is the lvalue of an outlined FunctionExpression.
