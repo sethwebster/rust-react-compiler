@@ -107,7 +107,20 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CodegenOutput> {
     let panic_threshold_none = first_line.contains("@panicThreshold:\"none\"")
         || first_line.contains("@panicThreshold:'none'");
 
+    // Whether the file uses @outputMode:"lint" (validate only, don't transform).
+    let lint_mode = first_line.contains("@outputMode:\"lint\"")
+        || first_line.contains("@outputMode:'lint'")
+        || first_line.contains("@outputMode: \"lint\"")
+        || first_line.contains("@outputMode: 'lint'");
+
     for (i, &(start, end)) in fn_spans.iter().enumerate() {
+        // In lint mode, passthrough all functions without transformation.
+        if lint_mode {
+            let fn_src = source.get(start as usize..end as usize).unwrap_or("").to_string();
+            let pt = emit_passthrough(&fn_src, source_type);
+            compiled_fns.push((start, end, pt));
+            continue;
+        }
         let mut env = Environment::new(options.fn_type, options.config.clone(), options.filename.clone());
         match lower_program_nth(source, source_type, &mut env, i) {
             Ok(mut hir) => {
@@ -166,6 +179,13 @@ fn collect_compilable_fn_spans(source: &str, source_type: SourceType) -> Vec<(u3
         if retry.errors.is_empty() { parse = retry; }
     }
     if !parse.errors.is_empty() { return vec![]; }
+
+    // Check module-level 'use no memo' / 'use no forget' directives.
+    let module_no_memo = parse.program.directives.iter()
+        .any(|d| matches!(d.expression.value.as_str(), "use no memo" | "use no forget"));
+    if module_no_memo {
+        return vec![]; // Skip all functions in the file.
+    }
 
     let mut spans: Vec<(u32, u32)> = Vec::new();
 
