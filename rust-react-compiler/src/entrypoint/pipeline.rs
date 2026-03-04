@@ -492,7 +492,7 @@ pub fn run_with_environment(
     propagate_scope_dependencies_hir(hir, env);
     merge_reactive_scopes_that_invalidate_together(hir, env);
     prune_non_reactive_dependencies(hir, env);
-    prune_always_invalidating_scopes(hir);
+    prune_always_invalidating_scopes(hir, env);
     propagate_early_returns(hir);
     prune_unused_lvalues(hir);
     promote_used_temporaries(hir, env);
