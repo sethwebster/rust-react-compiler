@@ -55,6 +55,8 @@ pub fn eliminate_redundant_phi(hir: &mut HIRFunction) {
                         // Pure self-loop — all operands point back to this phi.
                         // This means the variable is never actually assigned from
                         // outside; treat as undefined (keep the id, drop the phi).
+                        // Map to self so the retain filter drops this phi.
+                        replacements.insert(phi_id, phi_id);
                     }
                     1 => {
                         // All operands agree on a single non-self value.

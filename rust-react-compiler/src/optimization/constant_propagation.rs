@@ -1,6 +1,7 @@
 #![allow(unused_imports, unused_variables, dead_code)]
 use std::collections::{HashMap, HashSet};
 use crate::hir::hir::*;
+use crate::ssa::eliminate_redundant_phi::eliminate_redundant_phi;
 
 /// Lattice value for constant propagation.
 /// Top = not yet analyzed, Constant = known value, Bottom = not constant.
@@ -27,17 +28,39 @@ impl LatticeValue {
     }
 }
 
-/// Constant propagation pass with lattice-based phi resolution.
+/// JS truthiness for constant values.
+fn is_truthy(val: &PrimitiveValue) -> bool {
+    match val {
+        PrimitiveValue::Boolean(b) => *b,
+        PrimitiveValue::Number(n) => *n != 0.0 && !n.is_nan(),
+        PrimitiveValue::String(s) => !s.is_empty(),
+        PrimitiveValue::Null | PrimitiveValue::Undefined => false,
+    }
+}
+
+/// Constant propagation pass with lattice-based phi resolution and branch folding.
 ///
-/// Propagation rules:
-///   - SSA temporaries from Primitive instructions: constant
-///   - StoreLocal instruction lvalue (SSA temp): inherits value from stored constant
-///   - StoreLocal named variable target (Const kind only): inherits value cross-block
-///   - StoreLocal named variable target (Let/Reassign): block-local only in rewrite pass
-///   - Phi nodes: lattice meet of all operands (handles cycles via convergence)
-///   - LoadLocal: inherits value from source identifier
-///   - BinaryExpression/UnaryExpression with known operands: fold to constant
+/// Follows the TS compiler's SCCP approach:
+///   1. Lattice analysis + rewrite constants
+///   2. Fold If/Branch terminals when test is a known constant
+///   3. Remove unreachable blocks, prune dead phi operands, re-run phi elimination
+///   4. Loop until no more branches can be folded
 pub fn constant_propagation(hir: &mut HIRFunction) {
+    loop {
+        let branches_folded = constant_propagation_round(hir);
+        if !branches_folded {
+            break;
+        }
+        // Clean up graph after branch folding.
+        cp_remove_unreachable_blocks(hir);
+        cp_prune_dead_phi_operands(hir);
+        eliminate_redundant_phi(hir);
+    }
+}
+
+/// One round of constant propagation + branch folding.
+/// Returns true if any branches were folded.
+fn constant_propagation_round(hir: &mut HIRFunction) -> bool {
     let mut lattice: HashMap<IdentifierId, LatticeValue> = HashMap::new();
 
     // Initialize: all Primitive instruction results are constants.
@@ -87,8 +110,9 @@ pub fn constant_propagation(hir: &mut HIRFunction) {
                             || lvalue.kind == InstructionKind::HoistedConst;
                         let val = lattice.get(&value.identifier).cloned();
                         // Only propagate const declarations cross-block.
-                        // Let/Reassign variables may be mutated by closures (StoreContext)
-                        // or have multiple SSA definitions making propagation unsafe.
+                        // Let/Reassign variables share the same pre-SSA identifier
+                        // across multiple definitions, so propagating them would
+                        // cause collisions in the lattice.
                         if is_const {
                             if let Some(v) = &val {
                                 let prev = lattice.get(&lvalue.place.identifier)
@@ -233,6 +257,64 @@ pub fn constant_propagation(hir: &mut HIRFunction) {
                     }
                 }
             }
+        }
+    }
+
+    // Branch folding: replace If/Branch terminals with Goto when test is constant.
+    let mut branches_folded = false;
+    for block in hir.body.blocks.values_mut() {
+        let should_fold = match &block.terminal {
+            // Only fold If terminals. Branch is used for loop tests and
+            // ternaries — folding those corrupts loop/for codegen structure.
+            Terminal::If { test, consequent, alternate, id, loc, .. } => {
+                if let Some(LatticeValue::Constant(val)) = lattice.get(&test.identifier) {
+                    let target = if is_truthy(val) { *consequent } else { *alternate };
+                    Some(Terminal::Goto {
+                        block: target,
+                        variant: GotoVariant::Break,
+                        id: *id,
+                        loc: loc.clone(),
+                    })
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some(new_terminal) = should_fold {
+            block.terminal = new_terminal;
+            branches_folded = true;
+        }
+    }
+
+    branches_folded
+}
+
+/// Remove blocks not reachable from the entry block.
+fn cp_remove_unreachable_blocks(hir: &mut HIRFunction) {
+    let mut reachable: HashSet<BlockId> = HashSet::new();
+    let mut queue: Vec<BlockId> = vec![hir.body.entry];
+    while let Some(block_id) = queue.pop() {
+        if !reachable.insert(block_id) {
+            continue;
+        }
+        if let Some(block) = hir.body.blocks.get(&block_id) {
+            for succ in block.terminal.successors() {
+                if !reachable.contains(&succ) {
+                    queue.push(succ);
+                }
+            }
+        }
+    }
+    hir.body.blocks.retain(|id, _| reachable.contains(id));
+}
+
+/// Remove phi operands whose predecessor block no longer exists.
+fn cp_prune_dead_phi_operands(hir: &mut HIRFunction) {
+    let existing: HashSet<BlockId> = hir.body.blocks.keys().cloned().collect();
+    for block in hir.body.blocks.values_mut() {
+        for phi in &mut block.phis {
+            phi.operands.retain(|pred_id, _| existing.contains(pred_id));
         }
     }
 }
