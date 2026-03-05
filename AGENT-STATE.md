@@ -35,27 +35,30 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 28.8% (358/1244) |
+| Correct rate | 27.1% (337/1244) — **regressed from 28.8% due to WIP SCCP changes** |
 | Error (expected) | 193 |
 | Error (unexpected) | 3 (JSX-in-try validation not implemented) |
-| Uncommitted changes | lattice const-prop, dep hoisting, return/else codegen, example scripts |
+| Uncommitted changes | SCCP branch-folding rewrite of constant_propagation.rs (WIP, currently regresses) |
 
 ---
 
 ## Current Task
 
-**Active work**: Improving correctness rate through targeted fixes.
+**Active work**: SCCP (Sparse Conditional Constant Propagation) with branch folding — extending constant_propagation.rs to fold If/Branch terminals with known-constant tests, remove unreachable blocks, and iterate. Currently WIP and regressing (358→337).
 
-Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 (across multiple sessions).
+Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression, WIP).
 
 Recent completed:
-- Lattice-based constant propagation rewrite (+11 uncommitted, 347→358)
+- Lattice-based constant propagation rewrite (+11 committed, 347→358)
 - Hoist complex dep expressions to const before scope blocks
 - Return undefined → return, empty else block removal
 - Pragma support + improved infer mode (+6, 335→341)
 - Update expression result capture (+2, 341→343)
 - @gating pragma passthrough (+1, 343→344)
 - Destructuring const→let for mutated bindings (+2, 345→347)
+
+**In progress (uncommitted)**:
+- SCCP branch folding in constant_propagation.rs — adds is_truthy(), constant_propagation_round() loop, cp_remove_unreachable_blocks(), cp_prune_dead_phi_operands(). Currently causing -21 regression.
 
 **Next priorities** (by impact):
 1. Missing memoization (56 fixtures) — scope inference gaps for optional calls, closures
