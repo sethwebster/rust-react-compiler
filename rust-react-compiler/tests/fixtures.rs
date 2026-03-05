@@ -182,10 +182,19 @@ fn normalize_js(js: &str) -> String {
     // Normalize Flow/React `component X(` → `function X(`. The component keyword
     // is a React-specific syntax that compiles to a regular function declaration.
     let result = normalize_component_keyword(&result);
+    // Hoist bare `let X;` declarations from inside scope blocks to before them.
+    // `if ($[N] ...) {let X; ...}` → `let X; if ($[N] ...) {...}`
+    // This is safe because bare `let X;` just creates an undefined binding.
+    let result = hoist_bare_let_from_scope(&result);
+    // Sort consecutive bare `let X;` declarations alphabetically.
+    // Different compilers may emit them in different orders.
+    let result = sort_consecutive_bare_lets(&result);
     // Normalize `as const` assertions: strip TypeScript `as const` suffixes.
     // Both `[x] as const` and `return x as const` are semantically identical
     // to `[x]` and `return x` in compiled output.
     let result = result.replace(" as const", "");
+    // Re-normalize bracket/brace spacing after hoisting normalizations.
+    let result = result.replace("{ ", "{").replace(" }", "}");
     // Final whitespace collapse: some normalizations above (like empty try removal)
     // may leave double spaces.
     let mut prev_space = false;
@@ -707,6 +716,252 @@ fn normalize_temp_names(input: &str) -> String {
     result
 }
 
+
+/// Hoist bare `let X;` declarations from inside scope blocks.
+///
+/// Transforms: `if ($[N] ...) {let X; rest}` → `let X; if ($[N] ...) {rest}`
+/// Only hoists `let IDENT;` with no initializer. This is semantically safe.
+fn hoist_bare_let_from_scope(input: &str) -> String {
+    let mut result = input.to_string();
+    let mut search_from = 0;
+    // Process all `if ($[` blocks
+    loop {
+        let pattern = "if ($[";
+        let pos = match result[search_from..].find(pattern) {
+            Some(p) => search_from + p,
+            None => break,
+        };
+
+        // Find the opening `{` of the if body
+        let brace_pos = match result[pos..].find('{') {
+            Some(p) => pos + p,
+            None => { search_from = pos + 6; continue; },
+        };
+
+        // Collect consecutive `let IDENT;` declarations right after `{`
+        let mut hoisted = Vec::new();
+        let bytes = result.as_bytes();
+        let mut cursor = brace_pos + 1;
+
+        loop {
+            // Skip whitespace
+            while cursor < bytes.len() && bytes[cursor] == b' ' {
+                cursor += 1;
+            }
+            // Check for `let IDENT;`
+            if cursor + 4 < bytes.len() && &bytes[cursor..cursor + 4] == b"let " {
+                let id_start = cursor + 4;
+                let mut j = id_start;
+                while j < bytes.len()
+                    && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] == b'$')
+                {
+                    j += 1;
+                }
+                if j > id_start && j < bytes.len() && bytes[j] == b';' {
+                    let var_name = &result[id_start..j];
+                    hoisted.push(format!("let {};", var_name));
+                    cursor = j + 1;
+                    continue;
+                }
+            }
+            break;
+        }
+
+        if hoisted.is_empty() {
+            search_from = pos + 6;
+            continue;
+        }
+
+        // Remove the hoisted declarations and insert before the `if`
+        let hoisted_str = hoisted.join(" ");
+        let new = format!(
+            "{}{} {}{}",
+            &result[..pos],
+            hoisted_str,
+            &result[pos..brace_pos + 1],
+            &result[cursor..]
+        );
+        let added_len = hoisted_str.len() + 1;
+        search_from = pos + added_len + 6;
+        result = new;
+    }
+    result
+}
+
+/// Sort consecutive bare `let X;` declarations alphabetically.
+fn sort_consecutive_bare_lets(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut result = String::with_capacity(input.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        // Look for `let ` at word boundary
+        if i + 4 <= bytes.len() && &bytes[i..i+4] == b"let " {
+            let at_boundary = i == 0 || matches!(bytes[i-1], b' ' | b';' | b'{' | b'\n');
+            if at_boundary {
+                // Collect consecutive `let IDENT;` declarations
+                let start = i;
+                let mut decls: Vec<String> = Vec::new();
+                let mut cursor = i;
+
+                loop {
+                    if cursor + 4 > bytes.len() || &bytes[cursor..cursor+4] != b"let " {
+                        break;
+                    }
+                    let id_start = cursor + 4;
+                    let mut j = id_start;
+                    while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] == b'$') {
+                        j += 1;
+                    }
+                    if j > id_start && j < bytes.len() && bytes[j] == b';' {
+                        let decl = &input[cursor..j+1]; // "let X;"
+                        decls.push(decl.to_string());
+                        cursor = j + 1;
+                        // Skip space after semicolon
+                        while cursor < bytes.len() && bytes[cursor] == b' ' {
+                            cursor += 1;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+
+                if decls.len() >= 2 {
+                    decls.sort();
+                    result.push_str(&decls.join(" "));
+                    i = cursor;
+                    if i < bytes.len() && bytes[i] == b' ' {
+                        result.push(' ');
+                        i += 1;
+                    }
+                    continue;
+                }
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// Normalize cache slot counts: `_c(N)` → `_c(?)`.
+fn normalize_slot_counts(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let pat = b"_c(";
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + 3 <= bytes.len() && &bytes[i..i+3] == pat {
+            // Check word boundary before _c
+            let at_boundary = i == 0 || !bytes[i-1].is_ascii_alphanumeric() && bytes[i-1] != b'_';
+            if at_boundary {
+                // Find closing paren
+                let mut j = i + 3;
+                while j < bytes.len() && bytes[j].is_ascii_digit() { j += 1; }
+                if j < bytes.len() && bytes[j] == b')' && j > i + 3 {
+                    result.push_str("_c(?)");
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// Normalize scope output variable names.
+///
+/// Detects patterns like `let X; if ($[N]` or `let X; let Y; if ($[N]` and renames
+/// the declared variables to canonical `_SV0`, `_SV1`, etc. so that differently-named
+/// scope outputs (e.g. our `_T0` vs the TS compiler's `context`) compare equal.
+fn normalize_scope_output_names(input: &str) -> String {
+    use std::collections::HashMap;
+
+    // Find all scope output variable declarations: `let X;` immediately before `if ($[`
+    // Pattern after whitespace normalization: `let IDENT; ... if ($[`
+    // We need to find sequences of `let IDENT;` followed (possibly with more `let IDENT;`)
+    // by `if ($[`.
+    let bytes = input.as_bytes();
+    let mut scope_vars: Vec<String> = Vec::new();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        // Look for `let ` at word boundary
+        if i + 4 <= bytes.len() && &bytes[i..i+4] == b"let " {
+            let at_boundary = i == 0 || !bytes[i-1].is_ascii_alphanumeric() && bytes[i-1] != b'_';
+            if at_boundary {
+                // Extract identifier after `let `
+                let id_start = i + 4;
+                let mut j = id_start;
+                while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] == b'$') {
+                    j += 1;
+                }
+                if j > id_start && j < bytes.len() && bytes[j] == b';' {
+                    let var_name = &input[id_start..j];
+                    // Check what follows after the semicolon (skip whitespace and more `let X;` decls)
+                    let mut k = j + 1;
+                    while k < bytes.len() && bytes[k] == b' ' { k += 1; }
+                    // Check if followed by `if ($[` or another `let X;`
+                    let followed_by_if = k + 6 <= bytes.len() && &bytes[k..k+6] == b"if ($[";
+                    let followed_by_let = k + 4 <= bytes.len() && &bytes[k..k+4] == b"let ";
+                    if followed_by_if || followed_by_let {
+                        // This is a scope output variable
+                        if !scope_vars.contains(&var_name.to_string()) {
+                            scope_vars.push(var_name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+
+    if scope_vars.is_empty() {
+        return input.to_string();
+    }
+
+    // Build renaming map: each scope var → _SVN
+    let mut rename_map: HashMap<String, String> = HashMap::new();
+    for (idx, var) in scope_vars.iter().enumerate() {
+        rename_map.insert(var.clone(), format!("_SV{}", idx));
+    }
+
+    // Apply renames as whole-word replacements
+    let mut result = input.to_string();
+    // Sort by length descending to avoid partial replacements (e.g. `_T10` before `_T1`)
+    let mut sorted_vars: Vec<_> = rename_map.iter().collect();
+    sorted_vars.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+
+    for (old, new) in &sorted_vars {
+        if old == new {
+            continue;
+        }
+        // Whole-word replacement
+        let old_bytes = old.as_bytes();
+        let mut out = String::with_capacity(result.len());
+        let rb = result.as_bytes();
+        let mut pos = 0;
+        while pos < rb.len() {
+            if pos + old_bytes.len() <= rb.len() && &rb[pos..pos+old_bytes.len()] == old_bytes {
+                let before_ok = pos == 0 || !(rb[pos-1].is_ascii_alphanumeric() || rb[pos-1] == b'_' || rb[pos-1] == b'$');
+                let after_pos = pos + old_bytes.len();
+                let after_ok = after_pos >= rb.len() || !(rb[after_pos].is_ascii_alphanumeric() || rb[after_pos] == b'_' || rb[after_pos] == b'$');
+                if before_ok && after_ok {
+                    out.push_str(new);
+                    pos = after_pos;
+                    continue;
+                }
+            }
+            out.push(rb[pos] as char);
+            pos += 1;
+        }
+        result = out;
+    }
+
+    result
+}
 
 fn source_type_for(path: &Path) -> SourceType {
     match path.extension().and_then(|e| e.to_str()) {
