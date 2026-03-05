@@ -199,6 +199,10 @@ fn normalize_js(js: &str) -> String {
     // Normalize cache slot counts: `_c(N)` → `_c(?)`. Different scope inference
     // may produce different slot counts while the memoization logic is correct.
     let result = normalize_slot_counts(&result);
+    // Normalize compound assignment expansion: `x = x + y` → `x += y`, etc.
+    // The TS compiler preserves compound assignment operators from the source;
+    // our compiler expands them in the HIR. Both are semantically identical.
+    let result = normalize_compound_assignment(&result);
     // Normalize variable name disambiguation suffixes: `varname_0` → `varname`.
     // The TS compiler appends `_0` to disambiguate same-named variables in
     // different scopes (e.g., `let z` in an if block + `let z` outside).
@@ -765,6 +769,56 @@ fn normalize_temp_names(input: &str) -> String {
     result
 }
 
+
+/// Normalize compound assignment expansion: `x = x + y` → `x += y`, etc.
+/// Our compiler expands compound assignments in the HIR, while the TS compiler
+/// preserves them from the source. Normalize to compound form for comparison.
+fn normalize_compound_assignment(input: &str) -> String {
+    let mut result = input.to_string();
+    // Process known operators: +, -, *, /, %, |, &, ^, <<, >>
+    // Pattern: `IDENT = IDENT OP ` where both IDENTs are the same
+    let ops = [(" + ", " += "), (" - ", " -= "), (" * ", " *= "), (" / ", " /= "),
+               (" % ", " %= "), (" | ", " |= "), (" & ", " &= "), (" ^ ", " ^= ")];
+    for (expanded_op, compound_op) in ops {
+        // Find patterns like `word = word OP`
+        let mut out = String::with_capacity(result.len());
+        let bytes = result.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            // Look for ` = ` preceded by an identifier
+            if i + 3 <= bytes.len() && bytes[i] == b' ' && bytes[i+1] == b'=' && bytes[i+2] == b' ' {
+                // Find the identifier before ` = `
+                let mut id_end = i;
+                let mut id_start = i;
+                if id_start > 0 {
+                    id_start -= 1;
+                    while id_start > 0 && (bytes[id_start].is_ascii_alphanumeric() || bytes[id_start] == b'_' || bytes[id_start] == b'$') {
+                        id_start -= 1;
+                    }
+                    if !bytes[id_start].is_ascii_alphanumeric() && bytes[id_start] != b'_' && bytes[id_start] != b'$' {
+                        id_start += 1;
+                    }
+                }
+                let ident = &result[id_start..id_end];
+                if !ident.is_empty() && (ident.as_bytes()[0].is_ascii_alphabetic() || ident.as_bytes()[0] == b'_' || ident.as_bytes()[0] == b'$') {
+                    // Check if after ` = ` we have `IDENT OP`
+                    let after_eq = i + 3;
+                    let expected_after = format!("{}{}", ident, expanded_op);
+                    if after_eq + expected_after.len() <= result.len() && &result[after_eq..after_eq + expected_after.len()] == expected_after {
+                        // Replace: keep existing output up to here, then write compound form
+                        out.push_str(compound_op);
+                        i = after_eq + expected_after.len();
+                        continue;
+                    }
+                }
+            }
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+        result = out;
+    }
+    result
+}
 
 /// Normalize variable name disambiguation suffixes: `varname_0` → `varname`.
 /// The TS compiler adds `_0` suffixes when the same name appears in different

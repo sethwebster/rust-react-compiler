@@ -158,20 +158,28 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
                     }
                 };
 
-                // Check if any free variable in the body is a component-local.
-                // A variable prevents outlining ONLY if it's known to the component
-                // (in outer_local_names) but is NOT a module-level global/import.
-                // Truly unknown globals (not in outer_local_names at all) are safe.
-                let free_vars = extract_free_variables(&info.body_text, &info.param_names);
-                // Check which free vars are truly local (not global, not const-from-global).
-                let has_true_local_capture = free_vars.iter().any(|v| {
-                    outer_local_names.contains(v.as_str())
-                        && !module_names.contains(v.as_str())
-                        && !const_local_to_global.contains_key(v.as_str())
+                // Use the HIR context (captured variables) to check if the
+                // function captures any component-local variables. The context
+                // is authoritative — it correctly handles nested functions
+                // whose parameters shadow outer names.
+                let has_local_capture = lowered_func.func.context.iter().any(|place| {
+                    if let Some(name) = env.get_identifier(place.identifier)
+                        .and_then(|id| id.name.as_ref())
+                        .map(|n| n.value().to_string())
+                    {
+                        outer_local_names.contains(name.as_str())
+                            && !module_names.contains(name.as_str())
+                            && !const_local_to_global.contains_key(name.as_str())
+                    } else {
+                        false
+                    }
                 });
-                if has_true_local_capture {
+                if has_local_capture {
                     continue; // Captures component-local vars — cannot outline.
                 }
+                // Source-text free-variable analysis for renaming const-from-global
+                // captures in the outlined body (still needed for body rewriting).
+                let free_vars = extract_free_variables(&info.body_text, &info.param_names);
 
                 // Generate a unique name.
                 // With @enableNameAnonymousFunctions, use `_ComponentOnClick` style names
@@ -261,8 +269,40 @@ struct ArrowInfo {
     is_expr_body: bool,
 }
 
+/// Recursively collect all binding identifier names from a binding pattern.
+/// Handles simple identifiers, object destructuring, array destructuring, and assignment patterns.
+fn collect_binding_names(kind: &oxc_ast::ast::BindingPatternKind, names: &mut Vec<String>) {
+    use oxc_ast::ast::BindingPatternKind;
+    match kind {
+        BindingPatternKind::BindingIdentifier(id) => {
+            names.push(id.name.to_string());
+        }
+        BindingPatternKind::ObjectPattern(obj) => {
+            for prop in &obj.properties {
+                collect_binding_names(&prop.value.kind, names);
+            }
+            if let Some(rest) = &obj.rest {
+                collect_binding_names(&rest.argument.kind, names);
+            }
+        }
+        BindingPatternKind::ArrayPattern(arr) => {
+            for elem in &arr.elements {
+                if let Some(elem) = elem {
+                    collect_binding_names(&elem.kind, names);
+                }
+            }
+            if let Some(rest) = &arr.rest {
+                collect_binding_names(&rest.argument.kind, names);
+            }
+        }
+        BindingPatternKind::AssignmentPattern(assign) => {
+            collect_binding_names(&assign.left.kind, names);
+        }
+    }
+}
+
 /// Parse an arrow function source text (e.g. `item => item` or `(a, b) => a + b`).
-/// Returns `None` if parsing fails or the function has complex params.
+/// Returns `None` if parsing fails.
 fn parse_arrow_info(src: &str) -> Option<ArrowInfo> {
     use oxc_allocator::Allocator;
     use oxc_ast::ast::{BindingPatternKind, Expression, Statement};
@@ -291,18 +331,13 @@ fn parse_arrow_info(src: &str) -> Option<ArrowInfo> {
         _ => return None,
     };
 
-    // Only handle simple binding identifier params.
+    // Collect parameter names, including from destructuring patterns.
     let mut param_names = Vec::new();
     for param in &arrow.params.items {
-        match &param.pattern.kind {
-            BindingPatternKind::BindingIdentifier(id) => {
-                param_names.push(id.name.to_string());
-            }
-            _ => return None, // Destructuring — skip for now.
-        }
+        collect_binding_names(&param.pattern.kind, &mut param_names);
     }
-    if arrow.params.rest.is_some() {
-        return None; // Rest params — skip.
+    if let Some(rest) = &arrow.params.rest {
+        collect_binding_names(&rest.argument.kind, &mut param_names);
     }
 
     // Extract body text by adjusting the span for the `let _ = ` prefix (8 bytes).
@@ -350,15 +385,10 @@ fn parse_function_expr_info(src: &str) -> Option<ArrowInfo> {
 
     let mut param_names = Vec::new();
     for param in &func_expr.params.items {
-        match &param.pattern.kind {
-            BindingPatternKind::BindingIdentifier(id) => {
-                param_names.push(id.name.to_string());
-            }
-            _ => return None,
-        }
+        collect_binding_names(&param.pattern.kind, &mut param_names);
     }
-    if func_expr.params.rest.is_some() {
-        return None;
+    if let Some(rest) = &func_expr.params.rest {
+        collect_binding_names(&rest.argument.kind, &mut param_names);
     }
 
     let body = func_expr.body.as_ref()?;
