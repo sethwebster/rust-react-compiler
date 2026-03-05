@@ -1798,7 +1798,24 @@ impl<'a> Codegen<'a> {
                     .unwrap_or_else(|| self.dep_expr(dep));
                 let name = self.ident_name(scope_deps[di].place.identifier);
                 let is_unnamed = name.starts_with("$t");
-                if is_unnamed && raw.contains('(') {
+                // Hoist complex dep expressions to `const tN = expr;` before the scope block.
+                // A dep is "complex" if it's unnamed AND not a simple identifier/property-chain.
+                // This matches the reference compiler which hoists binary ops, calls, computed loads, etc.
+                let is_complex = is_unnamed && {
+                    // Simple: just an identifier or dotted chain like "props.foo.bar"
+                    // Complex: contains operators, calls, brackets, template literals, etc.
+                    let has_op = raw.contains(" + ") || raw.contains(" - ") || raw.contains(" * ")
+                        || raw.contains(" / ") || raw.contains(" % ")
+                        || raw.contains(" === ") || raw.contains(" !== ")
+                        || raw.contains(" < ") || raw.contains(" > ")
+                        || raw.contains(" <= ") || raw.contains(" >= ")
+                        || raw.contains(" && ") || raw.contains(" || ")
+                        || raw.contains(" ?? ");
+                    let has_call_or_bracket = raw.contains('(') || raw.contains('[');
+                    let has_template = raw.contains('`');
+                    has_op || has_call_or_bracket || has_template
+                };
+                if is_complex {
                     let hoisted_name = format!("t{}", *scope_index + self.param_name_offset);
                     *scope_index += 1;
                     self.inlined_exprs.insert(scope_deps[di].place.identifier.0, hoisted_name.clone());
