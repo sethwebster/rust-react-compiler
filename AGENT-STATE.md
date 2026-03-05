@@ -35,23 +35,21 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 29.0% (361/1244) — **+3 from SCCP + phi fix (uncommitted)** |
+| Correct rate | 29.0% (361/1244) — committed as 0c07a3d |
 | Error (expected) | 193 |
 | Error (unexpected) | 3 (JSX-in-try validation not implemented) |
-| Uncommitted changes | SCCP branch folding, phi self-loop fix, catch normalization |
+| Uncommitted changes | none |
 
 ---
 
 ## Current Task
 
-**Active work**: SCCP + phi cleanup + catch normalization. Investigating DCE improvements.
+**Active work**: SCCP committed. Awaiting next task from agent.
 
-Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 359 → 361.
+Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 (fixed+committed).
 
 Recent completed:
-- Phi self-loop fix in eliminate_redundant_phi.rs (+2, 359→361, uncommitted)
-- catch(_e) {} → catch {} normalization in fixtures.rs
-- SCCP branch folding — conservative approach (+1, 358→359, uncommitted)
+- SCCP branch folding + phi self-loop fix + catch normalization (+3, 358→361, committed 0c07a3d)
 - Lattice-based constant propagation rewrite (+11 committed, 347→358)
 - Hoist complex dep expressions to const before scope blocks
 - Return undefined → return, empty else block removal
@@ -60,11 +58,7 @@ Recent completed:
 - @gating pragma passthrough (+1, 343→344)
 - Destructuring const→let for mutated bindings (+2, 345→347)
 
-**In progress (uncommitted)**:
-- SCCP in constant_propagation.rs — is_truthy(), If-only branch folding, unreachable block removal, dead phi pruning
-- Phi self-loop fix in eliminate_redundant_phi.rs — drop pure self-loop phis after SCCP removes blocks
-- catch(_e) {} → catch {} normalization in fixtures.rs
-- Investigating DCE improvements (added/removed debug logging)
+**In progress (uncommitted)**: none — clean working tree
 
 **Next priorities** (by impact):
 1. Missing memoization (56 fixtures) — scope inference gaps for optional calls, closures
