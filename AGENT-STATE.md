@@ -35,18 +35,18 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 29.6% (368/1244) — committed as 8ad7d0d |
+| Correct rate | 30.1% (375/1244) — **UNCOMMITTED, +7 from closure-aware const/let rewrite + scope analysis** |
 | Error (expected) | 193 |
 | Error (unexpected) | 3 (JSX-in-try validation not implemented) |
-| Uncommitted changes | none |
+| Uncommitted changes | rewrite_instruction_kinds.rs (recursive closure reassignment), hir_codegen.rs (captured_and_called), Cargo.toml (temp debug binary) |
 
 ---
 
 ## Current Task
 
-**Active work**: Agents in deep analysis phase. Last commit 8ad7d0d at ~10:20 UTC. Tried named-const scope promotion in hir_codegen.rs (reverted). Two agents still running as of 11:22 UTC.
+**Active work**: Closure-aware const/let rewrite + scope variable capture analysis. Two agents running.
 
-Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368.
+Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 375 (uncommitted).
 
 Recent completed:
 - Brace/JSX spacing normalization in test harness (+5, 363→368, committed 8ad7d0d)
@@ -60,7 +60,11 @@ Recent completed:
 - @gating pragma passthrough (+1, 343→344)
 - Destructuring const→let for mutated bindings (+2, 345→347)
 
-**In progress (uncommitted)**: none — clean working tree
+**In progress (uncommitted)**:
+- `rewrite_instruction_kinds.rs` — recursive closure reassignment detection (scan nested FunctionExpression/ObjectMethod for StoreContext { Reassign })
+- `hir_codegen.rs` — `captured_and_called` detection: promote variables to named-var when captured by a closure that may be invoked within the scope
+- `Cargo.toml` — temporary `compile_fixture` binary target (debug tool, should not be committed)
+- `pipeline.rs` — moved rewrite_instruction_kinds before DCE (may have been reverted)
 
 **Next priorities** (by impact):
 1. Missing memoization (56 fixtures) — scope inference gaps for optional calls, closures
