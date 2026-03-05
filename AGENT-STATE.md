@@ -38,7 +38,7 @@ Update the following before stopping:
 | Correct rate | 34.1% (424/1244) |
 | Error (expected) | 191 |
 | Error (unexpected) | 5 (should-error fixtures that pass) |
-| Uncommitted changes | fixtures.rs (+54) — more normalizations WIP |
+| Uncommitted changes | none — clean tree |
 
 ---
 
@@ -58,7 +58,7 @@ Recent commits (this session):
 - bc180f3: improve function outlining + normalization (371/1048)
 - 1e11a93: 16-file commit — closure-aware rewrite, captured_and_called scope promotion, dead phi DCE, destructuring default lowering, SSA temp propagation, pipeline reorder
 
-**In progress (uncommitted)**: fixtures.rs (+54) — more normalizations
+**In progress (uncommitted)**: none — clean tree
 
 **Next priorities** (by impact):
 1. Missing memoization (56 fixtures) — scope inference gaps for optional calls, closures
@@ -114,6 +114,7 @@ Recent commits (this session):
 ## Completed This Session
 
 Commits (newest first):
+- `67fe4c2` improve outlining (HIR context, destructuring params) + compound assignment norm (398/1048, 424/1244)
 - `f317d51` JSX self-closing, for-loop comma, disambig suffix normalizations (397/1048, 423→424/1244)
 - `1e1c12d` JSX self-closing normalization, arrow expr body in codegen (415/1244)
 - `047bc75` null-init normalization, slot count normalization, print all mismatches (390/1048, 416/1244)
