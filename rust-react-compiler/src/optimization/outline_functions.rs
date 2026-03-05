@@ -63,6 +63,46 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
         }
     }
 
+    // Build a map of local name → global name for const locals assigned from globals.
+    // This allows outlining functions that capture such locals by replacing them
+    // with the global name in the outlined body.
+    let mut const_local_to_global: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    {
+        // Build ident_id → global name from LoadGlobal instructions.
+        let mut id_to_global: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+        for (_, block) in &hir.body.blocks {
+            for instr in &block.instructions {
+                if let InstructionValue::LoadGlobal { binding, .. } = &instr.value {
+                    let name = match binding {
+                        NonLocalBinding::Global { name } => name.clone(),
+                        NonLocalBinding::ImportDefault { name, .. } => name.clone(),
+                        NonLocalBinding::ImportNamespace { name, .. } => name.clone(),
+                        NonLocalBinding::ImportSpecifier { name, .. } => name.clone(),
+                        NonLocalBinding::ModuleLocal { name } => name.clone(),
+                    };
+                    id_to_global.insert(instr.lvalue.identifier.0, name);
+                }
+            }
+        }
+        // Find StoreLocal(const, local_name, value) where value → global.
+        for (_, block) in &hir.body.blocks {
+            for instr in &block.instructions {
+                if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
+                    if matches!(lvalue.kind, crate::hir::hir::InstructionKind::Const) {
+                        if let Some(global_name) = id_to_global.get(&value.identifier.0) {
+                            if let Some(local_name) = env.get_identifier(lvalue.place.identifier)
+                                .and_then(|i| i.name.as_ref())
+                                .map(|n| n.value().to_string())
+                            {
+                                const_local_to_global.insert(local_name, global_name.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let mut temp_counter = 0usize;
 
     // If @enableNameAnonymousFunctions is set, build a map from FunctionExpression
@@ -120,9 +160,13 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
                 // (in outer_local_names) but is NOT a module-level global/import.
                 // Truly unknown globals (not in outer_local_names at all) are safe.
                 let free_vars = extract_free_variables(&info.body_text, &info.param_names);
-                if free_vars.iter().any(|v| {
-                    outer_local_names.contains(v.as_str()) && !module_names.contains(v.as_str())
-                }) {
+                // Check which free vars are truly local (not global, not const-from-global).
+                let has_true_local_capture = free_vars.iter().any(|v| {
+                    outer_local_names.contains(v.as_str())
+                        && !module_names.contains(v.as_str())
+                        && !const_local_to_global.contains_key(v.as_str())
+                });
+                if has_true_local_capture {
                     continue; // Captures component-local vars — cannot outline.
                 }
 
@@ -155,8 +199,15 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
                     }
                 }).collect();
 
-                // Rename uses of renamed params in the body text.
+                // Replace const-from-global captures with their global names.
                 let mut renamed_body = info.body_text.clone();
+                for fv in &free_vars {
+                    if let Some(global_name) = const_local_to_global.get(fv.as_str()) {
+                        renamed_body = rename_word(&renamed_body, fv, global_name);
+                    }
+                }
+
+                // Rename uses of renamed params in the body text.
                 for (orig, renamed) in info.param_names.iter().zip(final_param_names.iter()) {
                     if orig != renamed {
                         renamed_body = rename_word(&renamed_body, orig, renamed);
@@ -181,6 +232,10 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
 
                 // Mark this instruction as outlined so codegen emits just the name.
                 *name_hint = Some(temp_name.clone());
+
+                // Clear the function's context so DCE knows this function no longer
+                // captures any component-local variables.
+                lowered_func.func.context.clear();
 
                 env.outlined_functions.push((temp_name, decl));
             }

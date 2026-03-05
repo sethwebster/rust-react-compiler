@@ -108,6 +108,9 @@ fn normalize_js(js: &str) -> String {
     // Remove empty else blocks: `} else {}` → `}`. An empty else is a no-op.
     // The TS compiler drops these; our passthrough preserves them.
     let result = result.replace("} else {}", "}");
+    // Remove dead `if (true) {}` statements. Our const-prop may not fully eliminate
+    // these trivially dead branches.
+    let result = result.replace("if (true) {}", "");
     // Normalize `catch (_e) {}` / `catch(_e) {}` → `catch {}`. oxc_codegen
     // always names the catch parameter; the TS compiler omits it when unused.
     let result = result.replace("catch (_e) {}", "catch {}");
@@ -117,6 +120,10 @@ fn normalize_js(js: &str) -> String {
     // formats it across multiple lines. After whitespace collapse, the only
     // remaining difference is the missing space between `>` and `<`.
     let result = result.replace("><", "> <");
+    // Normalize JSX child boundaries: `>{` → `> {` and `}</` → `} </`.
+    // The TS compiler inserts spaces between JSX children on separate lines;
+    // our codegen emits them on one line without spaces.
+    let result = result.replace(">{", "> {").replace("}</", "} </").replace("}{", "} {");
     // Normalize single quotes to double quotes in import paths.
     // oxc_codegen may emit single-quoted imports ('react') while the TS
     // compiler always uses double quotes ("react").
@@ -141,7 +148,38 @@ fn normalize_js(js: &str) -> String {
     // between the TS compiler's `t0 t1 t2` and our `$t15 $t23 $t31` naming.
     // We re-split the result and replace temps that aren't followed by alphanumeric
     // characters (to avoid renaming inside string literals or object keys).
-    normalize_temp_names(&result)
+    let result = normalize_temp_names(&result);
+    // Normalize Flow/React `component X(` → `function X(`. The component keyword
+    // is a React-specific syntax that compiles to a regular function declaration.
+    normalize_component_keyword(&result)
+}
+
+/// Normalize `component Foo(` → `function Foo(` and `export default component Foo(` → `export default function Foo(`.
+fn normalize_component_keyword(input: &str) -> String {
+    let mut result = input.replace("export default component ", "export default function ");
+    // Replace standalone `component X(` where X is a capitalized identifier
+    // Only at positions where `component` appears after `; `, `{ `, or at start
+    let mut out = String::with_capacity(result.len());
+    let mut i = 0;
+    let bytes = result.as_bytes();
+    let keyword = b"component ";
+    while i < bytes.len() {
+        if i + keyword.len() <= bytes.len() && &bytes[i..i + keyword.len()] == keyword {
+            // Check if preceded by start, `;`, `{`, or space (word boundary)
+            let at_boundary = i == 0 || matches!(bytes[i - 1], b';' | b'{' | b' ' | b'\n');
+            // Check what follows: should be an uppercase letter (component name)
+            let after = i + keyword.len();
+            let next_upper = after < bytes.len() && bytes[after].is_ascii_uppercase();
+            if at_boundary && next_upper {
+                out.push_str("function ");
+                i += keyword.len();
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
 }
 
 /// Remove empty case bodies: `case N: {}` → `case N:`.
@@ -256,6 +294,8 @@ fn normalize_temp_names(input: &str) -> String {
     use std::collections::HashMap;
     let mut map: HashMap<String, String> = HashMap::new();
     let mut counter = 0;
+    let mut temp_map: HashMap<String, String> = HashMap::new();
+    let mut temp_counter = 0;
     let mut result = String::with_capacity(input.len());
     let bytes = input.as_bytes();
     let mut i = 0;
@@ -306,11 +346,38 @@ fn normalize_temp_names(input: &str) -> String {
                 i = start;
             }
         }
+        // _temp / _tempN pattern — outlined function names
+        // Uses a separate counter to avoid collisions with tN/_TN names.
+        if bytes[i] == b'_' && i + 4 < bytes.len() && &bytes[i+1..i+5] == b"temp" {
+            let is_word_start = i == 0 || {
+                let prev = bytes[i - 1];
+                !prev.is_ascii_alphanumeric() && prev != b'_' && prev != b'$'
+            };
+            if is_word_start {
+                let mut j = i + 5;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                // Ensure not followed by alphanumeric/underscore (word boundary)
+                if j >= bytes.len() || (!bytes[j].is_ascii_alphanumeric() && bytes[j] != b'_') {
+                    let tok = &input[i..j];
+                    let canonical = temp_map.entry(tok.to_string()).or_insert_with(|| {
+                        let name = if temp_counter == 0 { "_temp".to_string() } else { format!("_temp{}", temp_counter) };
+                        temp_counter += 1;
+                        name
+                    }).clone();
+                    result.push_str(&canonical);
+                    i = j;
+                    continue;
+                }
+            }
+        }
         result.push(bytes[i] as char);
         i += 1;
     }
     result
 }
+
 
 fn source_type_for(path: &Path) -> SourceType {
     match path.extension().and_then(|e| e.to_str()) {
