@@ -44,7 +44,7 @@ Update the following before stopping:
 
 ## Current Task
 
-**Active work**: Closure-aware const/let rewrite + scope variable capture analysis. Two agents running.
+**Active work**: Major multi-file change: closure-aware rewrite, destructuring default lowering, dead phi DCE, codegen improvements. 9 files, 516 insertions. Two agents running.
 
 Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 380 (uncommitted).
 
@@ -60,11 +60,16 @@ Recent completed:
 - @gating pragma passthrough (+1, 343→344)
 - Destructuring const→let for mutated bindings (+2, 345→347)
 
-**In progress (uncommitted)**:
-- `rewrite_instruction_kinds.rs` — recursive closure reassignment detection + source-level reassignment scanner for context variables
-- `hir_codegen.rs` — `captured_and_called` detection: promote variables to named-var when captured by a closure invoked within scope
-- `constant_propagation.rs` — always propagate SSA temps (instruction lvalue) regardless of const/let, only restrict named-var tracking to const
-- `Cargo.toml` — temporary `compile_fixture` binary target (debug tool, should not be committed)
+**In progress (uncommitted, 9 files, 516 insertions)**:
+- `rewrite_instruction_kinds.rs` (+181) — recursive closure reassignment detection + source-level scanner
+- `hir_codegen.rs` (+129) — `captured_and_called` scope promotion + additional codegen fixes
+- `dead_code_elimination.rs` (+104) — iterative dead phi removal with cycle detection
+- `lower/patterns.rs` (+93) — destructuring default lowering: `pattern = default` → `value === undefined ? default : value`
+- `constant_propagation.rs` (+23) — always propagate SSA temps regardless of const/let
+- `visitors.rs` (+12) — new visitor helpers
+- `hir.rs` (+9) — new HIR types for pattern lowering
+- `lower/core.rs` (+6) — wiring for pattern default lowering
+- `pipeline.rs` (+3) — moved rewrite_instruction_kinds before DCE
 
 **Next priorities** (by impact):
 1. Missing memoization (56 fixtures) — scope inference gaps for optional calls, closures
