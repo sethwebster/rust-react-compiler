@@ -1,37 +1,178 @@
 #![allow(unused_imports, unused_variables, dead_code)]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use crate::hir::hir::*;
 
-/// Simple local constant propagation pass.
-///
-/// SSA temporaries (instruction lvalues) are defined exactly once and can
-/// safely be propagated across blocks. Named variables (StoreLocal lvalue.place)
-/// may be assigned in multiple branches (phi nodes), so we only propagate them
-/// within the block where they are assigned.
-pub fn constant_propagation(hir: &mut HIRFunction) {
-    // Constants that are safe to use across all blocks: SSA temporaries that
-    // came from Primitive instructions. These are defined exactly once (SSA).
-    let mut ssa_constants: HashMap<IdentifierId, PrimitiveValue> = HashMap::new();
+/// Lattice value for constant propagation.
+/// Top = not yet analyzed, Constant = known value, Bottom = not constant.
+#[derive(Debug, Clone, PartialEq)]
+enum LatticeValue {
+    Top,
+    Constant(PrimitiveValue),
+    Bottom,
+}
 
-    // First pass: collect all SSA-temporary primitive constants (instr.lvalue.identifier)
-    // that come from Primitive instructions only. These are always safe to propagate.
+impl LatticeValue {
+    fn meet(&self, other: &LatticeValue) -> LatticeValue {
+        match (self, other) {
+            (LatticeValue::Top, v) | (v, LatticeValue::Top) => v.clone(),
+            (LatticeValue::Bottom, _) | (_, LatticeValue::Bottom) => LatticeValue::Bottom,
+            (LatticeValue::Constant(a), LatticeValue::Constant(b)) => {
+                if a == b {
+                    LatticeValue::Constant(a.clone())
+                } else {
+                    LatticeValue::Bottom
+                }
+            }
+        }
+    }
+}
+
+/// Constant propagation pass with lattice-based phi resolution.
+///
+/// Propagation rules:
+///   - SSA temporaries from Primitive instructions: constant
+///   - StoreLocal instruction lvalue (SSA temp): inherits value from stored constant
+///   - StoreLocal named variable target (Const kind only): inherits value cross-block
+///   - StoreLocal named variable target (Let/Reassign): block-local only in rewrite pass
+///   - Phi nodes: lattice meet of all operands (handles cycles via convergence)
+///   - LoadLocal: inherits value from source identifier
+///   - BinaryExpression/UnaryExpression with known operands: fold to constant
+pub fn constant_propagation(hir: &mut HIRFunction) {
+    let mut lattice: HashMap<IdentifierId, LatticeValue> = HashMap::new();
+
+    // Initialize: all Primitive instruction results are constants.
     for block in hir.body.blocks.values() {
         for instr in &block.instructions {
             if let InstructionValue::Primitive { value, .. } = &instr.value {
-                ssa_constants.insert(instr.lvalue.identifier, value.clone());
+                lattice.insert(instr.lvalue.identifier, LatticeValue::Constant(value.clone()));
             }
         }
     }
 
-    // Second pass: rewrite each block using the propagated constants.
-    // For named-variable constants (from StoreLocal), we only allow propagation
-    // within the same block to avoid incorrectly propagating values through phi nodes.
+    // Iterate until convergence using lattice-based analysis.
+    // This handles cyclic phis from loops correctly.
+    loop {
+        let mut changed = false;
+
+        // Process phi nodes first.
+        for block in hir.body.blocks.values() {
+            for phi in &block.phis {
+                let mut result = LatticeValue::Top;
+                for (_, operand) in &phi.operands {
+                    let op_val = lattice.get(&operand.identifier)
+                        .cloned()
+                        .unwrap_or(LatticeValue::Top);
+                    result = result.meet(&op_val);
+                }
+                let prev = lattice.get(&phi.place.identifier).cloned().unwrap_or(LatticeValue::Top);
+                if result != prev {
+                    lattice.insert(phi.place.identifier, result);
+                    changed = true;
+                }
+            }
+        }
+
+        // Process instructions.
+        for block in hir.body.blocks.values() {
+            for instr in &block.instructions {
+                let new_val = match &instr.value {
+                    InstructionValue::Primitive { value, .. } => {
+                        Some(LatticeValue::Constant(value.clone()))
+                    }
+                    InstructionValue::LoadLocal { place, .. } => {
+                        lattice.get(&place.identifier).cloned()
+                    }
+                    InstructionValue::StoreLocal { lvalue, value, .. } => {
+                        let is_const = lvalue.kind == InstructionKind::Const
+                            || lvalue.kind == InstructionKind::HoistedConst;
+                        let val = lattice.get(&value.identifier).cloned();
+                        // Only propagate const declarations cross-block.
+                        // Let/Reassign variables may be mutated by closures (StoreContext)
+                        // or have multiple SSA definitions making propagation unsafe.
+                        if is_const {
+                            if let Some(v) = &val {
+                                let prev = lattice.get(&lvalue.place.identifier)
+                                    .cloned().unwrap_or(LatticeValue::Top);
+                                let new = prev.meet(v);
+                                if new != prev {
+                                    lattice.insert(lvalue.place.identifier, new);
+                                    changed = true;
+                                }
+                            }
+                            // The instruction lvalue (SSA temp) feeds into phis.
+                            val
+                        } else {
+                            // Non-const — don't track cross-block.
+                            None
+                        }
+                    }
+                    InstructionValue::UnaryExpression { value, operator, .. } => {
+                        match lattice.get(&value.identifier) {
+                            Some(LatticeValue::Constant(v)) => {
+                                match fold_unary(v.clone(), operator) {
+                                    Some(r) => Some(LatticeValue::Constant(r)),
+                                    None => Some(LatticeValue::Bottom),
+                                }
+                            }
+                            Some(LatticeValue::Bottom) => Some(LatticeValue::Bottom),
+                            _ => None,
+                        }
+                    }
+                    InstructionValue::BinaryExpression { left, right, operator, .. } => {
+                        match (lattice.get(&left.identifier), lattice.get(&right.identifier)) {
+                            (Some(LatticeValue::Constant(lv)), Some(LatticeValue::Constant(rv))) => {
+                                match fold_binary(lv.clone(), rv.clone(), operator.clone()) {
+                                    Some(r) => Some(LatticeValue::Constant(r)),
+                                    None => Some(LatticeValue::Bottom),
+                                }
+                            }
+                            (Some(LatticeValue::Bottom), _) | (_, Some(LatticeValue::Bottom)) => {
+                                Some(LatticeValue::Bottom)
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+
+                if let Some(new_val) = new_val {
+                    let id = instr.lvalue.identifier;
+                    let prev = lattice.get(&id).cloned().unwrap_or(LatticeValue::Top);
+                    let merged = prev.meet(&new_val);
+                    if merged != prev {
+                        lattice.insert(id, merged);
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+
+    // Build the final constant map from lattice values.
+    let mut ssa_constants: HashMap<IdentifierId, PrimitiveValue> = lattice.iter()
+        .filter_map(|(id, v)| {
+            if let LatticeValue::Constant(val) = v {
+                Some((*id, val.clone()))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Rewrite pass: substitute constants into instructions.
+    // Uses ssa_constants (cross-block) + local_constants (per-block, for let vars).
+    // Must update ssa_constants as we replace instructions, so that downstream
+    // instructions in the same block can see the newly produced constants.
     for block in hir.body.blocks.values_mut() {
-        // Per-block named-variable constants: only valid for the duration of this block.
         let mut local_constants: HashMap<IdentifierId, PrimitiveValue> = HashMap::new();
 
         for instr in &mut block.instructions {
-            // Propagate LoadLocal of a known SSA constant or block-local constant.
+            // Replace LoadLocal with Primitive if the source is a known constant.
             if let InstructionValue::LoadLocal { place, loc } = &instr.value {
                 let val = ssa_constants.get(&place.identifier)
                     .or_else(|| local_constants.get(&place.identifier))
@@ -39,33 +180,30 @@ pub fn constant_propagation(hir: &mut HIRFunction) {
                 if let Some(val) = val {
                     let loc = loc.clone();
                     instr.value = InstructionValue::Primitive { value: val.clone(), loc };
-                    // This LoadLocal's lvalue is now also a known SSA constant.
                     ssa_constants.insert(instr.lvalue.identifier, val);
                 }
             }
 
-            // Record newly produced Primitive lvalues as SSA constants.
+            // Record any Primitive lvalue as a constant (including newly created ones).
             if let InstructionValue::Primitive { value, .. } = &instr.value {
                 ssa_constants.insert(instr.lvalue.identifier, value.clone());
             }
 
-            // StoreLocal: if the RHS is a known constant, record the named variable
-            // as a block-local constant (NOT in ssa_constants, since named variables
-            // may have phi nodes at block join points).
+            // Track non-const StoreLocals as block-local constants.
             if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
-                let val = ssa_constants.get(&value.identifier)
-                    .or_else(|| local_constants.get(&value.identifier))
-                    .cloned();
-                if let Some(val) = val {
-                    local_constants.insert(lvalue.place.identifier, val);
-                } else {
-                    // The named variable is no longer a known constant (reassigned to
-                    // a non-constant). Remove it so stale constant values don't leak.
-                    local_constants.remove(&lvalue.place.identifier);
+                if lvalue.kind != InstructionKind::Const && lvalue.kind != InstructionKind::HoistedConst {
+                    let val = ssa_constants.get(&value.identifier)
+                        .or_else(|| local_constants.get(&value.identifier))
+                        .cloned();
+                    if let Some(val) = val {
+                        local_constants.insert(lvalue.place.identifier, val);
+                    } else {
+                        local_constants.remove(&lvalue.place.identifier);
+                    }
                 }
             }
 
-            // Constant folding for UnaryExpression where operand is known.
+            // Fold UnaryExpression.
             if let InstructionValue::UnaryExpression { value, operator, loc } = &instr.value {
                 let val = ssa_constants.get(&value.identifier)
                     .or_else(|| local_constants.get(&value.identifier))
@@ -79,7 +217,7 @@ pub fn constant_propagation(hir: &mut HIRFunction) {
                 }
             }
 
-            // Constant folding for BinaryExpression where both operands are known.
+            // Fold BinaryExpression.
             if let InstructionValue::BinaryExpression { left, right, operator, loc } = &instr.value {
                 let lv = ssa_constants.get(&left.identifier)
                     .or_else(|| local_constants.get(&left.identifier))
@@ -89,8 +227,7 @@ pub fn constant_propagation(hir: &mut HIRFunction) {
                     .cloned();
                 if let (Some(lv), Some(rv)) = (lv, rv) {
                     let loc = loc.clone();
-                    let op = operator.clone();
-                    if let Some(result) = fold_binary(lv, rv, op) {
+                    if let Some(result) = fold_binary(lv, rv, operator.clone()) {
                         instr.value = InstructionValue::Primitive { value: result.clone(), loc };
                         ssa_constants.insert(instr.lvalue.identifier, result);
                     }

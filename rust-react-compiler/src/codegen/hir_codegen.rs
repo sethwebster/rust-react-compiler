@@ -1339,12 +1339,29 @@ impl<'a> Codegen<'a> {
 
                     // Reconstruct update expression from the update block.
                     // Find the last emittable instruction (typically StoreLocal i = i + 1).
+                    // For Primitive instructions (from const-prop), emit just the value
+                    // rather than a declaration.
                     let update_expr = update_bid.and_then(|ubid| {
                         self.hir.body.blocks.get(&ubid).and_then(|b| {
                             let mut last = None;
                             for instr in &b.instructions {
-                                if let Some(s) = self.emit_stmt(instr, None, &[]) {
-                                    last = Some(s.trim_end_matches(';').to_string());
+                                // In for-loop update position, use expression form
+                                // for Primitives and LoadLocals instead of declarations.
+                                match &instr.value {
+                                    InstructionValue::Primitive { value, .. } => {
+                                        last = Some(primitive_expr(value));
+                                    }
+                                    InstructionValue::LoadLocal { place, .. } => {
+                                        last = Some(self.expr(place));
+                                    }
+                                    InstructionValue::LoadGlobal { .. } => {
+                                        last = Some(self.expr(&instr.lvalue));
+                                    }
+                                    _ => {
+                                        if let Some(s) = self.emit_stmt(instr, None, &[]) {
+                                            last = Some(s.trim_end_matches(';').to_string());
+                                        }
+                                    }
                                 }
                             }
                             last
