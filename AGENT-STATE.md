@@ -35,20 +35,21 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 29.0% (361/1244) — committed as 0c07a3d |
+| Correct rate | 29.2% (363/1244) — committed as 8fa4a47 |
 | Error (expected) | 193 |
 | Error (unexpected) | 3 (JSX-in-try validation not implemented) |
-| Uncommitted changes | none |
+| Uncommitted changes | CP debug logging (investigating further const-prop improvements) |
 
 ---
 
 ## Current Task
 
-**Active work**: SCCP committed. Awaiting next task from agent.
+**Active work**: Investigating further constant propagation improvements (debug logging added).
 
-Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 (fixed+committed).
+Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363.
 
 Recent completed:
+- catch (_e) {} normalization fix (+2, 361→363, committed 8fa4a47)
 - SCCP branch folding + phi self-loop fix + catch normalization (+3, 358→361, committed 0c07a3d)
 - Lattice-based constant propagation rewrite (+11 committed, 347→358)
 - Hoist complex dep expressions to const before scope blocks
@@ -58,7 +59,7 @@ Recent completed:
 - @gating pragma passthrough (+1, 343→344)
 - Destructuring const→let for mutated bindings (+2, 345→347)
 
-**In progress (uncommitted)**: none — clean working tree
+**In progress (uncommitted)**: debug logging in constant_propagation.rs (RC_DEBUG_CP flag)
 
 **Next priorities** (by impact):
 1. Missing memoization (56 fixtures) — scope inference gaps for optional calls, closures
