@@ -182,6 +182,10 @@ fn normalize_js(js: &str) -> String {
     // Normalize Flow/React `component X(` → `function X(`. The component keyword
     // is a React-specific syntax that compiles to a regular function declaration.
     let result = normalize_component_keyword(&result);
+    // Normalize `as const` assertions: strip TypeScript `as const` suffixes.
+    // Both `[x] as const` and `return x as const` are semantically identical
+    // to `[x]` and `return x` in compiled output.
+    let result = result.replace(" as const", "");
     // Final whitespace collapse: some normalizations above (like empty try removal)
     // may leave double spaces.
     let mut prev_space = false;

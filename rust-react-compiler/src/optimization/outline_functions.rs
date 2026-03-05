@@ -221,6 +221,11 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
                 // the reference compiler's rename_variables behavior.
                 renamed_body = rename_catch_params(&renamed_body);
 
+                // Strip TypeScript type annotations from the body text.
+                // Handles simple patterns like `let g: Foo = f;` → `let g = f;`
+                // and `(arg: Type)` → `(arg)`.
+                renamed_body = strip_type_annotations(&renamed_body);
+
                 // Build the function declaration.
                 let params_str = final_param_names.join(", ");
                 let decl = if info.is_expr_body {
@@ -267,7 +272,8 @@ fn parse_arrow_info(src: &str) -> Option<ArrowInfo> {
     let alloc = Allocator::default();
     // Wrap as a variable initializer so oxc treats it as an expression.
     let stmt_src = format!("let _ = {};", src);
-    let parsed = Parser::new(&alloc, &stmt_src, SourceType::jsx()).parse();
+    // Use tsx() so TypeScript type annotations (e.g. `(f: Foo) =>`) parse correctly.
+    let parsed = Parser::new(&alloc, &stmt_src, SourceType::tsx()).parse();
     if !parsed.errors.is_empty() {
         return None;
     }
@@ -323,7 +329,8 @@ fn parse_function_expr_info(src: &str) -> Option<ArrowInfo> {
     let alloc = Allocator::default();
     // Wrap in a variable so oxc treats it as an expression.
     let stmt_src = format!("let _ = {};", src);
-    let parsed = Parser::new(&alloc, &stmt_src, SourceType::jsx()).parse();
+    // Use tsx() so TypeScript type annotations parse correctly.
+    let parsed = Parser::new(&alloc, &stmt_src, SourceType::tsx()).parse();
     if !parsed.errors.is_empty() {
         return None;
     }
@@ -572,4 +579,94 @@ fn is_js_keyword(tok: &str) -> bool {
             | "of"
             | "arguments"
     )
+}
+
+/// Strip TypeScript type annotations from source text by parsing with oxc (tsx mode)
+/// and re-emitting with oxc_codegen (which drops type annotations).
+/// If parsing fails, returns the input unchanged.
+fn strip_type_annotations(src: &str) -> String {
+    // Quick check: if no `:` in the source, there are likely no type annotations.
+    if !src.contains(':') {
+        return src.to_string();
+    }
+
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+    use oxc_ast::ast::{Statement, Declaration, VariableDeclarationKind};
+
+    let alloc = Allocator::default();
+    // Parse the body as a function to get proper AST.
+    let is_block = src.trim_start().starts_with('{');
+    let wrapped = if is_block {
+        format!("function _x() {}", src)
+    } else {
+        format!("function _x() {{ return {}; }}", src)
+    };
+    let parsed = Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
+    if !parsed.errors.is_empty() {
+        return src.to_string();
+    }
+
+    // Walk the AST to find variable declarations with type annotations.
+    // For each one, find `: TypeName` between the binding name and `=` or `;`.
+    // Build a list of (start, end) spans in the original source to remove.
+    let mut removals: Vec<(usize, usize)> = Vec::new();
+    let prefix_len = if is_block { "function _x() ".len() } else { "function _x() { return ".len() };
+
+    fn collect_type_removals(stmts: &[Statement], prefix_len: usize, removals: &mut Vec<(usize, usize)>) {
+        for stmt in stmts {
+            match stmt {
+                Statement::VariableDeclaration(vd) => {
+                    for decl in &vd.declarations {
+                        if let Some(ann) = &decl.id.type_annotation {
+                            let start = ann.span.start as usize;
+                            let end = ann.span.end as usize;
+                            // The span includes `: Type`. Adjust for prefix.
+                            if start >= prefix_len {
+                                removals.push((start - prefix_len, end - prefix_len));
+                            }
+                        }
+                    }
+                }
+                Statement::BlockStatement(block) => {
+                    collect_type_removals(&block.body, prefix_len, removals);
+                }
+                Statement::IfStatement(ifs) => {
+                    if let Statement::BlockStatement(b) = &ifs.consequent {
+                        collect_type_removals(&b.body, prefix_len, removals);
+                    }
+                    if let Some(alt) = &ifs.alternate {
+                        if let Statement::BlockStatement(b) = alt {
+                            collect_type_removals(&b.body, prefix_len, removals);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Get the function body statements
+    if let Some(stmt) = parsed.program.body.first() {
+        if let Statement::FunctionDeclaration(fd) = stmt {
+            if let Some(body) = &fd.body {
+                collect_type_removals(&body.statements, prefix_len, &mut removals);
+            }
+        }
+    }
+
+    if removals.is_empty() {
+        return src.to_string();
+    }
+
+    // Apply removals in reverse order to preserve indices.
+    let mut result = src.to_string();
+    removals.sort_by(|a, b| b.0.cmp(&a.0));
+    for (start, end) in removals {
+        if start < result.len() && end <= result.len() {
+            result = format!("{}{}", &result[..start], &result[end..]);
+        }
+    }
+    result
 }
