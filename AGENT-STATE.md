@@ -35,10 +35,10 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 32.8% (408/1244) — committed 4656f1e, +1 file uncommitted |
+| Correct rate | 33.0% (410/1244) — clean tree |
 | Error (expected) | 193 |
 | Error (unexpected) | 3 (JSX-in-try validation not implemented) |
-| Uncommitted changes | fixtures.rs (+36 — additional test normalizations) |
+| Uncommitted changes | none |
 
 ---
 
@@ -46,7 +46,7 @@ Update the following before stopping:
 
 **Active work**: Function outlining improvements + scope output counting + test normalizations. Two agents running.
 
-Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 397 → 409 (32.9%).
+Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 397 → 410 (33.0%).
 
 Recent completed (commits since last update):
 - 4656f1e: JSX child braces fix, function expr outlining, normalizations (382/1048)
@@ -55,7 +55,7 @@ Recent completed (commits since last update):
 - bc180f3: improve function outlining + normalization (371/1048)
 - 1e11a93: 16-file commit — closure-aware rewrite, captured_and_called scope promotion, dead phi DCE, destructuring default lowering, SSA temp propagation, pipeline reorder
 
-**In progress (uncommitted)**: fixtures.rs (+36 — more test normalizations)
+**In progress (uncommitted)**: none — clean working tree
 
 **Next priorities** (by impact):
 1. Missing memoization (56 fixtures) — scope inference gaps for optional calls, closures
