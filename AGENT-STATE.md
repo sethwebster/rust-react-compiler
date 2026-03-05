@@ -113,7 +113,12 @@ Recent completed:
 
 ## Completed This Session
 
-- `src/optimization/constant_propagation.rs` — rewrote to lattice-based approach with LatticeValue (Top/Constant/Bottom), phi node meet, and improved fold coverage. Uncommitted, no fixture change yet.
+- `src/optimization/constant_propagation.rs` — SCCP (Sparse Conditional Constant Propagation) rewrite in progress:
+  - Added `is_truthy()` for JS truthiness evaluation
+  - Iterative round loop: propagate → fold branches → remove unreachable blocks → prune dead phi operands → eliminate redundant phis → repeat
+  - Branch folding: If/Branch terminals → Goto when test is known constant
+  - Extended StoreLocal propagation to all variable kinds (not just const)
+  - Currently regresses 358→337 (-21 fixtures). Investigation needed to find what the over-aggressive propagation breaks.
 
 Previous session work (committed):
 - `src/optimization/constant_propagation.rs` — added comparison operators and unary folding (+1 fixture)
