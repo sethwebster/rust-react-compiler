@@ -900,6 +900,14 @@ pub enum InstructionValue {
         right: Place,
         loc: SourceLocation,
     },
+    /// Conditional (ternary) expression: test ? consequent : alternate.
+    /// Used for destructuring default lowering: `value === undefined ? default : value`.
+    TernaryExpression {
+        test: Place,
+        consequent: Place,
+        alternate: Place,
+        loc: SourceLocation,
+    },
     UnaryExpression {
         operator: UnaryOperator,
         value: Place,
@@ -1105,6 +1113,7 @@ impl InstructionValue {
             | InstructionValue::Primitive { loc, .. }
             | InstructionValue::JsxText { loc, .. }
             | InstructionValue::BinaryExpression { loc, .. }
+            | InstructionValue::TernaryExpression { loc, .. }
             | InstructionValue::UnaryExpression { loc, .. }
             | InstructionValue::TypeCastExpression { loc, .. }
             | InstructionValue::CallExpression { loc, .. }

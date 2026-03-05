@@ -948,14 +948,14 @@ fn lower_formal_param<'a>(
         }
         BindingPatternKind::AssignmentPattern(ap) => {
             // Assignment pattern = param with default value (e.g. `x = 0`).
-            // Simplified: create temp param and destructure the left side only,
-            // ignoring the default expression.
+            // Lower as: param t0, then const x = t0 === undefined ? default : t0
             let tmp = ctx.make_temporary(loc.clone());
             params.push(Param::Place(tmp.clone()));
+            // Use the patterns module to emit the undefined check + bind
             super::patterns::lower_binding_pattern(
                 ctx,
                 semantic,
-                &ap.left,
+                &formal_param.pattern,
                 tmp,
                 InstructionKind::Const,
                 lower_expr,
@@ -1860,38 +1860,18 @@ fn bind_pattern<'r, 'a: 'r>(
                 loc,
             );
         }
-        BindingPatternKind::ArrayPattern(arr_pat) => {
-            let hir_pattern = lower_array_pattern(arr_pat, semantic, ctx, loc.clone());
-            ctx.push(
-                InstructionValue::Destructure {
-                    lvalue: LValuePattern { pattern: Pattern::Array(hir_pattern), kind },
-                    value,
-                    loc: loc.clone(),
-                },
-                loc,
-            );
-        }
-        BindingPatternKind::ObjectPattern(obj_pat) => {
-            // Computed property keys in destructuring are not supported.
-            for prop in &obj_pat.properties {
-                if prop.computed {
-                    return Err(CompilerError::invariant(
-                        "[InferMutationAliasingEffects] Expected value kind to be initialized",
-                    ));
-                }
-            }
-            let hir_pattern = lower_object_pattern(obj_pat, semantic, ctx, loc.clone());
-            ctx.push(
-                InstructionValue::Destructure {
-                    lvalue: LValuePattern { pattern: Pattern::Object(hir_pattern), kind },
-                    value,
-                    loc: loc.clone(),
-                },
-                loc,
-            );
-        }
-        BindingPatternKind::AssignmentPattern(_) => {
-            ctx.push(InstructionValue::UnsupportedNode { loc }, SourceLocation::Generated);
+        BindingPatternKind::ArrayPattern(_)
+        | BindingPatternKind::ObjectPattern(_)
+        | BindingPatternKind::AssignmentPattern(_) => {
+            // Delegate to patterns module which handles defaults, nested patterns, etc.
+            super::patterns::lower_binding_pattern(
+                ctx,
+                semantic,
+                pat,
+                value,
+                kind,
+                &mut |expr, ctx| lower_expr(expr, semantic, ctx),
+            )?;
         }
     }
     Ok(())

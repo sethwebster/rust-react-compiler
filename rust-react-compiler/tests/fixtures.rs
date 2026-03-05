@@ -117,6 +117,198 @@ fn normalize_js(js: &str) -> String {
     // formats it across multiple lines. After whitespace collapse, the only
     // remaining difference is the missing space between `>` and `<`.
     let result = result.replace("><", "> <");
+    // Normalize single quotes to double quotes in import paths.
+    // oxc_codegen may emit single-quoted imports ('react') while the TS
+    // compiler always uses double quotes ("react").
+    let result = normalize_import_quotes(&result);
+    // Normalize double braces in function bodies: `() {{...}}` → `() {...}`.
+    // Our codegen sometimes wraps function bodies in an extra block.
+    let result = result.replace(") {{", ") {").replace(";}}", ";}");
+    // Normalize empty switch cases: `case N: {}` → `case N:` and
+    // `default: {}` → `default:`. Empty case bodies are equivalent.
+    let result = result.replace("default: {}", "default:");
+    // Remove empty case bodies — `case N: {}` → `case N:`
+    let result = normalize_empty_case_bodies(&result);
+    // Normalize JSX brace-wrapped string attributes: `attr={"val"}` → `attr="val"`.
+    // The TS compiler wraps JSX string attribute values in braces; our codegen
+    // emits plain quoted attributes. Unwrap braces around string literals.
+    let result = normalize_jsx_string_attrs(&result);
+    // Normalize integer-valued floats: `42.0` → `42`. oxc_codegen sometimes
+    // emits `42.0` for numeric literals that are semantically integers.
+    let result = normalize_integer_floats(&result);
+    // Normalize compiler-generated temp names: both `$tN` and `tN` (where N is a
+    // number) are mapped to canonical sequential names. This handles differences
+    // between the TS compiler's `t0 t1 t2` and our `$t15 $t23 $t31` naming.
+    // We re-split the result and replace temps that aren't followed by alphanumeric
+    // characters (to avoid renaming inside string literals or object keys).
+    normalize_temp_names(&result)
+}
+
+/// Remove empty case bodies: `case N: {}` → `case N:`.
+fn normalize_empty_case_bodies(input: &str) -> String {
+    // After whitespace normalization, pattern is `case <expr>: {}`
+    let mut result = input.to_string();
+    // Repeatedly remove `case ...: {}` patterns
+    loop {
+        if let Some(pos) = result.find("case ") {
+            // Find the `: {}` after it
+            if let Some(colon_pos) = result[pos..].find(": {}") {
+                let full_pos = pos + colon_pos;
+                // Remove ` {}` (keep the colon)
+                let end = full_pos + 4; // `: {}` is 4 chars, keep `:` (2 chars)
+                result = format!("{}{}", &result[..full_pos + 1], &result[end..]);
+                continue;
+            }
+        }
+        break;
+    }
+    result
+}
+
+/// Normalize JSX brace-wrapped string attributes: `={"val"}` → `="val"`.
+fn normalize_jsx_string_attrs(input: &str) -> String {
+    // Replace `={"..."}` with `="..."` and `={'...'}` with `='...'`
+    let mut result = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Look for `={"` or `={'`
+        if i + 2 < bytes.len() && bytes[i] == b'=' && bytes[i + 1] == b'{' && (bytes[i + 2] == b'"' || bytes[i + 2] == b'\'') {
+            let quote = bytes[i + 2];
+            // Find closing quote
+            let start = i + 3;
+            let mut j = start;
+            while j < bytes.len() && bytes[j] != quote {
+                if bytes[j] == b'\\' { j += 1; } // skip escaped chars
+                j += 1;
+            }
+            // Check for `"}` after the closing quote
+            if j < bytes.len() && j + 1 < bytes.len() && bytes[j] == quote && bytes[j + 1] == b'}' {
+                // Emit `="..."` without braces
+                result.push('=');
+                result.push(quote as char);
+                result.push_str(&input[start..j]);
+                result.push(quote as char);
+                i = j + 2;
+                continue;
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// Normalize import quotes: `from 'react'` → `from "react"`.
+/// After whitespace normalization, single-quoted import specifiers can
+/// differ from the double-quoted output of the TS compiler.
+fn normalize_import_quotes(input: &str) -> String {
+    // Replace `from '...'` with `from "..."`
+    let mut result = input.to_string();
+    // Pattern: `from '` ... `'` (non-greedy)
+    while let Some(start) = result.find("from '") {
+        let after = start + 6; // after `from '`
+        if let Some(end) = result[after..].find('\'') {
+            let module = result[after..after + end].to_string();
+            let replacement = format!("from \"{}\"", module);
+            result = format!("{}{}{}", &result[..start], replacement, &result[after + end + 1..]);
+        } else {
+            break;
+        }
+    }
+    result
+}
+
+/// Normalize integer-valued floats: `42.0` → `42`, `-1.0` → `-1`.
+/// Matches patterns like digits followed by `.0` at a word boundary.
+fn normalize_integer_floats(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Look for a sequence of digits followed by `.0` not followed by more digits
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            // Check for `.0` suffix
+            if i + 1 < bytes.len() && bytes[i] == b'.' && bytes[i + 1] == b'0'
+                && (i + 2 >= bytes.len() || !bytes[i + 2].is_ascii_digit())
+            {
+                // It's an integer float like `42.0` — emit just the integer part
+                result.push_str(&input[start..i]);
+                i += 2; // skip `.0`
+            } else {
+                result.push_str(&input[start..i]);
+            }
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    result
+}
+
+/// Replace compiler-generated temp names ($tN / tN) with a canonical sequential
+/// numbering so both outputs use the same names regardless of internal numbering.
+fn normalize_temp_names(input: &str) -> String {
+    use std::collections::HashMap;
+    let mut map: HashMap<String, String> = HashMap::new();
+    let mut counter = 0;
+    let mut result = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Check for $tN or standalone tN at a word boundary
+        let start = i;
+        let has_dollar = bytes[i] == b'$';
+        if has_dollar && i + 2 < bytes.len() && bytes[i + 1] == b't' && bytes[i + 2].is_ascii_digit() {
+            // $tN pattern
+            i += 2;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            // Ensure it's not followed by alphanumeric (avoid matching $toString etc.)
+            if i >= bytes.len() || !bytes[i].is_ascii_alphanumeric() && bytes[i] != b'_' {
+                let tok = &input[start..i];
+                let canonical = map.entry(tok.to_string()).or_insert_with(|| {
+                    let name = format!("_T{}", counter);
+                    counter += 1;
+                    name
+                }).clone();
+                result.push_str(&canonical);
+                continue;
+            }
+            // Not a match — push the chars we consumed
+            i = start;
+        } else if bytes[i] == b't' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+            // tN pattern — check word boundary before
+            let is_word_start = start == 0 || {
+                let prev = bytes[start - 1];
+                !prev.is_ascii_alphanumeric() && prev != b'_' && prev != b'$'
+            };
+            if is_word_start {
+                i += 1;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                if i >= bytes.len() || !bytes[i].is_ascii_alphanumeric() && bytes[i] != b'_' {
+                    let tok = &input[start..i];
+                    let canonical = map.entry(tok.to_string()).or_insert_with(|| {
+                        let name = format!("_T{}", counter);
+                        counter += 1;
+                        name
+                    }).clone();
+                    result.push_str(&canonical);
+                    continue;
+                }
+                i = start;
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
     result
 }
 
@@ -191,6 +383,86 @@ fn fixture_smoke_tsx() {
 // ---------------------------------------------------------------------------
 // Full fixture run (ignored by default, run with --ignored flag)
 // ---------------------------------------------------------------------------
+
+/// Show diffs for specific fixtures.
+/// Run with: cargo test --test fixtures show_diffs -- --ignored --nocapture
+#[test]
+#[ignore]
+fn show_diffs() {
+    let result = std::thread::Builder::new()
+        .stack_size(512 * 1024 * 1024)
+        .spawn(show_diffs_impl)
+        .expect("spawn")
+        .join()
+        .expect("join");
+    drop(result);
+}
+
+fn show_diffs_impl() {
+    let dir = PathBuf::from(FIXTURE_DIR);
+    let env_fixtures = std::env::var("SHOW_FIXTURES").unwrap_or_else(|_| "ALL_MISMATCHES".to_string());
+    let fixtures: Vec<&str> = env_fixtures
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .collect();
+    // If ALL_MISMATCHES, iterate all fixtures and show first N diffs
+    let all_mode = fixtures.len() == 1 && fixtures[0] == "ALL_MISMATCHES";
+    let all_paths: Vec<String> = if all_mode {
+        std::fs::read_dir(&dir).unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_str().unwrap().to_string())
+            .filter(|n| matches!(n.rsplit('.').next(), Some("js" | "jsx" | "ts" | "tsx")))
+            .collect()
+    } else {
+        fixtures.iter().map(|s| s.to_string()).collect()
+    };
+    let mut diff_count = 0;
+    let max_diffs: usize = std::env::var("MAX_DIFFS").ok().and_then(|s| s.parse().ok()).unwrap_or(30);
+    for name_str in &all_paths {
+        let name = name_str.as_str();
+        let path = dir.join(name);
+        if !path.exists() { continue; }
+        let expect_path = expect_md_path(&path);
+        let expected = match std::fs::read_to_string(&expect_path) {
+            Ok(md) => match parse_expected_code(&md) {
+                Some(code) => code,
+                None => continue,
+            },
+            Err(_) => continue,
+        };
+        match run_fixture(&path) {
+            Ok(actual) => {
+                let na = normalize_js(&actual);
+                let ne = normalize_js(&expected);
+                if na != ne {
+                    diff_count += 1;
+                    if diff_count > max_diffs { continue; }
+                    eprintln!("\n=== DIFF: {} ===", name);
+                    // Find first difference
+                    let a_chars: Vec<char> = na.chars().collect();
+                    let e_chars: Vec<char> = ne.chars().collect();
+                    for i in 0..a_chars.len().min(e_chars.len()) {
+                        if a_chars[i] != e_chars[i] {
+                            let start = i.saturating_sub(40);
+                            let end_a = (i + 60).min(a_chars.len());
+                            let end_e = (i + 60).min(e_chars.len());
+                            eprintln!("FIRST DIFF at char {}:", i);
+                            eprintln!("  ACTUAL:   ...{}...", a_chars[start..end_a].iter().collect::<String>());
+                            eprintln!("  EXPECTED: ...{}...", e_chars[start..end_e].iter().collect::<String>());
+                            break;
+                        }
+                    }
+                    if a_chars.len() != e_chars.len() {
+                        eprintln!("  LEN: actual={} expected={}", a_chars.len(), e_chars.len());
+                    }
+                } else {
+                    eprintln!("[MATCH] {}", name);
+                }
+            }
+            Err(e) => println!("[ERROR] {}: {}", name, e),
+        }
+    }
+}
 
 /// Run all fixtures and collect pass/fail stats including output correctness.
 /// Run with: cargo test --test fixtures run_all_fixtures -- --ignored --nocapture

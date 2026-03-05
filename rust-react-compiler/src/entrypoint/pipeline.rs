@@ -656,6 +656,9 @@ pub fn run_with_environment(
     eliminate_redundant_phi(hir);
 
     // --- Phase: Optimization pre-inference ---
+    // Promote let→const before const-prop so that non-reassigned variables
+    // can be propagated cross-block.
+    rewrite_instruction_kinds_based_on_reassignment(hir, env);
     constant_propagation(hir);
 
     // --- Phase: Type inference ---

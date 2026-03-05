@@ -449,6 +449,7 @@ fn is_safe_gap_instruction(value: &InstructionValue) -> bool {
         | InstructionValue::LoadGlobal { .. }
         | InstructionValue::Primitive { .. }
         | InstructionValue::BinaryExpression { .. }
+        | InstructionValue::TernaryExpression { .. }
         | InstructionValue::UnaryExpression { .. }
         | InstructionValue::PropertyLoad { .. }
         | InstructionValue::ComputedLoad { .. }

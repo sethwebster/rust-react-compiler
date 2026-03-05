@@ -89,6 +89,7 @@ fn instruction_memo_level(value: &InstructionValue) -> MemoLevel {
 
         // Never: barrier to backward propagation (no rvalues = empty deps).
         InstructionValue::BinaryExpression { .. }
+        | InstructionValue::TernaryExpression { .. }
         | InstructionValue::UnaryExpression { .. }
         | InstructionValue::Primitive { .. }
         | InstructionValue::TemplateLiteral { .. }

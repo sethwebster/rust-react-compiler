@@ -11,6 +11,7 @@ use crate::hir::hir::{
     LValue, LValuePattern, Pattern,
     ArrayElement, SpreadPattern,
     ObjectPatternProperty, ObjectPropertyKey, ObjectPropertyType,
+    PrimitiveValue, BinaryOperator,
 };
 use crate::error::{CompilerError, Result};
 use super::LoweringContext;
@@ -66,10 +67,13 @@ pub fn lower_binding_pattern<'a>(
         }
 
         BindingPatternKind::AssignmentPattern(ap) => {
-            // Simplified: lower the left binding with the incoming value,
-            // ignoring the default expression.  A full implementation would
-            // test for undefined at runtime and substitute the default.
-            lower_binding_pattern(ctx, semantic, &ap.left, value, kind, lower_expr)?;
+            // Lower `pattern = default` as:
+            //   const t0 = value === undefined ? <default> : value;
+            // Then bind `pattern` to t0.
+            let checked = lower_assignment_pattern_default(
+                ctx, semantic, &ap.right, value, loc.clone(), lower_expr,
+            )?;
+            lower_binding_pattern(ctx, semantic, &ap.left, checked, kind, lower_expr)?;
         }
     }
     Ok(())
@@ -291,6 +295,50 @@ pub fn lower_object_pattern<'a>(
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
+
+/// Emit `value === undefined ? <default_expr> : value` as a TernaryExpression instruction.
+/// Returns the result place.
+fn lower_assignment_pattern_default<'a>(
+    ctx: &mut LoweringContext,
+    _semantic: &Semantic<'a>,
+    default_expr: &Expression<'a>,
+    value: Place,
+    loc: SourceLocation,
+    lower_expr: &mut dyn FnMut(&Expression<'a>, &mut LoweringContext) -> Result<Place>,
+) -> Result<Place> {
+    // Lower the default expression first (it becomes the consequent)
+    let default_place = lower_expr(default_expr, ctx)?;
+
+    // Emit: test_place = (value === undefined)
+    let undef_place = ctx.push(
+        InstructionValue::Primitive {
+            value: PrimitiveValue::Undefined,
+            loc: loc.clone(),
+        },
+        loc.clone(),
+    );
+    let test_place = ctx.push(
+        InstructionValue::BinaryExpression {
+            operator: BinaryOperator::StrictEq,
+            left: value.clone(),
+            right: undef_place,
+            loc: loc.clone(),
+        },
+        loc.clone(),
+    );
+
+    // Emit: result = test ? default : value
+    let result = ctx.push(
+        InstructionValue::TernaryExpression {
+            test: test_place,
+            consequent: default_place,
+            alternate: value,
+            loc: loc.clone(),
+        },
+        loc,
+    );
+    Ok(result)
+}
 
 /// Convert an oxc PropertyKey (from a BindingProperty) to our ObjectPropertyKey.
 /// For computed keys we emit a temporary and lower the expression.

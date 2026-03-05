@@ -2567,6 +2567,7 @@ impl<'a> Codegen<'a> {
                 self.inlined_exprs.insert(instr.lvalue.identifier.0, expr);
             }
         }
+
     }
 
     /// Returns true if any Place operand of `value` belongs to a reactive scope.
@@ -2641,6 +2642,12 @@ impl<'a> Codegen<'a> {
                 let l = self.expr(left);
                 let r = self.expr(right);
                 Some(format!("{l} {op} {r}"))
+            }
+            InstructionValue::TernaryExpression { test, consequent, alternate, .. } => {
+                let t = self.expr(test);
+                let c = self.expr(consequent);
+                let a = self.expr(alternate);
+                Some(format!("{t} ? {c} : {a}"))
             }
             InstructionValue::UnaryExpression { operator, value, .. } => {
                 let v = self.expr(value);
@@ -2922,11 +2929,36 @@ impl<'a> Codegen<'a> {
                         false
                     })
                 }).unwrap_or(false);
+                let captured_and_called = esc_var_id.map(|vid| {
+                    let var_decl_id = self.env.get_identifier(vid)
+                        .map(|i| i.declaration_id);
+                    let has_call = instrs.iter().any(|i| matches!(&i.value,
+                        InstructionValue::CallExpression { .. } | InstructionValue::MethodCall { .. }
+                    ));
+                    if !has_call { return false; }
+                    instrs.iter().any(|i| {
+                        if let InstructionValue::FunctionExpression { lowered_func, .. }
+                            | InstructionValue::ObjectMethod { lowered_func, .. } = &i.value
+                        {
+                            lowered_func.func.context.iter().any(|ctx| {
+                                if let Some(d) = var_decl_id {
+                                    self.env.get_identifier(ctx.identifier)
+                                        .map(|ci| ci.declaration_id == d)
+                                        .unwrap_or(false)
+                                } else {
+                                    ctx.identifier == vid
+                                }
+                            })
+                        } else {
+                            false
+                        }
+                    })
+                }).unwrap_or(false);
                 let esc_intra: Vec<usize> = store_local_info.iter()
                     .filter(|(i, _, _, intra)| *intra && *i != *esc_idx)
                     .map(|(i, _, _, _)| *i)
                     .collect();
-                let output = if is_let_kind || used_after {
+                let output = if is_let_kind || used_after || captured_and_called {
                     ScopeOutputItem {
                         skip_idx: None,
                         cache_expr: esc_name.clone().unwrap_or_else(|| "undefined".to_string()),
@@ -3061,7 +3093,42 @@ impl<'a> Codegen<'a> {
                         false
                     })
                 }).unwrap_or(false);
-                let is_named_var = is_let_kind || used_after;
+                // Check if this variable is captured by any function expression
+                // within the scope. If so, the closure may read/mutate it, and the
+                // variable must be declared before the scope (named-var) so it's
+                // visible inside the closure body.
+                //
+                // (c) captured + called: a FunctionExpression in the scope captures
+                //     this variable AND a CallExpression also exists in the scope,
+                //     meaning the closure may be invoked during the scope and mutate
+                //     the variable. In that case, the variable must be visible before
+                //     the scope block so the closure body can access it.
+                let captured_and_called = var_id.map(|vid| {
+                    let var_decl_id = self.env.get_identifier(vid)
+                        .map(|i| i.declaration_id);
+                    let has_call = instrs.iter().any(|i| matches!(&i.value,
+                        InstructionValue::CallExpression { .. } | InstructionValue::MethodCall { .. }
+                    ));
+                    if !has_call { return false; }
+                    instrs.iter().any(|i| {
+                        if let InstructionValue::FunctionExpression { lowered_func, .. }
+                            | InstructionValue::ObjectMethod { lowered_func, .. } = &i.value
+                        {
+                            lowered_func.func.context.iter().any(|ctx| {
+                                if let Some(d) = var_decl_id {
+                                    self.env.get_identifier(ctx.identifier)
+                                        .map(|ci| ci.declaration_id == d)
+                                        .unwrap_or(false)
+                                } else {
+                                    ctx.identifier == vid
+                                }
+                            })
+                        } else {
+                            false
+                        }
+                    })
+                }).unwrap_or(false);
+                let is_named_var = is_let_kind || used_after || captured_and_called;
                 if std::env::var("RC_DEBUG").is_ok() {
                     eprintln!("[analyze_scope] StoreLocal idx={} name={:?} used_after={} is_let_kind={} is_named_var={} instrs.len()={}",
                         idx, name, used_after, is_let_kind, is_named_var, instrs.len());
@@ -3638,6 +3705,14 @@ impl<'a> Codegen<'a> {
                 let op = binary_op_str(operator);
                 let lv = self.lvalue_name(&instr.lvalue);
                 Some(format!("const {lv} = {} {op} {};", self.expr(left), self.expr(right)))
+            }
+
+            InstructionValue::TernaryExpression { test, consequent, alternate, .. } => {
+                if self.inlined_exprs.contains_key(&instr.lvalue.identifier.0) {
+                    return None;
+                }
+                let lv = self.lvalue_name(&instr.lvalue);
+                Some(format!("const {lv} = {} ? {} : {};", self.expr(test), self.expr(consequent), self.expr(alternate)))
             }
 
             InstructionValue::UnaryExpression { operator, value, .. } => {

@@ -34,15 +34,111 @@ pub fn dead_code_elimination(hir: &mut HIRFunction) {
 
 pub fn dead_code_elimination_with_env(hir: &mut HIRFunction, env: Option<&Environment>) {
     remove_unreachable_blocks(hir);
-    // Iterate until convergence: removing dead StoreLocals can make their
+    // Iterate until convergence: removing dead phis/StoreLocals can make their
     // value-producing Primitives dead, requiring another pass.
     loop {
-        let before: usize = hir.body.blocks.values().map(|b| b.instructions.len()).sum();
+        let before_instrs: usize = hir.body.blocks.values().map(|b| b.instructions.len()).sum();
+        let before_phis: usize = hir.body.blocks.values().map(|b| b.phis.len()).sum();
+        remove_dead_phis(hir);
         remove_dead_instructions(hir, env);
-        let after: usize = hir.body.blocks.values().map(|b| b.instructions.len()).sum();
-        if after == before {
+        let after_instrs: usize = hir.body.blocks.values().map(|b| b.instructions.len()).sum();
+        let after_phis: usize = hir.body.blocks.values().map(|b| b.phis.len()).sum();
+        if after_instrs == before_instrs && after_phis == before_phis {
             break;
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pass 0: dead phi removal
+// ---------------------------------------------------------------------------
+
+/// Remove phis whose output identifier is never used by any live consumer.
+/// Handles cyclic dead phis (phi A → phi B → phi A) via iterative analysis.
+fn remove_dead_phis(hir: &mut HIRFunction) {
+    // Step 1: Collect identifiers used by non-phi consumers (instructions, terminals, params).
+    let mut non_phi_used: HashSet<IdentifierId> = HashSet::new();
+
+    for param in &hir.params {
+        match param {
+            Param::Place(p) => { non_phi_used.insert(p.identifier); }
+            Param::Spread(s) => { non_phi_used.insert(s.place.identifier); }
+        }
+    }
+    for ctx in &hir.context {
+        non_phi_used.insert(ctx.identifier);
+    }
+
+    for block in hir.body.blocks.values() {
+        collect_terminal_uses(&block.terminal, &mut non_phi_used);
+        for instr in &block.instructions {
+            collect_instruction_uses(&instr.value, &mut non_phi_used);
+        }
+    }
+
+    // Step 2: Iteratively mark phis as live.
+    // A phi is live if its output is used by a non-phi consumer OR by a live phi.
+    let mut live_phis: HashSet<IdentifierId> = HashSet::new();
+    loop {
+        let mut changed = false;
+        for block in hir.body.blocks.values() {
+            for phi in &block.phis {
+                if live_phis.contains(&phi.place.identifier) {
+                    continue;
+                }
+                if non_phi_used.contains(&phi.place.identifier) {
+                    live_phis.insert(phi.place.identifier);
+                    // Mark this phi's operands as non-phi-used so downstream phis see them.
+                    for (_, operand) in &phi.operands {
+                        non_phi_used.insert(operand.identifier);
+                    }
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // Collect blocks that are loop headers or test blocks — preserve their phis
+    // to avoid disrupting for/while/do-while codegen structure.
+    let mut loop_blocks: HashSet<BlockId> = HashSet::new();
+    for block in hir.body.blocks.values() {
+        match &block.terminal {
+            Terminal::For { test, init, update, loop_, .. } => {
+                loop_blocks.insert(*test);
+                loop_blocks.insert(*init);
+                if let Some(update) = update { loop_blocks.insert(*update); }
+                loop_blocks.insert(*loop_);
+            }
+            Terminal::While { test, loop_, .. } => {
+                loop_blocks.insert(*test);
+                loop_blocks.insert(*loop_);
+            }
+            Terminal::DoWhile { test, loop_, .. } => {
+                loop_blocks.insert(*test);
+                loop_blocks.insert(*loop_);
+            }
+            Terminal::ForOf { loop_, init, test, .. } => {
+                loop_blocks.insert(*loop_);
+                loop_blocks.insert(*init);
+                loop_blocks.insert(*test);
+            }
+            Terminal::ForIn { loop_, init, .. } => {
+                loop_blocks.insert(*loop_);
+                loop_blocks.insert(*init);
+            }
+            _ => {}
+        }
+    }
+
+    // Step 3: Remove dead phis, but skip loop-related blocks.
+    for (block_id, block) in hir.body.blocks.iter_mut() {
+        if loop_blocks.contains(block_id) {
+            continue; // Preserve loop phis for codegen structure.
+        }
+        block.phis.retain(|phi| live_phis.contains(&phi.place.identifier));
     }
 }
 
@@ -313,6 +409,12 @@ fn collect_instruction_uses(value: &InstructionValue, used: &mut HashSet<Identif
         InstructionValue::BinaryExpression { left, right, .. } => {
             used.insert(left.identifier);
             used.insert(right.identifier);
+        }
+
+        InstructionValue::TernaryExpression { test, consequent, alternate, .. } => {
+            used.insert(test.identifier);
+            used.insert(consequent.identifier);
+            used.insert(alternate.identifier);
         }
 
         InstructionValue::UnaryExpression { value, .. }

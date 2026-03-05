@@ -4,11 +4,65 @@ use std::collections::{HashMap, HashSet};
 use indexmap::IndexMap;
 
 use crate::hir::hir::{
-    BasicBlock, BlockId, DeclarationId, Effect, HIR, HIRFunction, Identifier, IdentifierId,
-    InstructionId, InstructionValue, LValue, MutableRange, Param, Phi, Place,
-    SourceLocation, SpreadPattern, Type,
+    ArrayElement, BasicBlock, BlockId, DeclarationId, Effect, HIR, HIRFunction, Identifier,
+    IdentifierId, InstructionId, InstructionValue, LValue, MutableRange, ObjectPatternProperty,
+    Param, Pattern, Phi, Place, SourceLocation, SpreadPattern, Type,
 };
 use crate::hir::environment::Environment;
+
+/// Define (SSA-rename) all definition places inside a Destructure pattern.
+fn define_pattern_places(pattern: &mut Pattern, builder: &mut SsaBuilder) {
+    match pattern {
+        Pattern::Array(ap) => {
+            for item in &mut ap.items {
+                match item {
+                    ArrayElement::Place(p) => {
+                        *p = builder.define_place(p.clone());
+                    }
+                    ArrayElement::Spread(s) => {
+                        s.place = builder.define_place(s.place.clone());
+                    }
+                    ArrayElement::Hole => {}
+                }
+            }
+        }
+        Pattern::Object(op) => {
+            for prop in &mut op.properties {
+                match prop {
+                    ObjectPatternProperty::Property(p) => {
+                        p.place = builder.define_place(p.place.clone());
+                    }
+                    ObjectPatternProperty::Spread(s) => {
+                        s.place = builder.define_place(s.place.clone());
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Visit all definition-place identifiers inside a Destructure pattern.
+fn visit_pattern_places(pattern: &Pattern, visit: &mut impl FnMut(IdentifierId)) {
+    match pattern {
+        Pattern::Array(ap) => {
+            for item in &ap.items {
+                match item {
+                    ArrayElement::Place(p) => visit(p.identifier),
+                    ArrayElement::Spread(s) => visit(s.place.identifier),
+                    ArrayElement::Hole => {}
+                }
+            }
+        }
+        Pattern::Object(op) => {
+            for prop in &op.properties {
+                match prop {
+                    ObjectPatternProperty::Property(p) => visit(p.place.identifier),
+                    ObjectPatternProperty::Spread(s) => visit(s.place.identifier),
+                }
+            }
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // State per basic block: holds the current SSA renaming for old -> new ids,
@@ -87,10 +141,19 @@ fn collect_operand_ids_from_value(val: &InstructionValue, visit: &mut impl FnMut
             visit(value.identifier);
         }
         StoreGlobal { value, .. } => visit(value.identifier),
-        Destructure { lvalue: _, value, .. } => visit(value.identifier),
+        Destructure { lvalue, value, .. } => {
+            visit(value.identifier);
+            // Also visit pattern definition places.
+            visit_pattern_places(&lvalue.pattern, &mut |id| visit(id));
+        }
         BinaryExpression { left, right, .. } => {
             visit(left.identifier);
             visit(right.identifier);
+        }
+        TernaryExpression { test, consequent, alternate, .. } => {
+            visit(test.identifier);
+            visit(consequent.identifier);
+            visit(alternate.identifier);
         }
         UnaryExpression { value, .. } => visit(value.identifier),
         TypeCastExpression { value, .. } => visit(value.identifier),
@@ -535,6 +598,12 @@ pub fn enter_ssa_with_env(hir: &mut HIRFunction, env: Option<&mut Environment>) 
 
             // Rename lvalue (definition site).
             instr.lvalue = builder.define_place(instr.lvalue.clone());
+
+            // For Destructure instructions, also define the pattern places
+            // (these are additional definition sites inside the pattern).
+            if let InstructionValue::Destructure { lvalue, .. } = &mut instr.value {
+                define_pattern_places(&mut lvalue.pattern, &mut builder);
+            }
         }
         hir.body.blocks.get_mut(&block_id).unwrap().instructions = instrs;
 
@@ -629,6 +698,11 @@ fn rename_operands_in_value(
         BinaryExpression { left, right, .. } => {
             rp!(left);
             rp!(right);
+        }
+        TernaryExpression { test, consequent, alternate, .. } => {
+            rp!(test);
+            rp!(consequent);
+            rp!(alternate);
         }
         UnaryExpression { value, .. } => rp!(value),
         TypeCastExpression { value, .. } => rp!(value),

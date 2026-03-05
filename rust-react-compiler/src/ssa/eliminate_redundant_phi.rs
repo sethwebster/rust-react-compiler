@@ -170,6 +170,11 @@ fn rewrite_value_identifiers(
             left.identifier = rp(left.identifier);
             right.identifier = rp(right.identifier);
         }
+        TernaryExpression { test, consequent, alternate, .. } => {
+            test.identifier = rp(test.identifier);
+            consequent.identifier = rp(consequent.identifier);
+            alternate.identifier = rp(alternate.identifier);
+        }
         UnaryExpression { value, .. } => value.identifier = rp(value.identifier),
         TypeCastExpression { value, .. } => value.identifier = rp(value.identifier),
         CallExpression { callee, args, .. } => {

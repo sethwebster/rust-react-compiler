@@ -87,6 +87,12 @@ fn collect_instruction_value_operands<'a>(
             out.push(right);
         }
 
+        InstructionValue::TernaryExpression { test, consequent, alternate, .. } => {
+            out.push(test);
+            out.push(consequent);
+            out.push(alternate);
+        }
+
         InstructionValue::CallExpression { callee, args, .. }
         | InstructionValue::NewExpression { callee, args, .. } => {
             out.push(callee);
@@ -310,6 +316,12 @@ fn collect_instruction_value_operands_mut<'a>(
         InstructionValue::BinaryExpression { left, right, .. } => {
             out.push(left);
             out.push(right);
+        }
+
+        InstructionValue::TernaryExpression { test, consequent, alternate, .. } => {
+            out.push(test);
+            out.push(consequent);
+            out.push(alternate);
         }
 
         InstructionValue::CallExpression { callee, args, .. }

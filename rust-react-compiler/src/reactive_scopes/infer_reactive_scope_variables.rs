@@ -553,6 +553,7 @@ fn may_allocate(value: &InstructionValue, global_names: &HashMap<IdentifierId, S
         | InstructionValue::FinishMemoize { .. }
         | InstructionValue::UnaryExpression { .. }
         | InstructionValue::BinaryExpression { .. }
+        | InstructionValue::TernaryExpression { .. }
         | InstructionValue::PropertyLoad { .. }
         | InstructionValue::StoreGlobal { .. }
         | InstructionValue::RegExpLiteral { .. }

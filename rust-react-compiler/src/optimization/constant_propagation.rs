@@ -109,10 +109,11 @@ fn constant_propagation_round(hir: &mut HIRFunction) -> bool {
                         let is_const = lvalue.kind == InstructionKind::Const
                             || lvalue.kind == InstructionKind::HoistedConst;
                         let val = lattice.get(&value.identifier).cloned();
-                        // Only propagate const declarations cross-block.
-                        // Let/Reassign variables share the same pre-SSA identifier
-                        // across multiple definitions, so propagating them would
-                        // cause collisions in the lattice.
+                        // For const declarations, also track the named variable
+                        // (lvalue.place.identifier) in the lattice for cross-block
+                        // propagation. Let/Reassign variables share the same pre-SSA
+                        // identifier across multiple definitions, so tracking them
+                        // would cause collisions.
                         if is_const {
                             if let Some(v) = &val {
                                 let prev = lattice.get(&lvalue.place.identifier)
@@ -123,12 +124,16 @@ fn constant_propagation_round(hir: &mut HIRFunction) -> bool {
                                     changed = true;
                                 }
                             }
-                            // The instruction lvalue (SSA temp) feeds into phis.
-                            val
-                        } else {
-                            // Non-const — don't track cross-block.
-                            None
                         }
+                        // For const declarations, also return the value for the
+                        // instruction's own lvalue (the SSA temp). This allows
+                        // phi nodes that reference the StoreLocal's lvalue to
+                        // resolve to the constant value.
+                        // Non-const StoreLocals are not tracked because their SSA
+                        // temps feed into loop phis and cause premature folding
+                        // (the lattice resolves phi(Const, Top) = Const before
+                        // the back-edge value is computed).
+                        if is_const { val } else { None }
                     }
                     InstructionValue::UnaryExpression { value, operator, .. } => {
                         match lattice.get(&value.identifier) {

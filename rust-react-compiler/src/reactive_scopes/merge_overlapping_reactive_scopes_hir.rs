@@ -101,6 +101,7 @@ pub fn run_with_env(hir: &mut HIRFunction, env: &mut Environment) {
                 // They should not block "all-always-inv" detection on a parent scope.
                 InstructionValue::Primitive { .. }
                     | InstructionValue::BinaryExpression { .. }
+                    | InstructionValue::TernaryExpression { .. }
                     | InstructionValue::UnaryExpression { .. }
                     | InstructionValue::PropertyLoad { .. }
                     | InstructionValue::ComputedLoad { .. }
