@@ -92,11 +92,12 @@ fn normalize_js(js: &str) -> String {
         }
         result.push_str(effective);
     }
-    // Normalize bracket spacing: collapse "[ " → "[" and " ]" → "]",
-    // "( " → "(" and " )" → ")". This handles differences between
-    // `[2, 3, 4]` and `[ 2, 3, 4 ]` in FIXTURE_ENTRYPOINT passthrough.
+    // Normalize bracket/brace/paren spacing: collapse "[ " → "[", " ]" → "]",
+    // "( " → "(", " )" → ")", "{ " → "{", " }" → "}". This handles differences
+    // between `[2, 3, 4]` and `[ 2, 3, 4 ]`, `{a}` and `{ a }`, etc.
     let result = result.replace("[ ", "[").replace(" ]", "]");
     let result = result.replace("( ", "(").replace(" )", ")");
+    let result = result.replace("{ ", "{").replace(" }", "}");
     // Collapse empty braces: "{ }" → "{}" to handle single-line vs multi-line
     // empty function bodies (e.g. `function foo() {}` vs `function foo() {\n}`).
     let result = result.replace("{ }", "{}");
@@ -111,6 +112,11 @@ fn normalize_js(js: &str) -> String {
     // always names the catch parameter; the TS compiler omits it when unused.
     let result = result.replace("catch (_e) {}", "catch {}");
     let result = result.replace("catch(_e) {}", "catch {}");
+    // Normalize adjacent JSX elements: `><` → `> <`. Our codegen emits
+    // multi-child JSX on one line (`<View><span>`) while the TS compiler
+    // formats it across multiple lines. After whitespace collapse, the only
+    // remaining difference is the missing space between `>` and `<`.
+    let result = result.replace("><", "> <");
     result
 }
 
