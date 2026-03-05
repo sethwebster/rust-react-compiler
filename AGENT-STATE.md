@@ -44,7 +44,7 @@ Update the following before stopping:
 
 ## Current Task
 
-**Active work**: Test harness normalization improvements. Two agents running.
+**Active work**: Agents in deep analysis phase. Last commit 8ad7d0d at ~10:20 UTC. Tried named-const scope promotion in hir_codegen.rs (reverted). Two agents still running as of 11:22 UTC.
 
 Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368.
 
