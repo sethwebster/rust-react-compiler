@@ -136,7 +136,7 @@ Previous session work (committed):
   - Needs: scope terminals + full terminal/branch/loop coverage in tree builder
 - Codegen (`hir_codegen.rs`) currently operates on raw `HIR`, not `ReactiveFunction`
   - Fix requires full tree build + dual codegen integration first
-- Enabling `RC_ENABLE_SCOPE_TERMINALS_HIR=1` currently regresses correctness (24.1% → 20.2%)
+- Enabling `RC_ENABLE_SCOPE_TERMINALS_HIR=1` currently regresses correctness (29.0% → 24.5%)
 - Git push now works (SSH key configured)
 
 ---
@@ -145,49 +145,49 @@ Previous session work (committed):
 
 | Pass | File | Status | LOC |
 |------|------|--------|-----|
-| enter_ssa | ssa/enter_ssa.rs | REAL | 826 |
-| eliminate_redundant_phi | ssa/eliminate_redundant_phi.rs | REAL | 344 |
-| rewrite_instruction_kinds | ssa/rewrite_instruction_kinds... | REAL | ~50 |
-| infer_mutation_aliasing_ranges | inference/infer_mutation_aliasing_ranges.rs | REAL | 390 |
-| infer_reactive_places | inference/infer_reactive_places.rs | REAL | 331 |
+| enter_ssa | ssa/enter_ssa.rs | REAL | 828 |
+| eliminate_redundant_phi | ssa/eliminate_redundant_phi.rs | REAL | 347 |
+| rewrite_instruction_kinds | ssa/rewrite_instruction_kinds... | REAL | 86 |
+| infer_mutation_aliasing_ranges | inference/infer_mutation_aliasing_ranges.rs | REAL | 860 |
+| infer_reactive_places | inference/infer_reactive_places.rs | REAL | 465 |
 | aliasing_effects | inference/aliasing_effects.rs | REAL | 98 |
 | analyse_functions | inference/analyse_functions.rs | STUB | 5 |
-| drop_manual_memoization | inference/drop_manual_memoization.rs | REAL | 126 |
+| drop_manual_memoization | inference/drop_manual_memoization.rs | REAL | 125 |
 | inline_iife | inference/inline_iife.rs | DEFERRED | 7 |
 | infer_mutation_aliasing_effects | inference/infer_mutation_aliasing_effects.rs | STUB | 7 |
-| dead_code_elimination | optimization/dead_code_elimination.rs | REAL | 331 |
-| outline_functions | optimization/outline_functions.rs | REAL | 353 |
-| constant_propagation | optimization/constant_propagation.rs | REAL | ~328 |
+| dead_code_elimination | optimization/dead_code_elimination.rs | REAL | 481 |
+| outline_functions | optimization/outline_functions.rs | REAL | 459 |
+| constant_propagation | optimization/constant_propagation.rs | REAL | ~410 |
 | optimize_props_method_calls | optimization/optimize_props_method_calls.rs | STUB | 2 |
 | optimize_for_ssr | optimization/optimize_for_ssr.rs | STUB | 2 |
 | outline_jsx | optimization/outline_jsx.rs | STUB | 2 |
 | prune_maybe_throws | optimization/prune_maybe_throws.rs | STUB | 2 |
-| infer_reactive_scope_variables | reactive_scopes/infer_reactive_scope_variables.rs | REAL | 540 |
-| merge_reactive_scopes_that_invalidate_together | reactive_scopes/merge_reactive_scopes... | REAL | 441 |
-| propagate_scope_dependencies_hir | reactive_scopes/propagate_scope_dependencies_hir.rs | REAL | 274 |
-| merge_overlapping_reactive_scopes_hir | reactive_scopes/merge_overlapping... | REAL | 125 |
-| prune_unused_scopes | reactive_scopes/prune_unused_scopes.rs | REAL | 180 |
+| infer_reactive_scope_variables | reactive_scopes/infer_reactive_scope_variables.rs | REAL | 636 |
+| merge_reactive_scopes_that_invalidate_together | reactive_scopes/merge_reactive_scopes... | REAL | 569 |
+| propagate_scope_dependencies_hir | reactive_scopes/propagate_scope_dependencies_hir.rs | REAL | 817 |
+| merge_overlapping_reactive_scopes_hir | reactive_scopes/merge_overlapping... | REAL | 339 |
+| prune_unused_scopes | reactive_scopes/prune_unused_scopes.rs | REAL | 402 |
 | promote_used_temporaries | reactive_scopes/promote_used_temporaries.rs | REAL | 45 |
 | prune_non_reactive_dependencies | reactive_scopes/prune_non_reactive_dependencies.rs | PARTIAL | 15 |
-| flatten_scopes_with_hooks_or_use_hir | reactive_scopes/flatten_scopes... | REAL | ~107 |
-| **build_reactive_function** | reactive_scopes/build_reactive_function.rs | **PARTIAL** | **~500** |
-| build_reactive_scope_terminals_hir | reactive_scopes/build_reactive_scope_terminals_hir.rs | PARTIAL (flagged) | ~320 |
+| flatten_scopes_with_hooks_or_use_hir | reactive_scopes/flatten_scopes... | REAL | 106 |
+| **build_reactive_function** | reactive_scopes/build_reactive_function.rs | **PARTIAL** | **555** |
+| build_reactive_scope_terminals_hir | reactive_scopes/build_reactive_scope_terminals_hir.rs | PARTIAL (flagged) | 330 |
 | codegen_reactive_function | reactive_scopes/codegen_reactive_function.rs | STUB | 14 |
 | align_method_call_scopes | reactive_scopes/align_method_call_scopes.rs | STUB | 2 |
 | align_object_method_scopes | reactive_scopes/align_object_method_scopes.rs | STUB | 2 |
-| align_reactive_scopes_to_block_scopes_hir | reactive_scopes/align_reactive_scopes... | REAL | ~305 |
+| align_reactive_scopes_to_block_scopes_hir | reactive_scopes/align_reactive_scopes... | REAL | 326 |
 | assert_well_formed_break_targets | reactive_scopes/assert_well_formed_break_targets.rs | STUB | 2 |
 | extract_scope_declarations_from_destructuring | reactive_scopes/extract_scope_decl... | STUB | 2 |
-| flatten_reactive_loops_hir | reactive_scopes/flatten_reactive_loops_hir.rs | PARTIAL (flagged) | ~50 |
+| flatten_reactive_loops_hir | reactive_scopes/flatten_reactive_loops_hir.rs | PARTIAL (flagged) | 51 |
 | memoize_fbt_and_macro_operands | reactive_scopes/memoize_fbt_and_macro_operands.rs | STUB | 2 |
 | propagate_early_returns | reactive_scopes/propagate_early_returns.rs | STUB | 2 |
-| prune_always_invalidating_scopes | reactive_scopes/prune_always_invalidating_scopes.rs | STUB | 2 |
+| prune_always_invalidating_scopes | reactive_scopes/prune_always_invalidating_scopes.rs | REAL | 305 |
 | prune_hoisted_contexts | reactive_scopes/prune_hoisted_contexts.rs | STUB | 2 |
-| prune_non_escaping_scopes | reactive_scopes/prune_non_escaping_scopes.rs | REAL | 282 |
+| prune_non_escaping_scopes | reactive_scopes/prune_non_escaping_scopes.rs | REAL | 567 |
 | prune_unused_labels | reactive_scopes/prune_unused_labels.rs | STUB | 2 |
 | prune_unused_labels_hir | reactive_scopes/prune_unused_labels_hir.rs | STUB | 2 |
 | prune_unused_lvalues | reactive_scopes/prune_unused_lvalues.rs | STUB | 2 |
-| rename_variables | reactive_scopes/rename_variables.rs | STUB | 2 |
+| rename_variables | reactive_scopes/rename_variables.rs | PARTIAL | 19 |
 | stabilize_block_ids | reactive_scopes/stabilize_block_ids.rs | STUB | 2 |
 | validate_hooks_usage | validation/validate_hooks_usage.rs | PARTIAL | 28 |
 | validate_no_ref_access_in_render | validation/validate_no_ref_access_in_render.rs | PARTIAL | 11 |
@@ -253,3 +253,4 @@ codegen (currently bypasses ReactiveFunction) → oxc_codegen → JS output
 | 2026-03-04 | 84.2 | 27.7 | — | 17 | 35 | pragma support (+6), update expr results (+2), @gating (+1) |
 | 2026-03-04 | 84.2 | 27.9 | — | 17 | 35 | destructuring const→let for mutated bindings (+2) |
 | 2026-03-05 | 84.2 | 28.8 | — | 17 | 35 | lattice const-prop, dep hoisting, return/else codegen (+11) |
+| 2026-03-05 | 84.2 | 29.0 | — | 18 | 28 | SCCP branch folding, phi self-loop fix, catch norm (+3) |
