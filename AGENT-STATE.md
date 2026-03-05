@@ -38,13 +38,13 @@ Update the following before stopping:
 | Correct rate | 29.2% (363/1244) — committed as 8fa4a47 |
 | Error (expected) | 193 |
 | Error (unexpected) | 3 (JSX-in-try validation not implemented) |
-| Uncommitted changes | CP debug logging (investigating further const-prop improvements) |
+| Uncommitted changes | none |
 
 ---
 
 ## Current Task
 
-**Active work**: Investigating further constant propagation improvements (debug logging added).
+**Active work**: CP single-def let propagation attempted and reverted (no gain). Agent exploring next approach.
 
 Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363.
 
@@ -59,7 +59,7 @@ Recent completed:
 - @gating pragma passthrough (+1, 343→344)
 - Destructuring const→let for mutated bindings (+2, 345→347)
 
-**In progress (uncommitted)**: debug logging in constant_propagation.rs (RC_DEBUG_CP flag)
+**In progress (uncommitted)**: none — clean working tree
 
 **Next priorities** (by impact):
 1. Missing memoization (56 fixtures) — scope inference gaps for optional calls, closures
