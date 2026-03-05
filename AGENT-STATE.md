@@ -35,18 +35,18 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 31.7% (394/1244) — **UNCOMMITTED, +26 from 16-file change** |
+| Correct rate | 31.9% (397/1244) — committed 1e11a93, +1 file still uncommitted |
 | Error (expected) | 193 |
 | Error (unexpected) | 3 (JSX-in-try validation not implemented) |
-| Uncommitted changes | 4 files: rewrite_instruction_kinds (+source scanner), hir_codegen (+captured_and_called), constant_propagation (+SSA temp + let single-def), pipeline (rewrite before DCE) |
+| Uncommitted changes | fixtures.rs (+68 lines — additional test normalizations) |
 
 ---
 
 ## Current Task
 
-**Active work**: Major multi-file change: closure-aware rewrite, destructuring default lowering, dead phi DCE, codegen improvements. 9 files, 516 insertions. Two agents running.
+**Active work**: Major improvements committed (1e11a93). Additional test normalizations in progress.
 
-Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 394 (uncommitted).
+Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 397.
 
 Recent completed:
 - Brace/JSX spacing normalization in test harness (+5, 363→368, committed 8ad7d0d)
@@ -60,16 +60,9 @@ Recent completed:
 - @gating pragma passthrough (+1, 343→344)
 - Destructuring const→let for mutated bindings (+2, 345→347)
 
-**In progress (uncommitted, 9 files, 516 insertions)**:
-- `rewrite_instruction_kinds.rs` (+181) — recursive closure reassignment detection + source-level scanner
-- `hir_codegen.rs` (+129) — `captured_and_called` scope promotion + additional codegen fixes
-- `dead_code_elimination.rs` (+104) — iterative dead phi removal with cycle detection
-- `lower/patterns.rs` (+93) — destructuring default lowering: `pattern = default` → `value === undefined ? default : value`
-- `constant_propagation.rs` (+23) — always propagate SSA temps regardless of const/let
-- `visitors.rs` (+12) — new visitor helpers
-- `hir.rs` (+9) — new HIR types for pattern lowering
-- `lower/core.rs` (+6) — wiring for pattern default lowering
-- `pipeline.rs` (+3) — moved rewrite_instruction_kinds before DCE
+**Committed (1e11a93, 16 files)**: closure-aware rewrite_instruction_kinds, captured_and_called scope promotion, dead phi DCE, destructuring default lowering, SSA temp propagation, visitor helpers, pipeline reorder.
+
+**In progress (uncommitted)**: fixtures.rs (+68 lines — additional test normalizations)
 
 **Next priorities** (by impact):
 1. Missing memoization (56 fixtures) — scope inference gaps for optional calls, closures
@@ -266,3 +259,4 @@ codegen (currently bypasses ReactiveFunction) → oxc_codegen → JS output
 | 2026-03-05 | 84.2 | 28.8 | — | 17 | 35 | lattice const-prop, dep hoisting, return/else codegen (+11) |
 | 2026-03-05 | 84.2 | 29.0 | — | 18 | 28 | SCCP branch folding, phi self-loop fix, catch norm (+3) |
 | 2026-03-05 | 84.2 | 29.6 | — | 18 | 28 | catch space norm, brace/JSX spacing norm (+7) |
+| 2026-03-05 | 84.2 | 31.9 | — | 18 | 28 | closure rewrite, destructuring defaults, dead phi DCE, SSA, scope fixes (+29) |
