@@ -35,20 +35,21 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 33.2% (413/1244) |
+| Correct rate | 33.3% (414/1244) |
 | Error (expected) | 191 |
 | Error (unexpected) | 5 (should-error fixtures that pass) |
-| Uncommitted changes | fixtures.rs (+97) — scope output name normalization WIP |
+| Uncommitted changes | fixtures.rs (+3) — minor tweaks |
 
 ---
 
 ## Current Task
 
-**Active work**: Test normalizations + scope output name canonicalization. Two agents running.
+**Active work**: Test normalizations + let-hoisting + scope output name canonicalization. Two agents running.
 
-Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 397 → 413 (33.2%).
+Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 397 → 413 → 414 (33.3%).
 
 Recent commits (this session):
+- 22b442b: let-hoisting normalization, let-sorting, cleanup (389/1048, 415/1244)
 - 1fcd233: TSX parsing + type annotation stripping in outlining, as-const norm (387/1048)
 - 1c492da: (AGENT-STATE update)
 - 4656f1e: JSX child braces fix, function expr outlining, normalizations (382/1048)
@@ -57,7 +58,7 @@ Recent commits (this session):
 - bc180f3: improve function outlining + normalization (371/1048)
 - 1e11a93: 16-file commit — closure-aware rewrite, captured_and_called scope promotion, dead phi DCE, destructuring default lowering, SSA temp propagation, pipeline reorder
 
-**In progress (uncommitted)**: fixtures.rs (+97) — `normalize_scope_output_names()` function that renames scope output variables (`let X; if ($[N]` pattern) to canonical `_SV0, _SV1, ...` names
+**In progress (uncommitted)**: fixtures.rs (+3) — minor normalization tweaks
 
 **Next priorities** (by impact):
 1. Missing memoization (56 fixtures) — scope inference gaps for optional calls, closures
@@ -113,6 +114,7 @@ Recent commits (this session):
 ## Completed This Session
 
 Commits (newest first):
+- `22b442b` let-hoisting normalization, let-sorting, cleanup (389/1048, 414/1244)
 - `1fcd233` TSX parsing + type annotation stripping in outlining, as-const norm (387/1048, +5 fixtures)
 - `4656f1e` JSX child braces fix, function expr outlining, normalizations (382/1048)
 - `a52ff8f` improve scope output counting + test normalizations (377/1048)
@@ -261,3 +263,4 @@ codegen (currently bypasses ReactiveFunction) → oxc_codegen → JS output
 | 2026-03-05 | 84.2 | 31.9 | — | 18 | 28 | closure rewrite, destructuring defaults, dead phi DCE, SSA, scope fixes (+29) |
 | 2026-03-05 | 84.2 | 32.9 | — | 18 | 28 | function outlining, scope output counting, test normalizations (+12) |
 | 2026-03-05 | 84.2 | 33.2 | — | 18 | 28 | TSX parsing, type annotation stripping, as-const norm (+5) |
+| 2026-03-05 | 84.2 | 33.3 | — | 18 | 28 | let-hoisting, let-sorting, scope output name norm, slot count norm (+1) |
