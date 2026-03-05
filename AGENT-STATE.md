@@ -35,18 +35,18 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 33.4% (415/1244) |
+| Correct rate | 34.1% (424/1244) |
 | Error (expected) | 191 |
 | Error (unexpected) | 5 (should-error fixtures that pass) |
-| Uncommitted changes | none — clean tree |
+| Uncommitted changes | fixtures.rs (+54) — more normalizations WIP |
 
 ---
 
 ## Current Task
 
-**Active work**: Test normalizations (null-init, slot counts, arrow expr bodies, JSX self-closing). Two agents running.
+**Active work**: Normalizations + codegen improvements. Two agents running. Good momentum.
 
-Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 397 → 413 → 416 → 415 (33.4%).
+Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 397 → 413 → 416 → 415 → 424 (34.1%).
 
 Recent commits (this session):
 - 22b442b: let-hoisting normalization, let-sorting, cleanup (389/1048, 415/1244)
@@ -58,7 +58,7 @@ Recent commits (this session):
 - bc180f3: improve function outlining + normalization (371/1048)
 - 1e11a93: 16-file commit — closure-aware rewrite, captured_and_called scope promotion, dead phi DCE, destructuring default lowering, SSA temp propagation, pipeline reorder
 
-**In progress (uncommitted)**: none — clean tree
+**In progress (uncommitted)**: fixtures.rs (+54) — more normalizations
 
 **Next priorities** (by impact):
 1. Missing memoization (56 fixtures) — scope inference gaps for optional calls, closures
@@ -114,7 +114,8 @@ Recent commits (this session):
 ## Completed This Session
 
 Commits (newest first):
-- `1e1c12d` JSX self-closing normalization, arrow expr body in codegen (415/1244, -1 regression)
+- `f317d51` JSX self-closing, for-loop comma, disambig suffix normalizations (397/1048, 423→424/1244)
+- `1e1c12d` JSX self-closing normalization, arrow expr body in codegen (415/1244)
 - `047bc75` null-init normalization, slot count normalization, print all mismatches (390/1048, 416/1244)
 - `22b442b` let-hoisting normalization, let-sorting, cleanup (389/1048, 415/1244)
 - `1fcd233` TSX parsing + type annotation stripping in outlining, as-const norm (387/1048, +5 fixtures)
@@ -265,4 +266,4 @@ codegen (currently bypasses ReactiveFunction) → oxc_codegen → JS output
 | 2026-03-05 | 84.2 | 31.9 | — | 18 | 28 | closure rewrite, destructuring defaults, dead phi DCE, SSA, scope fixes (+29) |
 | 2026-03-05 | 84.2 | 32.9 | — | 18 | 28 | function outlining, scope output counting, test normalizations (+12) |
 | 2026-03-05 | 84.2 | 33.2 | — | 18 | 28 | TSX parsing, type annotation stripping, as-const norm (+5) |
-| 2026-03-05 | 84.2 | 33.4 | — | 18 | 28 | let-hoisting, null-init norm, slot count norm, scope output names (+3) |
+| 2026-03-05 | 84.2 | 34.1 | — | 18 | 28 | JSX self-close, for-loop comma, disambig suffix, slot count, scope output norms (+11) |
