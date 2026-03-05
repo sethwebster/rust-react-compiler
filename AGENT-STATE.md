@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 31.6% (393/1244) — **UNCOMMITTED, +25 from 16-file change (743 insertions)** |
+| Correct rate | 31.7% (394/1244) — **UNCOMMITTED, +26 from 16-file change** |
 | Error (expected) | 193 |
 | Error (unexpected) | 3 (JSX-in-try validation not implemented) |
 | Uncommitted changes | 4 files: rewrite_instruction_kinds (+source scanner), hir_codegen (+captured_and_called), constant_propagation (+SSA temp + let single-def), pipeline (rewrite before DCE) |
@@ -46,7 +46,7 @@ Update the following before stopping:
 
 **Active work**: Major multi-file change: closure-aware rewrite, destructuring default lowering, dead phi DCE, codegen improvements. 9 files, 516 insertions. Two agents running.
 
-Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 393 (uncommitted).
+Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 394 (uncommitted).
 
 Recent completed:
 - Brace/JSX spacing normalization in test harness (+5, 363→368, committed 8ad7d0d)
