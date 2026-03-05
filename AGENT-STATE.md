@@ -35,10 +35,10 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 32.9% (409/1244) — **3 new commits since last update + uncommitted WIP** |
+| Correct rate | 32.8% (408/1244) — committed 4656f1e, +1 file uncommitted |
 | Error (expected) | 193 |
 | Error (unexpected) | 3 (JSX-in-try validation not implemented) |
-| Uncommitted changes | hir_codegen.rs (16+/-), outline_functions.rs (79+), fixtures.rs (36+) |
+| Uncommitted changes | fixtures.rs (+36 — additional test normalizations) |
 
 ---
 
@@ -48,13 +48,14 @@ Update the following before stopping:
 
 Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 397 → 409 (32.9%).
 
-Recent completed (new commits since last update):
+Recent completed (commits since last update):
+- 4656f1e: JSX child braces fix, function expr outlining, normalizations (382/1048)
 - a52ff8f: improve scope output counting + test normalizations (377/1048)
 - 1166289: add empty try-catch normalization + whitespace collapse
 - bc180f3: improve function outlining + normalization (371/1048)
 - 1e11a93: 16-file commit — closure-aware rewrite, captured_and_called scope promotion, dead phi DCE, destructuring default lowering, SSA temp propagation, pipeline reorder
 
-**In progress (uncommitted)**: outline_functions.rs (+79), hir_codegen.rs (16+/-), fixtures.rs (+36)
+**In progress (uncommitted)**: fixtures.rs (+36 — more test normalizations)
 
 **Next priorities** (by impact):
 1. Missing memoization (56 fixtures) — scope inference gaps for optional calls, closures
