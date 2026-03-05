@@ -4816,22 +4816,32 @@ fn normalize_jsx_self_closing(src: &str) -> String {
     let mut result = String::with_capacity(src.len());
     let mut i = 0;
     while i < bytes.len() {
-        // Look for `> </` pattern
-        if i + 4 < bytes.len() && bytes[i] == b'>'
-            && bytes[i + 1] == b' '
-            && bytes[i + 2] == b'<'
-            && bytes[i + 3] == b'/'
-        {
-            // Find closing `>`
-            let tag_start = i + 4;
-            if let Some(end_off) = src[tag_start..].find('>') {
-                let tag = &src[tag_start..tag_start + end_off];
-                if !tag.is_empty() && tag.as_bytes()[0].is_ascii_alphabetic()
-                    && tag.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.')
-                {
-                    result.push_str(" />");
-                    i = tag_start + end_off + 1;
-                    continue;
+        // Look for `> </Tag>` or `></Tag>` pattern (empty children → self-closing)
+        if bytes[i] == b'>' {
+            // Check for optional space then `</`
+            let after = i + 1;
+            let (skip_space, close_start) = if after < bytes.len() && bytes[after] == b' '
+                && after + 1 < bytes.len() && bytes[after + 1] == b'<'
+                && after + 2 < bytes.len() && bytes[after + 2] == b'/'
+            {
+                (true, after + 3)
+            } else if after < bytes.len() && bytes[after] == b'<'
+                && after + 1 < bytes.len() && bytes[after + 1] == b'/'
+            {
+                (false, after + 2)
+            } else {
+                (false, 0)
+            };
+            if close_start > 0 {
+                if let Some(end_off) = src[close_start..].find('>') {
+                    let tag = &src[close_start..close_start + end_off];
+                    if !tag.is_empty() && tag.as_bytes()[0].is_ascii_alphabetic()
+                        && tag.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.')
+                    {
+                        result.push_str(" />");
+                        i = close_start + end_off + 1;
+                        continue;
+                    }
                 }
             }
         }

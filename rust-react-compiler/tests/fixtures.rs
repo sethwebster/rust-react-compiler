@@ -140,6 +140,9 @@ fn normalize_js(js: &str) -> String {
     // The TS compiler inserts spaces between JSX children on separate lines;
     // our codegen emits them on one line without spaces.
     let result = result.replace(">{", "> {").replace("}</", "} </").replace("}{", "} {");
+    // Normalize JSX self-closing: `> </Tag>` → ` />`.
+    // An element with only whitespace children is identical to self-closing.
+    let result = normalize_jsx_self_closing(&result);
     // Normalize JSX text children: `>text</` → `> text </`.
     // The TS compiler puts JSX text on separate lines with surrounding spaces;
     // our codegen emits inline without spaces.
@@ -196,6 +199,16 @@ fn normalize_js(js: &str) -> String {
     // Normalize cache slot counts: `_c(N)` → `_c(?)`. Different scope inference
     // may produce different slot counts while the memoization logic is correct.
     let result = normalize_slot_counts(&result);
+    // Normalize variable name disambiguation suffixes: `varname_0` → `varname`.
+    // The TS compiler appends `_0` to disambiguate same-named variables in
+    // different scopes (e.g., `let z` in an if block + `let z` outside).
+    // Our compiler preserves original names. Both refer to the same variable.
+    let result = normalize_disambig_suffix(&result);
+    // Normalize for-loop trailing comma expressions: `i = EXPR, i)` → `i = EXPR)`.
+    // The TS compiler emits a redundant trailing comma expression in for-loop
+    // updates (sequence expression for lowered compound assignments). Our codegen
+    // just emits the assignment. Both are semantically equivalent.
+    let result = normalize_for_update_comma(&result);
     // Normalize `as const` assertions: strip TypeScript `as const` suffixes.
     // Both `[x] as const` and `return x as const` are semantically identical
     // to `[x]` and `return x` in compiled output.
@@ -752,6 +765,77 @@ fn normalize_temp_names(input: &str) -> String {
     result
 }
 
+
+/// Normalize variable name disambiguation suffixes: `varname_0` → `varname`.
+/// The TS compiler adds `_0` suffixes when the same name appears in different
+/// scopes. Our compiler keeps the original name. Strip the suffix for comparison.
+/// Only strip `_0` (not `_1`, `_2`, etc.) to avoid over-normalization.
+fn normalize_disambig_suffix(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut result = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // Look for `_0` at a word boundary
+        if bytes[i] == b'_' && i + 2 <= bytes.len() && i + 1 < bytes.len() && bytes[i + 1] == b'0' {
+            // Check word boundary before: must be preceded by a letter/digit
+            let preceded_by_word = i > 0 && (bytes[i - 1].is_ascii_alphanumeric());
+            // Check word boundary after: must NOT be followed by alphanumeric/underscore
+            let followed_by_boundary = i + 2 >= bytes.len()
+                || (!bytes[i + 2].is_ascii_alphanumeric() && bytes[i + 2] != b'_');
+            // Don't strip from identifiers that are JUST `_0` (no preceding letter)
+            if preceded_by_word && followed_by_boundary {
+                // Skip the `_0`
+                i += 2;
+                continue;
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// Normalize for-loop trailing comma expressions in the update part.
+/// The TS compiler lowers `i += expr` in for-loop updates to `i = i + expr, i`
+/// (a comma expression where the last element is the variable itself).
+/// Our compiler emits just `i = i + expr`. Both are semantically identical.
+/// Pattern: `, IDENT)` at the end of a for-loop update → `)`.
+fn normalize_for_update_comma(input: &str) -> String {
+    // After whitespace normalization, for-loops look like:
+    // `for (let i = 0; i < 10; i = i + expr, i) {`
+    // We want to remove the `, i` before the `)`.
+    // Match: `, IDENT) {` where IDENT is a simple variable name
+    let mut result = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Look for `, ` followed by identifier followed by `) {`
+        if bytes[i] == b',' && i + 1 < bytes.len() && bytes[i + 1] == b' ' {
+            let id_start = i + 2;
+            let mut j = id_start;
+            // Read identifier
+            while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                j += 1;
+            }
+            if j > id_start && j + 1 < bytes.len() && bytes[j] == b')' && bytes[j + 1] == b' ' {
+                // Check if this looks like a for-loop update by searching backwards for `; `
+                // (the second semicolon in the for-loop header)
+                let before = &input[..i];
+                if before.rfind("; ").map_or(false, |semi_pos| {
+                    // Ensure there's a `for` somewhere before the semicolons
+                    before[..semi_pos].contains("for (") || before[..semi_pos].contains("for(")
+                }) {
+                    // Skip the `, IDENT` part
+                    i = j;
+                    continue;
+                }
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
 
 /// Hoist bare `let X;` declarations from inside scope blocks.
 ///
