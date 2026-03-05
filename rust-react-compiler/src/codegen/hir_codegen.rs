@@ -1171,12 +1171,17 @@ impl<'a> Codegen<'a> {
                     // Only mark consequent visited so alternate isn't skipped.
                     let emit_else = *alternate != *fallthrough;
                     if emit_else {
-                        let _ = writeln!(out, "{pad}}} else {{");
+                        // Emit else body to temp buffer; skip if empty.
+                        let mut else_buf = String::new();
                         let mut vis3 = visited.clone();
                         self.emit_cfg_region(
-                            *alternate, Some(*fallthrough), body_pad, out,
+                            *alternate, Some(*fallthrough), body_pad, &mut else_buf,
                             &mut vis3, emitted_scopes, scope_index, instr_scope, inlined_ids, scope_instrs,
                         );
+                        if !else_buf.trim().is_empty() {
+                            let _ = writeln!(out, "{pad}}} else {{");
+                            out.push_str(&else_buf);
+                        }
                     }
                     let _ = writeln!(out, "{pad}}}");
                     // Continue at fallthrough.
@@ -3967,6 +3972,10 @@ impl<'a> Codegen<'a> {
                 } else {
                     self.expr(value)
                 };
+                // `return undefined;` → `return;` to match reference compiler
+                if expr == "undefined" {
+                    return "return;".to_string();
+                }
                 format!("return {expr};")
             }
             Terminal::Throw { value, .. } => format!("throw {};", self.expr(value)),
