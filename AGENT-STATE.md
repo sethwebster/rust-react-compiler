@@ -35,20 +35,21 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 27.1% (337/1244) — **regressed from 28.8% due to WIP SCCP changes** |
+| Correct rate | 28.9% (359/1244) — **+1 from SCCP branch folding (uncommitted)** |
 | Error (expected) | 193 |
 | Error (unexpected) | 3 (JSX-in-try validation not implemented) |
-| Uncommitted changes | SCCP branch-folding rewrite of constant_propagation.rs (WIP, currently regresses) |
+| Uncommitted changes | SCCP branch folding in constant_propagation.rs (conservative: If-only, +1 fixture) |
 
 ---
 
 ## Current Task
 
-**Active work**: SCCP (Sparse Conditional Constant Propagation) with branch folding — extending constant_propagation.rs to fold If/Branch terminals with known-constant tests, remove unreachable blocks, and iterate. Currently WIP and regressing (358→337).
+**Active work**: SCCP (Sparse Conditional Constant Propagation) with branch folding — now working (conservative approach: only folds `If` terminals, not `Branch`). +1 fixture gain (358→359).
 
-Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression, WIP).
+Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 359 (fixed).
 
 Recent completed:
+- SCCP branch folding — conservative approach (+1, 358→359, uncommitted)
 - Lattice-based constant propagation rewrite (+11 committed, 347→358)
 - Hoist complex dep expressions to const before scope blocks
 - Return undefined → return, empty else block removal
@@ -58,7 +59,7 @@ Recent completed:
 - Destructuring const→let for mutated bindings (+2, 345→347)
 
 **In progress (uncommitted)**:
-- SCCP branch folding in constant_propagation.rs — adds is_truthy(), constant_propagation_round() loop, cp_remove_unreachable_blocks(), cp_prune_dead_phi_operands(). Currently causing -21 regression.
+- SCCP in constant_propagation.rs — is_truthy(), If-only branch folding, unreachable block removal, dead phi pruning. Kept const-only StoreLocal propagation (extending to Let/Reassign regressed).
 
 **Next priorities** (by impact):
 1. Missing memoization (56 fixtures) — scope inference gaps for optional calls, closures
@@ -113,12 +114,11 @@ Recent completed:
 
 ## Completed This Session
 
-- `src/optimization/constant_propagation.rs` — SCCP (Sparse Conditional Constant Propagation) rewrite in progress:
+- `src/optimization/constant_propagation.rs` — SCCP with conservative branch folding (+1, 358→359):
   - Added `is_truthy()` for JS truthiness evaluation
   - Iterative round loop: propagate → fold branches → remove unreachable blocks → prune dead phi operands → eliminate redundant phis → repeat
-  - Branch folding: If/Branch terminals → Goto when test is known constant
-  - Extended StoreLocal propagation to all variable kinds (not just const)
-  - Currently regresses 358→337 (-21 fixtures). Investigation needed to find what the over-aggressive propagation breaks.
+  - Branch folding: If terminals only → Goto when test is known constant (Branch excluded — used for loops/ternaries)
+  - Kept const-only StoreLocal propagation (extending to all kinds regressed -21 fixtures)
 
 Previous session work (committed):
 - `src/optimization/constant_propagation.rs` — added comparison operators and unary folding (+1 fixture)
