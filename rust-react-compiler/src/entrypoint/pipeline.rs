@@ -87,7 +87,7 @@ impl Default for CompileOptions {
 
 /// Compile a JS/TS source string containing one or more React components/hooks.
 /// Returns the full file output: compiled functions + passthrough of other code.
-pub fn compile(source: &str, options: CompileOptions) -> Result<CodegenOutput> {
+pub fn compile(source: &str, mut options: CompileOptions) -> Result<CodegenOutput> {
     let source_type = options.source_type;
     // Collect the spans of all compilable top-level functions.
     let fn_spans = collect_compilable_fn_spans(source, source_type);
@@ -119,6 +119,21 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CodegenOutput> {
 
     // Whether the file already uses useMemoCache (already compiled — skip).
     let has_use_memo_cache = source.contains("useMemoCache");
+
+    // Parse pragma flags from the first line.
+    let mut options = options;
+    if first_line.contains("@enableNameAnonymousFunctions") {
+        options.config.enable_name_anonymous_functions = true;
+    }
+    if first_line.contains("@enableJsxOutlining") {
+        options.config.enable_jsx_outlining = true;
+    }
+    if first_line.contains("@validateRefAccessDuringRender") {
+        options.config.validate_ref_access_during_render = true;
+    }
+    if first_line.contains("@validateNoSetStateInRender") {
+        options.config.validate_no_set_state_in_render = true;
+    }
 
     // Parse @customOptOutDirectives:["directive1", "directive2"] from pragma.
     let custom_opt_out_directives = parse_custom_opt_out_directives(first_line);

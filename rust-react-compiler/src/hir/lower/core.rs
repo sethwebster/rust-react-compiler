@@ -1164,16 +1164,82 @@ pub fn lower_statement<'r, 'a: 'r>(
                     "(BuildHIR::lowerStatement) Handle TryStatement without a catch clause",
                 ));
             }
-            // If the try block contains a throw statement, emit a TODO.
-            if stmt_list_has_throw(&s.block.body) {
-                return Err(CompilerError::todo(
-                    "(BuildHIR::lowerStatement) Support ThrowStatement inside of try/catch",
-                ));
-            }
-            // TryStatement with catch (and optional finally) is not fully supported;
-            // emit UnsupportedNode as a placeholder.
+
+            let handler = s.handler.as_ref().unwrap();
             let loc = span_loc(s.span);
-            ctx.push(InstructionValue::UnsupportedNode { loc }, SourceLocation::Generated);
+
+            let try_block_id = ctx.reserve(BlockKind::Block);
+            let handler_block_id = ctx.reserve(BlockKind::Block);
+            let fall_id = ctx.reserve(BlockKind::Block);
+
+            // Lower the catch binding (if present).
+            let handler_binding = if let Some(param) = &handler.param {
+                use oxc_ast::ast::BindingPatternKind;
+                match &param.pattern.kind {
+                    BindingPatternKind::BindingIdentifier(id) => {
+                        let ploc = span_loc(id.span);
+                        let sym_id = id.symbol_id.get();
+                        let catch_id = if let Some(sid) = sym_id {
+                            ctx.get_or_create_symbol(sid.index() as u32, Some(id.name.as_str()), ploc.clone())
+                        } else {
+                            ctx.env.new_temporary(ploc.clone())
+                        };
+                        Some(Place {
+                            identifier: catch_id,
+                            reactive: false,
+                            loc: ploc,
+                            effect: Effect::Unknown,
+                        })
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            let id = ctx.next_instruction_id();
+            ctx.terminate(Terminal::Try {
+                block: try_block_id,
+                handler_binding: handler_binding.clone(),
+                handler: handler_block_id,
+                fallthrough: fall_id,
+                id,
+                loc: loc.clone(),
+            });
+
+            // --- Try body ---
+            ctx.switch_to(try_block_id, BlockKind::Block);
+            let mut lower_stmt_cb = make_lower_stmt_cb(semantic);
+            for stmt_inner in &s.block.body {
+                lower_stmt_cb(stmt_inner, ctx)?;
+            }
+            if !ctx.is_current_dead() {
+                let goto_id = ctx.next_instruction_id();
+                ctx.terminate(Terminal::Goto {
+                    block: fall_id,
+                    variant: GotoVariant::Break,
+                    id: goto_id,
+                    loc: loc.clone(),
+                });
+            }
+
+            // --- Handler body ---
+            ctx.switch_to(handler_block_id, BlockKind::Block);
+            for stmt_inner in &handler.body.body {
+                lower_stmt_cb(stmt_inner, ctx)?;
+            }
+            if !ctx.is_current_dead() {
+                let goto_id = ctx.next_instruction_id();
+                ctx.terminate(Terminal::Goto {
+                    block: fall_id,
+                    variant: GotoVariant::Break,
+                    id: goto_id,
+                    loc: loc.clone(),
+                });
+            }
+
+            // --- Fallthrough ---
+            ctx.switch_to(fall_id, BlockKind::Block);
             Ok(())
         }
 

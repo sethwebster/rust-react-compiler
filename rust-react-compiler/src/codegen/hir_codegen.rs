@@ -332,6 +332,9 @@ struct Codegen<'a> {
     /// Used to emit `let` instead of `const` for destructuring patterns whose
     /// bound variables are later mutated (e.g., `let { c } = t0` when `c++` follows).
     reassigned_decl_ids: std::collections::HashSet<DeclarationId>,
+    /// Set of fallthrough BlockIds that belong to Label terminals (as opposed to switches).
+    /// Used to distinguish natural exits (no break needed) from switch exits (break needed).
+    label_fallthrough_blocks: std::collections::HashSet<BlockId>,
 }
 
 /// Traverse blocks reachable from `start` (not crossing `fall_bid`) and check
@@ -813,6 +816,7 @@ impl<'a> Codegen<'a> {
             switch_fallthrough_labels: HashMap::new(),
             scope_output_names: HashMap::new(),
             reassigned_decl_ids,
+            label_fallthrough_blocks: std::collections::HashSet::new(),
         }
     }
 
@@ -831,6 +835,16 @@ impl<'a> Codegen<'a> {
                     let label_str = format!("bb{label_counter}");
                     self.switch_labels.insert(*switch_id, label_counter);
                     self.switch_fallthrough_labels.insert(fall_bid, label_str);
+                    label_counter += 1;
+                }
+            }
+            // Also assign labels to Label terminals whose body has a Break to fallthrough.
+            if let Terminal::Label { block: body, fallthrough, .. } = &block.terminal {
+                let fall_bid = *fallthrough;
+                if case_subgraph_has_explicit_break(&self.hir.body.blocks, *body, fall_bid) {
+                    let label_str = format!("bb{label_counter}");
+                    self.switch_fallthrough_labels.insert(fall_bid, label_str);
+                    self.label_fallthrough_blocks.insert(fall_bid);
                     label_counter += 1;
                 }
             }
@@ -1125,16 +1139,22 @@ impl<'a> Codegen<'a> {
                     match variant {
                         GotoVariant::Break => {
                             if Some(*next) == stop_at {
-                                // Exiting the current control structure.
-                                // If this is a labeled switch exit, emit `break <label>;`.
-                                if let Some(label) = self.switch_fallthrough_labels.get(next).cloned() {
-                                    let _ = writeln!(out, "{pad}break {label};");
+                                // Exiting the current control structure — natural fallthrough.
+                                // For Label terminal fallthroughs, this is natural exit (no break needed).
+                                // For switch fallthroughs, we still need `break <label>;`.
+                                if !self.label_fallthrough_blocks.contains(next) {
+                                    if let Some(label) = self.switch_fallthrough_labels.get(next).cloned() {
+                                        let _ = writeln!(out, "{pad}break {label};");
+                                    }
                                 }
-                                // else: natural fallthrough — emit nothing.
                                 return;
                             } else if stop_at.is_some() {
                                 // Breaking out of an inner structure (loop inside switch, etc.)
-                                let _ = writeln!(out, "{pad}break;");
+                                if let Some(label) = self.switch_fallthrough_labels.get(next).cloned() {
+                                    let _ = writeln!(out, "{pad}break {label};");
+                                } else {
+                                    let _ = writeln!(out, "{pad}break;");
+                                }
                                 return;
                             }
                             current = *next;
@@ -1400,14 +1420,42 @@ impl<'a> Codegen<'a> {
                     let fall_bid = *fallthrough;
 
                     // Find the iterable from the init block's GetIterator instruction.
+                    // Resolve through the init block's instruction chain since those
+                    // instructions may not have been visited yet for inlining.
                     let iterable_expr = self.hir.body.blocks.get(&init_bid).and_then(|b| {
-                        b.instructions.iter().find_map(|instr| {
-                            if let InstructionValue::GetIterator { collection, .. } = &instr.value {
-                                Some(self.expr(collection))
-                            } else {
-                                None
+                        // Build a local map of identifier → expression for this block.
+                        let mut local_exprs: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+                        for instr in &b.instructions {
+                            match &instr.value {
+                                InstructionValue::LoadLocal { place, .. } => {
+                                    let name = self.ident_name(place.identifier);
+                                    local_exprs.insert(instr.lvalue.identifier.0, name);
+                                }
+                                InstructionValue::PropertyLoad { object, property, .. } => {
+                                    let obj = local_exprs.get(&object.identifier.0)
+                                        .cloned()
+                                        .unwrap_or_else(|| self.expr(object));
+                                    local_exprs.insert(instr.lvalue.identifier.0, format!("{}.{}", obj, property));
+                                }
+                                InstructionValue::ComputedLoad { object, property, .. } => {
+                                    let obj = local_exprs.get(&object.identifier.0)
+                                        .cloned()
+                                        .unwrap_or_else(|| self.expr(object));
+                                    let prop = local_exprs.get(&property.identifier.0)
+                                        .cloned()
+                                        .unwrap_or_else(|| self.expr(property));
+                                    local_exprs.insert(instr.lvalue.identifier.0, format!("{}[{}]", obj, prop));
+                                }
+                                InstructionValue::GetIterator { collection, .. } => {
+                                    let coll = local_exprs.get(&collection.identifier.0)
+                                        .cloned()
+                                        .unwrap_or_else(|| self.expr(collection));
+                                    return Some(coll);
+                                }
+                                _ => {}
                             }
-                        })
+                        }
+                        None
                     }).unwrap_or_else(|| "undefined".to_string());
 
                     // Find the loop variable from the loop_ block's first StoreLocal.
@@ -1619,11 +1667,23 @@ impl<'a> Codegen<'a> {
                 Terminal::Label { block: body, fallthrough, .. } => {
                     let body_bid = *body;
                     let fall_bid = *fallthrough;
-                    let mut vis2 = visited.clone();
-                    self.emit_cfg_region(
-                        body_bid, Some(fall_bid), indent, out,
-                        &mut vis2, emitted_scopes, scope_index, instr_scope, inlined_ids, scope_instrs,
-                    );
+                    let label_opt = self.switch_fallthrough_labels.get(&fall_bid).cloned();
+                    if let Some(ref label) = label_opt {
+                        let _ = writeln!(out, "{pad}{label}: {{");
+                        let body_pad = indent + 1;
+                        let mut vis2 = visited.clone();
+                        self.emit_cfg_region(
+                            body_bid, Some(fall_bid), body_pad, out,
+                            &mut vis2, emitted_scopes, scope_index, instr_scope, inlined_ids, scope_instrs,
+                        );
+                        let _ = writeln!(out, "{pad}}}");
+                    } else {
+                        let mut vis2 = visited.clone();
+                        self.emit_cfg_region(
+                            body_bid, Some(fall_bid), indent, out,
+                            &mut vis2, emitted_scopes, scope_index, instr_scope, inlined_ids, scope_instrs,
+                        );
+                    }
                     if Some(fall_bid) == stop_at {
                         return;
                     }
@@ -3741,6 +3801,9 @@ impl<'a> Codegen<'a> {
                     // Apply capture renames before normalizing.
                     let src = apply_capture_renames(src, &lowered_func.func.context, self.env, &self.name_overrides);
                     let normalized = normalize_fn_body_text(&src);
+                    // Rename catch parameters to temp names (t0, t1, ...) to match
+                    // the reference compiler's rename_variables behavior.
+                    let normalized = rename_catch_params_in_text(&normalized);
                     return Some(format!("const {lv} = {normalized};"));
                 }
                 let fn_name_str = name.as_deref().unwrap_or("");
@@ -4176,7 +4239,7 @@ impl<'a> Codegen<'a> {
             // String literal keys: quote only if not a valid JS identifier
             // (e.g. "data-foo-bar" → "data-foo-bar", "data" → data).
             ObjectPropertyKey::String(s) => {
-                if is_valid_identifier(&s) { s } else { format!("\"{s}\"") }
+                if is_valid_identifier(&s) { s } else { format!("\"{}\"", escape_js_string(&s)) }
             }
             ObjectPropertyKey::Computed(p) => format!("[{}]", self.expr(&p)),
             ObjectPropertyKey::Number(n) => n.to_string(),
@@ -4426,8 +4489,31 @@ fn primitive_expr(value: &PrimitiveValue) -> String {
                 format!("{n}")
             }
         }
-        PrimitiveValue::String(s) => format!("\"{}\"", s.replace('"', "\\\"")),
+        PrimitiveValue::String(s) => format!("\"{}\"", escape_js_string(s)),
     }
+}
+
+/// Escape a string for use inside double quotes in JavaScript output.
+fn escape_js_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{0008}' => out.push_str("\\b"),
+            '\u{000C}' => out.push_str("\\f"),
+            '\0' => out.push_str("\\0"),
+            c if c < ' ' => {
+                // Other control characters: use \xNN
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 fn collect_instr_operands(instr: &Instruction) -> Vec<crate::hir::hir::IdentifierId> {
@@ -4664,6 +4750,202 @@ fn normalize_fn_body_text(src: &str) -> String {
         }
         result.push(bytes[i] as char);
         i += 1;
+    }
+    // Promote `let` → `const` for variables that are never reassigned in the body.
+    // The TS compiler's rename_variables pass does this for inner function declarations.
+    result = promote_let_to_const(&result);
+    result
+}
+
+/// Rename catch parameters to temp names (t0, t1, ...) in source text.
+/// Finds `catch (NAME)` or `catch(NAME)` patterns and renames the identifier + all uses.
+/// This mirrors the rename_variables behavior from the TypeScript React compiler.
+fn rename_catch_params_in_text(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut result = text.to_string();
+    let mut counter = 0u32;
+    let catch_keyword = b"catch";
+    let mut i = 0;
+    let mut catches: Vec<String> = Vec::new();
+    while i + 5 < bytes.len() {
+        if &bytes[i..i + 5] == catch_keyword {
+            // Check word boundary before "catch"
+            if i > 0 && {
+                let b = bytes[i - 1];
+                b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+            } {
+                i += 1;
+                continue;
+            }
+            let mut j = i + 5;
+            // Skip whitespace
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'(' {
+                j += 1;
+                // Skip whitespace
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                // Extract identifier
+                let start = j;
+                while j < bytes.len() && {
+                    let b = bytes[j];
+                    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+                } {
+                    j += 1;
+                }
+                if j > start {
+                    let name = std::str::from_utf8(&bytes[start..j]).unwrap_or("").to_string();
+                    if !name.is_empty() {
+                        catches.push(name);
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    for name in catches {
+        let new_name = format!("t{}", counter);
+        counter += 1;
+        if name != new_name {
+            result = rename_word_in_src(&result, &name, &new_name);
+        }
+    }
+    result
+}
+
+/// Promote `let x = ...;` to `const x = ...;` when `x` is never reassigned in `src`.
+/// Only promotes `let` declarations with an initializer (not bare `let x;`).
+fn promote_let_to_const(src: &str) -> String {
+    let bytes = src.as_bytes();
+    // First pass: collect all `let` declarations with initializers and their variable names.
+    let mut let_decls: Vec<(usize, String)> = Vec::new(); // (byte offset of "let ", varname)
+    let mut i = 0;
+    while i + 4 < bytes.len() {
+        // Skip comments
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i+1] == b'/' {
+            while i < bytes.len() && bytes[i] != b'\n' { i += 1; }
+            continue;
+        }
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i+1] == b'*' {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i+1] == b'/') { i += 1; }
+            if i + 1 < bytes.len() { i += 2; }
+            continue;
+        }
+        // Skip strings
+        if bytes[i] == b'\'' || bytes[i] == b'"' || bytes[i] == b'`' {
+            let q = bytes[i];
+            i += 1;
+            while i < bytes.len() && bytes[i] != q {
+                if bytes[i] == b'\\' { i += 1; }
+                i += 1;
+            }
+            if i < bytes.len() { i += 1; }
+            continue;
+        }
+        if &bytes[i..i+4] == b"let " {
+            // Check word boundary before "let"
+            if i > 0 && (bytes[i-1].is_ascii_alphanumeric() || bytes[i-1] == b'_' || bytes[i-1] == b'$') {
+                i += 1;
+                continue;
+            }
+            let decl_start = i;
+            let mut j = i + 4;
+            // Skip whitespace
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() { j += 1; }
+            // Read identifier
+            let id_start = j;
+            while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] == b'$') { j += 1; }
+            if j > id_start {
+                let name = std::str::from_utf8(&bytes[id_start..j]).unwrap_or("").to_string();
+                // Check that next non-ws char is '=' (initializer) and not '=='
+                let mut k = j;
+                while k < bytes.len() && bytes[k].is_ascii_whitespace() { k += 1; }
+                if k < bytes.len() && bytes[k] == b'=' && (k + 1 >= bytes.len() || bytes[k+1] != b'=') {
+                    if !name.is_empty() {
+                        let_decls.push((decl_start, name));
+                    }
+                }
+            }
+            i = j;
+            continue;
+        }
+        i += 1;
+    }
+
+    if let_decls.is_empty() {
+        return src.to_string();
+    }
+
+    // Second pass: check which declared names are reassigned (name = ... but not ==)
+    let mut reassigned: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (_, name) in &let_decls {
+        let name_bytes = name.as_bytes();
+        let mut i = 0;
+        while i + name_bytes.len() < bytes.len() {
+            // Skip comments
+            if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i+1] == b'/' {
+                while i < bytes.len() && bytes[i] != b'\n' { i += 1; }
+                continue;
+            }
+            if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i+1] == b'*' {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i+1] == b'/') { i += 1; }
+                if i + 1 < bytes.len() { i += 2; }
+                continue;
+            }
+            // Skip strings
+            if bytes[i] == b'\'' || bytes[i] == b'"' || bytes[i] == b'`' {
+                let q = bytes[i];
+                i += 1;
+                while i < bytes.len() && bytes[i] != q {
+                    if bytes[i] == b'\\' { i += 1; }
+                    i += 1;
+                }
+                if i < bytes.len() { i += 1; }
+                continue;
+            }
+            if bytes[i..].starts_with(name_bytes) {
+                let before_ok = i == 0 || !(bytes[i-1].is_ascii_alphanumeric() || bytes[i-1] == b'_' || bytes[i-1] == b'$');
+                let after_pos = i + name_bytes.len();
+                let after_ok = after_pos >= bytes.len() || !(bytes[after_pos].is_ascii_alphanumeric() || bytes[after_pos] == b'_' || bytes[after_pos] == b'$');
+                if before_ok && after_ok {
+                    // Check if this is an assignment (not part of a `let` declaration)
+                    let mut k = after_pos;
+                    while k < bytes.len() && bytes[k].is_ascii_whitespace() { k += 1; }
+                    if k < bytes.len() && bytes[k] == b'=' && (k + 1 >= bytes.len() || bytes[k+1] != b'=') {
+                        // Check it's not the original declaration (preceded by "let ")
+                        let prefix_check = if i >= 4 { &bytes[i-4..i] } else { b"" };
+                        let prefix_check2 = if i >= 6 { &bytes[i-6..i] } else { b"" };
+                        if !prefix_check.ends_with(b"let ") && !prefix_check2.ends_with(b"const ") {
+                            reassigned.insert(name.as_str());
+                        }
+                    }
+                    // Also check for ++, --, +=, -=, etc.
+                    if k + 1 < bytes.len() && ((bytes[k] == b'+' && bytes[k+1] == b'+') || (bytes[k] == b'-' && bytes[k+1] == b'-') || (bytes[k] == b'+' && bytes[k+1] == b'=') || (bytes[k] == b'-' && bytes[k+1] == b'=')) {
+                        reassigned.insert(name.as_str());
+                    }
+                    // Check prefix ++ / --
+                    if i >= 2 && ((bytes[i-1] == b'+' && bytes[i-2] == b'+') || (bytes[i-1] == b'-' && bytes[i-2] == b'-')) {
+                        reassigned.insert(name.as_str());
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+
+    // Third pass: replace `let` with `const` for non-reassigned names
+    let mut result = src.to_string();
+    // Process in reverse order so byte offsets remain valid
+    for (offset, name) in let_decls.iter().rev() {
+        if !reassigned.contains(name.as_str()) {
+            // Replace "let" with "const" at this offset (3 bytes → 5 bytes)
+            result.replace_range(*offset..*offset + 3, "const");
+        }
     }
     result
 }

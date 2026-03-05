@@ -35,10 +35,10 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 27.9% (347/1244) |
-| Error (expected) | 194 |
-| Error (unexpected) | 2 (JSX-in-try validation not implemented) |
-| Uncommitted changes | none |
+| Correct rate | 28.8% (358/1244) |
+| Error (expected) | 193 |
+| Error (unexpected) | 3 (JSX-in-try validation not implemented) |
+| Uncommitted changes | lattice const-prop, dep hoisting, return/else codegen, example scripts |
 
 ---
 
@@ -46,9 +46,12 @@ Update the following before stopping:
 
 **Active work**: Improving correctness rate through targeted fixes.
 
-Session progress: 328 → 335 → 341 → 343 → 344 → 347 (across multiple sessions).
+Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 (across multiple sessions).
 
 Recent completed:
+- Lattice-based constant propagation rewrite (+11 uncommitted, 347→358)
+- Hoist complex dep expressions to const before scope blocks
+- Return undefined → return, empty else block removal
 - Pragma support + improved infer mode (+6, 335→341)
 - Update expression result capture (+2, 341→343)
 - @gating pragma passthrough (+1, 343→344)
@@ -107,11 +110,14 @@ Recent completed:
 
 ## Completed This Session
 
-- `src/optimization/constant_propagation.rs` — added comparison operators (StrictEq, StrictNEq, Lt, LtEq, Gt, GtEq, Eq, NEq) and unary folding (Not, Minus, Plus, BitNot, Typeof, Void) to fold_binary/fold_unary. Added PartialEq to PrimitiveValue. (+1 fixture)
-- `src/reactive_scopes/flatten_scopes_with_hooks_or_use_hir.rs` — added PropertyLoad tracking for method names + MethodCall variant detection for hook calls like React.useState(). (+2 fixtures)
-- `src/codegen/hir_codegen.rs` — added scope_output_names HashMap and inlined_exprs propagation. After scope emission assigns tN temp names, propagates through inlined_exprs so $tN references resolve correctly. (+4 fixtures)
-- `src/entrypoint/pipeline.rs` — parse @outputMode:"lint" pragma (skip compilation, passthrough all functions). Check module-level 'use no memo'/'use no forget' directives. (+17 fixtures)
-- Created analysis examples: `dollar_t_check.rs`
+- `src/optimization/constant_propagation.rs` — rewrote to lattice-based approach with LatticeValue (Top/Constant/Bottom), phi node meet, and improved fold coverage. Uncommitted, no fixture change yet.
+
+Previous session work (committed):
+- `src/optimization/constant_propagation.rs` — added comparison operators and unary folding (+1 fixture)
+- `src/reactive_scopes/flatten_scopes_with_hooks_or_use_hir.rs` — PropertyLoad + MethodCall hook detection (+2 fixtures)
+- `src/codegen/hir_codegen.rs` — scope_output_names + inlined_exprs propagation (+4 fixtures)
+- `src/entrypoint/pipeline.rs` — @outputMode:"lint" pragma, 'use no memo'/'use no forget' (+17 fixtures)
+- `src/codegen/hir_codegen.rs` — destructuring const→let for mutated bindings (+2 fixtures)
 
 ---
 
@@ -143,7 +149,7 @@ Recent completed:
 | infer_mutation_aliasing_effects | inference/infer_mutation_aliasing_effects.rs | STUB | 7 |
 | dead_code_elimination | optimization/dead_code_elimination.rs | REAL | 331 |
 | outline_functions | optimization/outline_functions.rs | REAL | 353 |
-| constant_propagation | optimization/constant_propagation.rs | REAL | ~192 |
+| constant_propagation | optimization/constant_propagation.rs | REAL | ~328 |
 | optimize_props_method_calls | optimization/optimize_props_method_calls.rs | STUB | 2 |
 | optimize_for_ssr | optimization/optimize_for_ssr.rs | STUB | 2 |
 | outline_jsx | optimization/outline_jsx.rs | STUB | 2 |
@@ -238,3 +244,4 @@ codegen (currently bypasses ReactiveFunction) → oxc_codegen → JS output
 | 2026-03-04 | 84.2 | 26.4 | — | 17 | 35 | const-prop folding (+1), hook method call (+2), scope output naming (+4), lint mode + use-no-memo (+17) |
 | 2026-03-04 | 84.2 | 27.7 | — | 17 | 35 | pragma support (+6), update expr results (+2), @gating (+1) |
 | 2026-03-04 | 84.2 | 27.9 | — | 17 | 35 | destructuring const→let for mutated bindings (+2) |
+| 2026-03-05 | 84.2 | 28.8 | — | 17 | 35 | lattice const-prop, dep hoisting, return/else codegen (+11) |

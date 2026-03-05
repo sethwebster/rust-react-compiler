@@ -10,5 +10,8 @@ rust-react-compiler/target/
 # OS
 .DS_Store
 
+# Throwaway debug/analysis scripts
+rust-react-compiler/examples/
+
 # React source checkout (reference only, not part of this repo)
 react/

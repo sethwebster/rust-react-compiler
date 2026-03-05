@@ -13,21 +13,35 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::hir::environment::Environment;
-use crate::hir::hir::{HIRFunction, IdentifierId, InstructionId, InstructionValue, MutableRange, Param};
+use crate::hir::hir::{HIRFunction, IdentifierId, InstructionId, InstructionValue, MutableRange, Param, Place};
 use crate::hir::visitors::{each_instruction_value_operand, each_terminal_operand};
 
 /// Build a map from FunctionExpression SSA temp id → list of MUTATED context variable ids.
-/// A context variable is "mutated" if the closure body contains a ComputedStore,
-/// PropertyStore, or StoreContext that writes through it (directly or via alias).
+/// A context variable is "mutated" if the closure body contains an assignment, property
+/// store, method call, or other mutation pattern that writes through it.
 /// Only non-outlined closures are tracked.
-fn build_closure_context_map(hir: &HIRFunction) -> HashMap<IdentifierId, Vec<IdentifierId>> {
+///
+/// Since inner function bodies are lowered as stubs (not fully lowered into HIR),
+/// we use source text analysis to detect mutations.
+fn build_closure_context_map(hir: &HIRFunction, env: &Environment) -> HashMap<IdentifierId, Vec<IdentifierId>> {
     let mut map: HashMap<IdentifierId, Vec<IdentifierId>> = HashMap::new();
     for (_, block) in &hir.body.blocks {
         for instr in &block.instructions {
             if let InstructionValue::FunctionExpression { lowered_func, name_hint, .. } = &instr.value {
                 // Only track non-outlined closures.
                 if name_hint.is_none() {
-                    let ctx_ids = find_mutated_context_vars(&lowered_func.func.as_ref());
+                    let ctx_ids = find_mutated_context_vars_from_source(
+                        &lowered_func.func.context,
+                        &lowered_func.func.original_source,
+                        env,
+                    );
+                    if std::env::var("RC_DEBUG2").is_ok() {
+                        let ctx_all: Vec<u32> = lowered_func.func.context.iter().map(|p| p.identifier.0).collect();
+                        eprintln!("[closure_ctx] fn_temp={} ctx={:?} mutated={:?} src_len={}",
+                            instr.lvalue.identifier.0, ctx_all,
+                            ctx_ids.iter().map(|id| id.0).collect::<Vec<_>>(),
+                            lowered_func.func.original_source.len());
+                    }
                     if !ctx_ids.is_empty() {
                         map.insert(instr.lvalue.identifier, ctx_ids);
                     }
@@ -111,6 +125,167 @@ fn find_mutated_context_vars(func: &HIRFunction) -> Vec<IdentifierId> {
     mutated.into_iter().collect()
 }
 
+/// Detect which context variables are mutated inside a closure by analyzing
+/// the function's original source text. This is needed because inner function
+/// bodies are lowered as stubs (not fully lowered into HIR).
+///
+/// A context variable `name` is considered mutated if the source contains:
+/// - `name = ...` (direct assignment, but not `== name` or `=== name`)
+/// - `name +=`, `name -=`, `name++`, `name--`, etc. (compound assignment/update)
+/// - `name.prop = ...` (property store)
+/// - `name.method(...)` where method is potentially mutating (conservative)
+fn find_mutated_context_vars_from_source(
+    context: &[Place],
+    source: &str,
+    env: &Environment,
+) -> Vec<IdentifierId> {
+    let is_id_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+    let bytes = source.as_bytes();
+    let slen = bytes.len();
+    let mut mutated = Vec::new();
+
+    for ctx_place in context {
+        let name = match env.get_identifier(ctx_place.identifier).and_then(|i| i.name.as_ref()) {
+            Some(n) => n.value().to_string(),
+            None => continue,
+        };
+        if name.is_empty() { continue; }
+        let name_bytes = name.as_bytes();
+        let nlen = name.len();
+        let mut is_mutated = false;
+
+        let mut i = 0;
+        while i + nlen <= slen {
+            // Skip string literals.
+            if bytes[i] == b'\'' || bytes[i] == b'"' || bytes[i] == b'`' {
+                let q = bytes[i];
+                i += 1;
+                while i < slen && bytes[i] != q {
+                    if bytes[i] == b'\\' { i += 1; }
+                    i += 1;
+                }
+                if i < slen { i += 1; }
+                continue;
+            }
+            // Skip comments.
+            if i + 1 < slen && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+                while i < slen && bytes[i] != b'\n' { i += 1; }
+                continue;
+            }
+            if i + 1 < slen && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                i += 2;
+                while i + 1 < slen && !(bytes[i] == b'*' && bytes[i + 1] == b'/') { i += 1; }
+                if i + 1 < slen { i += 2; }
+                continue;
+            }
+
+            // Check for identifier match with word boundaries.
+            if bytes[i..].starts_with(name_bytes) {
+                let before_ok = i == 0 || !is_id_char(bytes[i - 1]);
+                let after_pos = i + nlen;
+                let after_ok = after_pos >= slen || !is_id_char(bytes[after_pos]);
+                if before_ok && after_ok {
+                    // Found `name` at position i. Check what follows.
+                    let mut j = after_pos;
+                    // Skip whitespace.
+                    while j < slen && bytes[j].is_ascii_whitespace() { j += 1; }
+
+                    if j < slen {
+                        // Check for assignment: name = (but not == or ===)
+                        if bytes[j] == b'=' && (j + 1 >= slen || bytes[j + 1] != b'=') {
+                            is_mutated = true;
+                            break;
+                        }
+                        // Compound assignments: +=, -=, *=, /=, %=, &=, |=, ^=, <<=, >>=, >>>=, **=, ??=, ||=, &&=
+                        if j + 1 < slen && bytes[j + 1] == b'=' {
+                            match bytes[j] {
+                                b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'|' | b'^' => {
+                                    is_mutated = true;
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                        // ++, --
+                        if j + 1 < slen && ((bytes[j] == b'+' && bytes[j + 1] == b'+') || (bytes[j] == b'-' && bytes[j + 1] == b'-')) {
+                            is_mutated = true;
+                            break;
+                        }
+                    }
+
+                    // Check for prefix ++ / -- before the identifier.
+                    if i >= 2 {
+                        let mut k = i - 1;
+                        while k > 0 && bytes[k].is_ascii_whitespace() { k -= 1; }
+                        if k > 0 && ((bytes[k] == b'+' && bytes[k - 1] == b'+') || (bytes[k] == b'-' && bytes[k - 1] == b'-')) {
+                            is_mutated = true;
+                            break;
+                        }
+                    }
+
+                    // Check for property store: name.prop = or name[expr] =
+                    if j < slen && (bytes[j] == b'.' || bytes[j] == b'[') {
+                        // Scan forward past the property access chain to see if it ends with =
+                        let mut depth = 0i32;
+                        let mut k = j;
+                        loop {
+                            if k >= slen { break; }
+                            match bytes[k] {
+                                b'[' => { depth += 1; k += 1; }
+                                b']' => { depth -= 1; k += 1; }
+                                b'(' => break, // method call — handled separately
+                                b'=' if depth == 0 => {
+                                    if k + 1 >= slen || bytes[k + 1] != b'=' {
+                                        is_mutated = true;
+                                    }
+                                    break;
+                                }
+                                _ if bytes[k].is_ascii_whitespace() => { k += 1; }
+                                _ if is_id_char(bytes[k]) || bytes[k] == b'.' => { k += 1; }
+                                _ => break,
+                            }
+                        }
+                        if is_mutated { break; }
+
+                        // Check for mutating method call: name.push(...), name.splice(...), etc.
+                        if j < slen && bytes[j] == b'.' {
+                            let mut m = j + 1;
+                            let method_start = m;
+                            while m < slen && is_id_char(bytes[m]) { m += 1; }
+                            let method_name = std::str::from_utf8(&bytes[method_start..m]).unwrap_or("");
+                            // Skip whitespace.
+                            while m < slen && bytes[m].is_ascii_whitespace() { m += 1; }
+                            if m < slen && bytes[m] == b'(' && !is_non_mutating_method(method_name) && is_known_mutating_method(method_name) {
+                                is_mutated = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    i = after_pos;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+
+        if is_mutated {
+            mutated.push(ctx_place.identifier);
+        }
+    }
+
+    mutated
+}
+
+/// Returns true for methods that are known to mutate their receiver.
+fn is_known_mutating_method(name: &str) -> bool {
+    matches!(
+        name,
+        "push" | "pop" | "shift" | "unshift" | "splice" | "sort" | "reverse"
+            | "fill" | "copyWithin" | "set" | "delete" | "clear" | "add"
+    )
+}
+
 /// Returns true if a method name is known to NOT mutate its receiver.
 /// Array methods: map, filter, find, reduce, etc. are non-mutating.
 /// Mutating methods: push, pop, splice, sort, reverse, fill are mutating.
@@ -149,7 +324,7 @@ pub fn infer_mutation_aliasing_ranges(
 
     // Pre-build closure context map: FunctionExpression temp id → context var ids.
     // Used below to extend context vars' mutable ranges when the closure is called.
-    let closure_context_map = build_closure_context_map(hir);
+    let closure_context_map = build_closure_context_map(hir, env);
 
     // SSA temp liveness: def → last-use (for all types of use).
     let mut defs: HashMap<IdentifierId, InstructionId> = HashMap::new();
@@ -486,6 +661,9 @@ pub fn infer_mutation_aliasing_ranges(
                         //   const f0 = function() { x.z = bar; };
                         //   f0();  ← x is mutated here through the closure
                         if let Some(&callee_source) = aliases.get(&callee.identifier) {
+                            if std::env::var("RC_DEBUG2").is_ok() {
+                                eprintln!("[closure_call] callee={} source={} has_ctx={}", callee.identifier.0, callee_source.0, closure_var_contexts.contains_key(&callee_source));
+                            }
                             if let Some(ctx_ids) = closure_var_contexts.get(&callee_source) {
                                 for &ctx_id in ctx_ids {
                                     // ctx_id may be either a named var id or an SSA temp id.

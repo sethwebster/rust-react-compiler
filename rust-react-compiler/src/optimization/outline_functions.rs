@@ -163,6 +163,10 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
                     }
                 }
 
+                // Rename catch parameters to temp names (t0, t1, ...) to match
+                // the reference compiler's rename_variables behavior.
+                renamed_body = rename_catch_params(&renamed_body);
+
                 // Build the function declaration.
                 let params_str = final_param_names.join(", ");
                 let decl = if info.is_expr_body {
@@ -344,6 +348,58 @@ fn rename_word(text: &str, old: &str, new: &str) -> String {
 
 fn is_word_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+}
+
+/// Rename catch parameters to temp names (t0, t1, ...) in source text.
+/// Finds `catch (NAME)` or `catch(NAME)` patterns and renames the identifier + all uses.
+fn rename_catch_params(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut result = text.to_string();
+    let mut counter = 0u32;
+    let catch_keyword = b"catch";
+    let mut i = 0;
+    let mut catches: Vec<String> = Vec::new();
+    while i + 5 < bytes.len() {
+        if &bytes[i..i + 5] == catch_keyword {
+            // Check word boundary before "catch"
+            if i > 0 && is_word_byte(bytes[i - 1]) {
+                i += 1;
+                continue;
+            }
+            let mut j = i + 5;
+            // Skip whitespace
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'(' {
+                j += 1;
+                // Skip whitespace
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                // Extract identifier
+                let start = j;
+                while j < bytes.len() && is_word_byte(bytes[j]) {
+                    j += 1;
+                }
+                if j > start {
+                    let name = std::str::from_utf8(&bytes[start..j]).unwrap_or("").to_string();
+                    if !name.is_empty() {
+                        catches.push(name);
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    for name in catches {
+        let new_name = format!("t{}", counter);
+        counter += 1;
+        if name != new_name {
+            result = rename_word(&result, &name, &new_name);
+        }
+    }
+    result
 }
 
 fn is_js_keyword(tok: &str) -> bool {

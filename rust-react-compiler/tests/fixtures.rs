@@ -297,3 +297,4 @@ fn run_all_fixtures_impl() {
         println!("  [OK] {}", name);
     }
 }
+
