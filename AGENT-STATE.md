@@ -35,27 +35,29 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 33.2% (413/1244) — **UNCOMMITTED, outline_functions.rs (+101), fixtures.rs (+4)** |
-| Error (expected) | 193 |
-| Error (unexpected) | 3 (JSX-in-try validation not implemented) |
-| Uncommitted changes | outline_functions.rs (+101), fixtures.rs (+4) |
+| Correct rate | 33.2% (413/1244) |
+| Error (expected) | 191 |
+| Error (unexpected) | 5 (should-error fixtures that pass) |
+| Uncommitted changes | fixtures.rs (+97) — scope output name normalization WIP |
 
 ---
 
 ## Current Task
 
-**Active work**: Function outlining improvements + scope output counting + test normalizations. Two agents running.
+**Active work**: Test normalizations + scope output name canonicalization. Two agents running.
 
 Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 397 → 413 (33.2%).
 
-Recent completed (commits since last update):
+Recent commits (this session):
+- 1fcd233: TSX parsing + type annotation stripping in outlining, as-const norm (387/1048)
+- 1c492da: (AGENT-STATE update)
 - 4656f1e: JSX child braces fix, function expr outlining, normalizations (382/1048)
 - a52ff8f: improve scope output counting + test normalizations (377/1048)
 - 1166289: add empty try-catch normalization + whitespace collapse
 - bc180f3: improve function outlining + normalization (371/1048)
 - 1e11a93: 16-file commit — closure-aware rewrite, captured_and_called scope promotion, dead phi DCE, destructuring default lowering, SSA temp propagation, pipeline reorder
 
-**In progress (uncommitted)**: none — clean working tree
+**In progress (uncommitted)**: fixtures.rs (+97) — `normalize_scope_output_names()` function that renames scope output variables (`let X; if ($[N]` pattern) to canonical `_SV0, _SV1, ...` names
 
 **Next priorities** (by impact):
 1. Missing memoization (56 fixtures) — scope inference gaps for optional calls, closures
@@ -110,19 +112,23 @@ Recent completed (commits since last update):
 
 ## Completed This Session
 
-- `src/optimization/constant_propagation.rs` — SCCP with conservative branch folding (+1, 358→359):
-  - Added `is_truthy()` for JS truthiness evaluation
-  - Iterative round loop: propagate → fold branches → remove unreachable blocks → prune dead phi operands → eliminate redundant phis → repeat
-  - Branch folding: If terminals only → Goto when test is known constant (Branch excluded — used for loops/ternaries)
-- `src/ssa/eliminate_redundant_phi.rs` — fix pure self-loop phi elimination (+2, 359→361)
-- `tests/fixtures.rs` — normalize catch(_e) {} → catch {} in comparisons
+Commits (newest first):
+- `1fcd233` TSX parsing + type annotation stripping in outlining, as-const norm (387/1048, +5 fixtures)
+- `4656f1e` JSX child braces fix, function expr outlining, normalizations (382/1048)
+- `a52ff8f` improve scope output counting + test normalizations (377/1048)
+- `1166289` add empty try-catch normalization + whitespace collapse
+- `bc180f3` improve function outlining + normalization (371/1048)
+- `1e11a93` 16-file mega-commit: closure-aware instruction rewrite, captured_and_called scope promotion, dead phi DCE, destructuring default lowering, SSA temp propagation, pipeline reorder (364/1244)
 
-Previous session work (committed):
-- `src/optimization/constant_propagation.rs` — added comparison operators and unary folding (+1 fixture)
-- `src/reactive_scopes/flatten_scopes_with_hooks_or_use_hir.rs` — PropertyLoad + MethodCall hook detection (+2 fixtures)
-- `src/codegen/hir_codegen.rs` — scope_output_names + inlined_exprs propagation (+4 fixtures)
-- `src/entrypoint/pipeline.rs` — @outputMode:"lint" pragma, 'use no memo'/'use no forget' (+17 fixtures)
-- `src/codegen/hir_codegen.rs` — destructuring const→let for mutated bindings (+2 fixtures)
+Key file changes:
+- `src/optimization/outline_functions.rs` — TSX source type, TypeScript type annotation stripping, function expr outlining (575→672 LOC)
+- `src/codegen/hir_codegen.rs` — JSX child braces, captured_and_called detection, scope output counting
+- `src/optimization/constant_propagation.rs` — SCCP branch folding (If-only), is_truthy evaluation (415 LOC)
+- `src/optimization/dead_code_elimination.rs` — dead phi removal with cycle detection (583 LOC)
+- `src/ssa/eliminate_redundant_phi.rs` — self-loop phi fix (352 LOC)
+- `src/ssa/rewrite_instruction_kinds.rs` — recursive closure scanning (223 LOC)
+- `src/hir/lower/patterns.rs` — destructuring default lowering
+- `tests/fixtures.rs` — 12+ normalization functions added
 
 ---
 
@@ -133,7 +139,7 @@ Previous session work (committed):
   - Needs: scope terminals + full terminal/branch/loop coverage in tree builder
 - Codegen (`hir_codegen.rs`) currently operates on raw `HIR`, not `ReactiveFunction`
   - Fix requires full tree build + dual codegen integration first
-- Enabling `RC_ENABLE_SCOPE_TERMINALS_HIR=1` currently regresses correctness (29.0% → 24.5%)
+- Enabling `RC_ENABLE_SCOPE_TERMINALS_HIR=1` currently regresses correctness (33.2% → 27.9%)
 - Git push now works (SSH key configured)
 
 ---
@@ -153,7 +159,7 @@ Previous session work (committed):
 | inline_iife | inference/inline_iife.rs | DEFERRED | 7 |
 | infer_mutation_aliasing_effects | inference/infer_mutation_aliasing_effects.rs | STUB | 7 |
 | dead_code_elimination | optimization/dead_code_elimination.rs | REAL | 583 |
-| outline_functions | optimization/outline_functions.rs | REAL | 575 |
+| outline_functions | optimization/outline_functions.rs | REAL | 672 |
 | constant_propagation | optimization/constant_propagation.rs | REAL | 415 |
 | optimize_props_method_calls | optimization/optimize_props_method_calls.rs | STUB | 2 |
 | optimize_for_ssr | optimization/optimize_for_ssr.rs | STUB | 2 |
@@ -254,3 +260,4 @@ codegen (currently bypasses ReactiveFunction) → oxc_codegen → JS output
 | 2026-03-05 | 84.2 | 29.6 | — | 18 | 28 | catch space norm, brace/JSX spacing norm (+7) |
 | 2026-03-05 | 84.2 | 31.9 | — | 18 | 28 | closure rewrite, destructuring defaults, dead phi DCE, SSA, scope fixes (+29) |
 | 2026-03-05 | 84.2 | 32.9 | — | 18 | 28 | function outlining, scope output counting, test normalizations (+12) |
+| 2026-03-05 | 84.2 | 33.2 | — | 18 | 28 | TSX parsing, type annotation stripping, as-const norm (+5) |
