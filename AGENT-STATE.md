@@ -35,34 +35,26 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 31.9% (397/1244) — committed 1e11a93, +1 file still uncommitted |
+| Correct rate | 32.9% (409/1244) — **3 new commits since last update + uncommitted WIP** |
 | Error (expected) | 193 |
 | Error (unexpected) | 3 (JSX-in-try validation not implemented) |
-| Uncommitted changes | fixtures.rs (+68 lines — additional test normalizations) |
+| Uncommitted changes | hir_codegen.rs (16+/-), outline_functions.rs (79+), fixtures.rs (36+) |
 
 ---
 
 ## Current Task
 
-**Active work**: Major improvements committed (1e11a93). Additional test normalizations in progress.
+**Active work**: Function outlining improvements + scope output counting + test normalizations. Two agents running.
 
-Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 397.
+Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 397 → 409 (32.9%).
 
-Recent completed:
-- Brace/JSX spacing normalization in test harness (+5, 363→368, committed 8ad7d0d)
-- catch (_e) {} normalization fix (+2, 361→363, committed 8fa4a47)
-- SCCP branch folding + phi self-loop fix + catch normalization (+3, 358→361, committed 0c07a3d)
-- Lattice-based constant propagation rewrite (+11 committed, 347→358)
-- Hoist complex dep expressions to const before scope blocks
-- Return undefined → return, empty else block removal
-- Pragma support + improved infer mode (+6, 335→341)
-- Update expression result capture (+2, 341→343)
-- @gating pragma passthrough (+1, 343→344)
-- Destructuring const→let for mutated bindings (+2, 345→347)
+Recent completed (new commits since last update):
+- a52ff8f: improve scope output counting + test normalizations (377/1048)
+- 1166289: add empty try-catch normalization + whitespace collapse
+- bc180f3: improve function outlining + normalization (371/1048)
+- 1e11a93: 16-file commit — closure-aware rewrite, captured_and_called scope promotion, dead phi DCE, destructuring default lowering, SSA temp propagation, pipeline reorder
 
-**Committed (1e11a93, 16 files)**: closure-aware rewrite_instruction_kinds, captured_and_called scope promotion, dead phi DCE, destructuring default lowering, SSA temp propagation, visitor helpers, pipeline reorder.
-
-**In progress (uncommitted)**: fixtures.rs (+68 lines — additional test normalizations)
+**In progress (uncommitted)**: outline_functions.rs (+79), hir_codegen.rs (16+/-), fixtures.rs (+36)
 
 **Next priorities** (by impact):
 1. Missing memoization (56 fixtures) — scope inference gaps for optional calls, closures
@@ -149,9 +141,9 @@ Previous session work (committed):
 
 | Pass | File | Status | LOC |
 |------|------|--------|-----|
-| enter_ssa | ssa/enter_ssa.rs | REAL | 828 |
-| eliminate_redundant_phi | ssa/eliminate_redundant_phi.rs | REAL | 347 |
-| rewrite_instruction_kinds | ssa/rewrite_instruction_kinds... | REAL | 86 |
+| enter_ssa | ssa/enter_ssa.rs | REAL | 902 |
+| eliminate_redundant_phi | ssa/eliminate_redundant_phi.rs | REAL | 352 |
+| rewrite_instruction_kinds | ssa/rewrite_instruction_kinds... | REAL | 223 |
 | infer_mutation_aliasing_ranges | inference/infer_mutation_aliasing_ranges.rs | REAL | 860 |
 | infer_reactive_places | inference/infer_reactive_places.rs | REAL | 465 |
 | aliasing_effects | inference/aliasing_effects.rs | REAL | 98 |
@@ -159,9 +151,9 @@ Previous session work (committed):
 | drop_manual_memoization | inference/drop_manual_memoization.rs | REAL | 125 |
 | inline_iife | inference/inline_iife.rs | DEFERRED | 7 |
 | infer_mutation_aliasing_effects | inference/infer_mutation_aliasing_effects.rs | STUB | 7 |
-| dead_code_elimination | optimization/dead_code_elimination.rs | REAL | 481 |
-| outline_functions | optimization/outline_functions.rs | REAL | 459 |
-| constant_propagation | optimization/constant_propagation.rs | REAL | ~410 |
+| dead_code_elimination | optimization/dead_code_elimination.rs | REAL | 583 |
+| outline_functions | optimization/outline_functions.rs | REAL | 575 |
+| constant_propagation | optimization/constant_propagation.rs | REAL | 415 |
 | optimize_props_method_calls | optimization/optimize_props_method_calls.rs | STUB | 2 |
 | optimize_for_ssr | optimization/optimize_for_ssr.rs | STUB | 2 |
 | outline_jsx | optimization/outline_jsx.rs | STUB | 2 |
@@ -260,3 +252,4 @@ codegen (currently bypasses ReactiveFunction) → oxc_codegen → JS output
 | 2026-03-05 | 84.2 | 29.0 | — | 18 | 28 | SCCP branch folding, phi self-loop fix, catch norm (+3) |
 | 2026-03-05 | 84.2 | 29.6 | — | 18 | 28 | catch space norm, brace/JSX spacing norm (+7) |
 | 2026-03-05 | 84.2 | 31.9 | — | 18 | 28 | closure rewrite, destructuring defaults, dead phi DCE, SSA, scope fixes (+29) |
+| 2026-03-05 | 84.2 | 32.9 | — | 18 | 28 | function outlining, scope output counting, test normalizations (+12) |
