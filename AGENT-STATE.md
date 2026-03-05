@@ -44,7 +44,7 @@ Update the following before stopping:
 
 ## Current Task
 
-**Active work**: CP single-def let propagation attempted and reverted (no gain). Agent exploring next approach.
+**Active work**: Two agents running (~90min without source changes). Likely doing deep fixture analysis / TS source reading. Last source change at 08:04 UTC.
 
 Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363.
 
