@@ -92,6 +92,7 @@ pub fn codegen_hir_function(hir: &HIRFunction, env: &Environment) -> String {
     for (_, decl) in &env.outlined_functions {
         out.push('\n');
         let normalized = normalize_fn_body_text(decl);
+        let normalized = normalize_jsx_self_closing(&normalized);
         let reindented = reindent_multiline(&normalized, "");
         out.push_str(&reindented);
         out.push('\n');
@@ -2840,9 +2841,11 @@ impl<'a> Codegen<'a> {
                     if matches!(fn_type, FunctionExpressionType::Arrow) {
                         let normalized = normalize_arrow_params(&src);
                         let normalized = normalize_fn_body_text(&normalized);
+                        let normalized = normalize_jsx_self_closing(&normalized);
+                        let normalized = normalize_arrow_expr_body(&normalized);
                         return Some(normalized);
                     }
-                    return Some(normalize_fn_body_text(&src));
+                    return Some(normalize_jsx_self_closing(&normalize_fn_body_text(&src)));
                 }
                 // Fallback: emit a stub. This should rarely happen.
                 let async_kw = if lowered_func.func.async_ { "async " } else { "" };
@@ -4539,6 +4542,9 @@ impl<'a> Codegen<'a> {
                 }
             }
         }
+
+        // (No post-processing pruning needed — scope assignments are final.)
+
         map
     }
 }
@@ -4753,6 +4759,88 @@ fn group_by_scope<'a>(
 /// `(a, b) => ...` → unchanged
 /// Normalize function body text:
 ///   1. Single-quoted string literals → double-quoted (e.g. `'foo'` → `"foo"`)
+/// Normalize arrow expression bodies: `=> {\n  return EXPR;\n}` → `=> EXPR`.
+/// Applies when the arrow body has a single return statement.
+fn normalize_arrow_expr_body(src: &str) -> String {
+    // Find `=> {` pattern (possibly with whitespace)
+    if let Some(arrow_pos) = src.find("=>") {
+        let after_arrow = &src[arrow_pos + 2..].trim_start();
+        if after_arrow.starts_with('{') {
+            let body = &after_arrow[1..]; // skip `{`
+            let body = body.trim();
+            // Check if body is exactly `return EXPR;` followed by `}`
+            if body.starts_with("return ") {
+                let rest = &body[7..]; // after "return "
+                // Find the closing `}` by counting braces
+                let mut depth = 1i32;
+                let chars: Vec<char> = rest.chars().collect();
+                let mut semi_pos = None;
+                let mut close_pos = None;
+                for (i, &ch) in chars.iter().enumerate() {
+                    match ch {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                close_pos = Some(i);
+                                break;
+                            }
+                        }
+                        ';' if depth == 1 => {
+                            if semi_pos.is_none() {
+                                semi_pos = Some(i);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if let (Some(semi), Some(close)) = (semi_pos, close_pos) {
+                    // Check that between semi and close is only whitespace
+                    let between: String = chars[semi + 1..close].iter().collect();
+                    if between.trim().is_empty() {
+                        // Single return statement: convert to expression body
+                        let expr: String = chars[..semi].iter().collect();
+                        let prefix = &src[..arrow_pos + 2]; // everything up to and including `=>`
+                        return format!("{} {}", prefix, expr.trim());
+                    }
+                }
+            }
+        }
+    }
+    src.to_string()
+}
+
+/// Collapse whitespace-only JSX children to self-closing: `> </Tag>` → ` />`.
+fn normalize_jsx_self_closing(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut result = String::with_capacity(src.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // Look for `> </` pattern
+        if i + 4 < bytes.len() && bytes[i] == b'>'
+            && bytes[i + 1] == b' '
+            && bytes[i + 2] == b'<'
+            && bytes[i + 3] == b'/'
+        {
+            // Find closing `>`
+            let tag_start = i + 4;
+            if let Some(end_off) = src[tag_start..].find('>') {
+                let tag = &src[tag_start..tag_start + end_off];
+                if !tag.is_empty() && tag.as_bytes()[0].is_ascii_alphabetic()
+                    && tag.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.')
+                {
+                    result.push_str(" />");
+                    i = tag_start + end_off + 1;
+                    continue;
+                }
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
 ///   2. Computed property accesses with simple string keys → dot notation
 ///      (e.g. `obj['key']` → `obj.key`)
 ///
