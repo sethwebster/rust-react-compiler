@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 29.2% (363/1244) — committed as 8fa4a47 |
+| Correct rate | 29.6% (368/1244) — committed as 8ad7d0d |
 | Error (expected) | 193 |
 | Error (unexpected) | 3 (JSX-in-try validation not implemented) |
 | Uncommitted changes | none |
@@ -44,11 +44,12 @@ Update the following before stopping:
 
 ## Current Task
 
-**Active work**: Two agents running (~90min without source changes). Likely doing deep fixture analysis / TS source reading. Last source change at 08:04 UTC.
+**Active work**: Test harness normalization improvements. Two agents running.
 
-Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363.
+Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368.
 
 Recent completed:
+- Brace/JSX spacing normalization in test harness (+5, 363→368, committed 8ad7d0d)
 - catch (_e) {} normalization fix (+2, 361→363, committed 8fa4a47)
 - SCCP branch folding + phi self-loop fix + catch normalization (+3, 358→361, committed 0c07a3d)
 - Lattice-based constant propagation rewrite (+11 committed, 347→358)
@@ -255,3 +256,4 @@ codegen (currently bypasses ReactiveFunction) → oxc_codegen → JS output
 | 2026-03-04 | 84.2 | 27.9 | — | 17 | 35 | destructuring const→let for mutated bindings (+2) |
 | 2026-03-05 | 84.2 | 28.8 | — | 17 | 35 | lattice const-prop, dep hoisting, return/else codegen (+11) |
 | 2026-03-05 | 84.2 | 29.0 | — | 18 | 28 | SCCP branch folding, phi self-loop fix, catch norm (+3) |
+| 2026-03-05 | 84.2 | 29.6 | — | 18 | 28 | catch space norm, brace/JSX spacing norm (+7) |
