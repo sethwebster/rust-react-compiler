@@ -107,8 +107,9 @@ fn normalize_js(js: &str) -> String {
     // Remove empty else blocks: `} else {}` → `}`. An empty else is a no-op.
     // The TS compiler drops these; our passthrough preserves them.
     let result = result.replace("} else {}", "}");
-    // Normalize `catch(_e) {}` → `catch {}`. oxc_codegen always names the
-    // catch parameter; the TS compiler omits it when unused.
+    // Normalize `catch (_e) {}` / `catch(_e) {}` → `catch {}`. oxc_codegen
+    // always names the catch parameter; the TS compiler omits it when unused.
+    let result = result.replace("catch (_e) {}", "catch {}");
     let result = result.replace("catch(_e) {}", "catch {}");
     result
 }
