@@ -35,10 +35,10 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 30.1% (375/1244) — **UNCOMMITTED, +7 from closure-aware const/let rewrite + scope analysis** |
+| Correct rate | 30.1% (375/1244) — **UNCOMMITTED, +7 from closure-aware rewrite + scope analysis + CP** |
 | Error (expected) | 193 |
 | Error (unexpected) | 3 (JSX-in-try validation not implemented) |
-| Uncommitted changes | rewrite_instruction_kinds.rs (recursive closure reassignment), hir_codegen.rs (captured_and_called), Cargo.toml (temp debug binary) |
+| Uncommitted changes | 4 files: rewrite_instruction_kinds (+source scanner), hir_codegen (+captured_and_called), constant_propagation (+SSA temp always-propagate), Cargo.toml (temp bin) |
 
 ---
 
@@ -61,10 +61,10 @@ Recent completed:
 - Destructuring const→let for mutated bindings (+2, 345→347)
 
 **In progress (uncommitted)**:
-- `rewrite_instruction_kinds.rs` — recursive closure reassignment detection (scan nested FunctionExpression/ObjectMethod for StoreContext { Reassign })
-- `hir_codegen.rs` — `captured_and_called` detection: promote variables to named-var when captured by a closure that may be invoked within the scope
+- `rewrite_instruction_kinds.rs` — recursive closure reassignment detection + source-level reassignment scanner for context variables
+- `hir_codegen.rs` — `captured_and_called` detection: promote variables to named-var when captured by a closure invoked within scope
+- `constant_propagation.rs` — always propagate SSA temps (instruction lvalue) regardless of const/let, only restrict named-var tracking to const
 - `Cargo.toml` — temporary `compile_fixture` binary target (debug tool, should not be committed)
-- `pipeline.rs` — moved rewrite_instruction_kinds before DCE (may have been reverted)
 
 **Next priorities** (by impact):
 1. Missing memoization (56 fixtures) — scope inference gaps for optional calls, closures
