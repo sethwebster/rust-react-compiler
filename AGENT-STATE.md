@@ -35,10 +35,10 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 33.0% (410/1244) — clean tree |
+| Correct rate | 33.2% (413/1244) — **UNCOMMITTED, outline_functions.rs (+101), fixtures.rs (+4)** |
 | Error (expected) | 193 |
 | Error (unexpected) | 3 (JSX-in-try validation not implemented) |
-| Uncommitted changes | none |
+| Uncommitted changes | outline_functions.rs (+101), fixtures.rs (+4) |
 
 ---
 
@@ -46,7 +46,7 @@ Update the following before stopping:
 
 **Active work**: Function outlining improvements + scope output counting + test normalizations. Two agents running.
 
-Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 397 → 410 (33.0%).
+Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 397 → 413 (33.2%).
 
 Recent completed (commits since last update):
 - 4656f1e: JSX child braces fix, function expr outlining, normalizations (382/1048)
