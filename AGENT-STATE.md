@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 33.4% (416/1244) |
+| Correct rate | 33.4% (415/1244) |
 | Error (expected) | 191 |
 | Error (unexpected) | 5 (should-error fixtures that pass) |
 | Uncommitted changes | none — clean tree |
@@ -46,7 +46,7 @@ Update the following before stopping:
 
 **Active work**: Test normalizations (null-init, slot counts, arrow expr bodies, JSX self-closing). Two agents running.
 
-Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 397 → 413 → 416 (33.4%).
+Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 397 → 413 → 416 → 415 (33.4%).
 
 Recent commits (this session):
 - 22b442b: let-hoisting normalization, let-sorting, cleanup (389/1048, 415/1244)
@@ -114,6 +114,7 @@ Recent commits (this session):
 ## Completed This Session
 
 Commits (newest first):
+- `1e1c12d` JSX self-closing normalization, arrow expr body in codegen (415/1244, -1 regression)
 - `047bc75` null-init normalization, slot count normalization, print all mismatches (390/1048, 416/1244)
 - `22b442b` let-hoisting normalization, let-sorting, cleanup (389/1048, 415/1244)
 - `1fcd233` TSX parsing + type annotation stripping in outlining, as-const norm (387/1048, +5 fixtures)
