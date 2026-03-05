@@ -507,6 +507,20 @@ fn count_scope_outputs(hir: &HIRFunction, env: &Environment) -> HashMap<ScopeId,
                             scope_instr_lvalue_ids.insert(instr.lvalue.identifier.0);
                         }
                     }
+                    // (c) Instructions within scope range that consume scope-owned operands
+                    // are themselves scope-internal. This handles array/call/JSX constructions.
+                    if !scope_instr_lvalue_ids.contains(&instr.lvalue.identifier.0) {
+                        let in_range = instr.id.0 >= scope.range.start.0
+                            && instr.id.0 < scope.range.end.0;
+                        if in_range {
+                            let ops = each_instruction_value_operand(&instr.value);
+                            let any_scope_operand = ops.iter()
+                                .any(|op| scope_instr_lvalue_ids.contains(&op.identifier.0));
+                            if any_scope_operand {
+                                scope_instr_lvalue_ids.insert(instr.lvalue.identifier.0);
+                            }
+                        }
+                    }
                 }
             }
             if scope_instr_lvalue_ids.len() == before { break; }
@@ -549,10 +563,6 @@ fn count_scope_outputs(hir: &HIRFunction, env: &Environment) -> HashMap<ScopeId,
                 ))
                 .unwrap_or(true);
             if !is_transparent {
-                if std::env::var("RC_DEBUG2").is_ok() {
-                    let kind = instr_opt.map(|i| format!("{:?}", std::mem::discriminant(&i.value))).unwrap_or_else(|| "None".to_string());
-                    eprintln!("[count_outputs] scope {:?} counting lv_id={} ({}) as output", sid.0, lv_id, kind);
-                }
                 n_ssa_outputs += 1;
             }
         }
@@ -951,6 +961,36 @@ impl<'a> Codegen<'a> {
             let _ = writeln!(out, "}};");
         } else {
             let _ = writeln!(out, "}}");
+        }
+        // Post-process: fix _c(N) to match actual max $[M] usage.
+        // Our pre-computed num_scopes may overcount output slots.
+        if self.num_scopes > 0 {
+            let mut max_slot: i32 = -1;
+            let bytes = out.as_bytes();
+            let mut i = 0;
+            while i + 2 < bytes.len() {
+                if bytes[i] == b'$' && bytes[i + 1] == b'[' {
+                    let start = i + 2;
+                    let mut j = start;
+                    while j < bytes.len() && bytes[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                    if j > start && j < bytes.len() && bytes[j] == b']' {
+                        if let Ok(n) = out[start..j].parse::<i32>() {
+                            if n > max_slot { max_slot = n; }
+                        }
+                    }
+                    i = j;
+                } else {
+                    i += 1;
+                }
+            }
+            let actual_slots = (max_slot + 1) as usize;
+            if actual_slots != self.num_scopes && actual_slots > 0 {
+                let old = format!("_c({});", self.num_scopes);
+                let new = format!("_c({});", actual_slots);
+                out = out.replacen(&old, &new, 1);
+            }
         }
         out
     }

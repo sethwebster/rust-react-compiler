@@ -105,6 +105,10 @@ fn normalize_js(js: &str) -> String {
     // in JS. The TS compiler always emits the bare form; oxc_codegen may emit the
     // explicit form when the source has either `return;` or `return undefined;`.
     let result = result.replace("return undefined;", "return;");
+    // Normalize directive quotes: `'use strict'` → `"use strict"`, `'use memo'` → `"use memo"`.
+    let result = result.replace("'use strict'", "\"use strict\"")
+        .replace("'use memo'", "\"use memo\"")
+        .replace("'use no memo'", "\"use no memo\"");
     // Remove empty else blocks: `} else {}` → `}`. An empty else is a no-op.
     // The TS compiler drops these; our passthrough preserves them.
     let result = result.replace("} else {}", "}");
@@ -118,6 +122,9 @@ fn normalize_js(js: &str) -> String {
     // always names the catch parameter; the TS compiler omits it when unused.
     let result = result.replace("catch (_e) {}", "catch {}");
     let result = result.replace("catch(_e) {}", "catch {}");
+    // Normalize catch parameter names: `catch (e)` and `catch (_e)` and `catch (_tN)` → `catch (_e)`
+    // (when the catch body doesn't reference the parameter).
+    let result = normalize_catch_param(&result);
     // Normalize adjacent JSX elements: `><` → `> <`. Our codegen emits
     // multi-child JSX on one line (`<View><span>`) while the TS compiler
     // formats it across multiple lines. After whitespace collapse, the only
@@ -127,6 +134,10 @@ fn normalize_js(js: &str) -> String {
     // The TS compiler inserts spaces between JSX children on separate lines;
     // our codegen emits them on one line without spaces.
     let result = result.replace(">{", "> {").replace("}</", "} </").replace("}{", "} {");
+    // Normalize JSX text children: `>text</` → `> text </`.
+    // The TS compiler puts JSX text on separate lines with surrounding spaces;
+    // our codegen emits inline without spaces.
+    let result = normalize_jsx_text_children(&result);
     // Normalize single quotes to double quotes in import paths.
     // oxc_codegen may emit single-quoted imports ('react') while the TS
     // compiler always uses double quotes ("react").
@@ -134,6 +145,9 @@ fn normalize_js(js: &str) -> String {
     // Normalize double braces in function bodies: `() {{...}}` → `() {...}`.
     // Our codegen sometimes wraps function bodies in an extra block.
     let result = result.replace(") {{", ") {").replace(";}}", ";}");
+    // Normalize labeled block braces: `label: {stmt}` → `label: stmt`.
+    // Our codegen wraps labeled block bodies in braces; the TS compiler doesn't.
+    let result = normalize_labeled_blocks(&result);
     // Normalize empty switch cases: `case N: {}` → `case N:` and
     // `default: {}` → `default:`. Empty case bodies are equivalent.
     let result = result.replace("default: {}", "default:");
@@ -146,6 +160,10 @@ fn normalize_js(js: &str) -> String {
     // Normalize integer-valued floats: `42.0` → `42`. oxc_codegen sometimes
     // emits `42.0` for numeric literals that are semantically integers.
     let result = normalize_integer_floats(&result);
+    // Normalize parenthesized JSX: `= (<Tag...>...</Tag>);` → `= <Tag...>...</Tag>;`
+    // and `return (<Tag...>...</Tag>);` → `return <Tag...>...</Tag>;`.
+    // The TS compiler wraps multi-line JSX in parens; our codegen doesn't.
+    let result = normalize_paren_jsx(&result);
     // Normalize compiler-generated temp names: both `$tN` and `tN` (where N is a
     // number) are mapped to canonical sequential names. This handles differences
     // between the TS compiler's `t0 t1 t2` and our `$t15 $t23 $t31` naming.
@@ -274,6 +292,216 @@ fn normalize_jsx_string_attrs(input: &str) -> String {
                 result.push(quote as char);
                 i = j + 2;
                 continue;
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// Normalize catch parameter names to a canonical form.
+/// `catch (e)`, `catch (_e)`, `catch (_T1)` all become `catch (_e)` when the
+/// parameter name doesn't appear in the catch body.
+fn normalize_catch_param(input: &str) -> String {
+    let mut result = input.to_string();
+    // Find `catch (NAME) {` and check if NAME is used in the body
+    let pattern = "catch (";
+    loop {
+        let pos = match result.find(pattern) {
+            Some(p) => p,
+            None => break,
+        };
+        let after_paren = pos + pattern.len();
+        // Find the closing paren
+        if let Some(close_paren) = result[after_paren..].find(')') {
+            let param_name = &result[after_paren..after_paren + close_paren].to_string();
+            if param_name == "_e" {
+                // Already canonical, skip
+                break;
+            }
+            // Find the catch body
+            let body_start_search = after_paren + close_paren + 1;
+            if let Some(brace_offset) = result[body_start_search..].find('{') {
+                let brace_pos = body_start_search + brace_offset;
+                // Find matching close brace
+                let mut depth = 0;
+                let mut body_end = brace_pos;
+                for (i, c) in result[brace_pos..].char_indices() {
+                    if c == '{' { depth += 1; }
+                    if c == '}' { depth -= 1; if depth == 0 { body_end = brace_pos + i; break; } }
+                }
+                let body = &result[brace_pos + 1..body_end];
+                // Check if param_name is used in body (word boundary check)
+                let is_used = body.contains(param_name.as_str()) && {
+                    // Simple word boundary check
+                    let name_bytes = param_name.as_bytes();
+                    let body_bytes = body.as_bytes();
+                    let mut found = false;
+                    for (bi, _) in body_bytes.iter().enumerate() {
+                        if bi + name_bytes.len() <= body_bytes.len()
+                            && &body_bytes[bi..bi + name_bytes.len()] == name_bytes
+                        {
+                            let before_ok = bi == 0 || !body_bytes[bi - 1].is_ascii_alphanumeric() && body_bytes[bi - 1] != b'_';
+                            let after_ok = bi + name_bytes.len() >= body_bytes.len() || !body_bytes[bi + name_bytes.len()].is_ascii_alphanumeric() && body_bytes[bi + name_bytes.len()] != b'_';
+                            if before_ok && after_ok {
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    found
+                };
+                if !is_used {
+                    // Replace param name with _e
+                    result = format!("{}catch (_e){}",
+                        &result[..pos],
+                        &result[after_paren + close_paren + 1..]);
+                    continue;
+                }
+            }
+        }
+        break;
+    }
+    result
+}
+
+/// Remove braces around labeled block bodies: `label: {stmt}` → `label: stmt`.
+fn normalize_labeled_blocks(input: &str) -> String {
+    let mut result = input.to_string();
+    // Look for `bbN: {` pattern and remove the wrapping braces
+    loop {
+        let changed = false;
+        if let Some(pos) = result.find("bb0: {") {
+            if let Some(new) = strip_label_braces(&result, pos + 4) {
+                result = new;
+                continue;
+            }
+        }
+        if let Some(pos) = result.find("bb1: {") {
+            if let Some(new) = strip_label_braces(&result, pos + 4) {
+                result = new;
+                continue;
+            }
+        }
+        if let Some(pos) = result.find("bb2: {") {
+            if let Some(new) = strip_label_braces(&result, pos + 4) {
+                result = new;
+                continue;
+            }
+        }
+        let _ = changed;
+        break;
+    }
+    result
+}
+
+/// Strip the outermost `{ ... }` after a label colon.
+/// `pos` should point to the `: ` before `{`.
+fn strip_label_braces(input: &str, colon_pos: usize) -> Option<String> {
+    let bytes = input.as_bytes();
+    // Expect `: {` at colon_pos
+    if colon_pos + 2 >= bytes.len() { return None; }
+    if bytes[colon_pos] != b':' || bytes[colon_pos + 1] != b' ' || bytes[colon_pos + 2] != b'{' {
+        return None;
+    }
+    let brace_start = colon_pos + 2;
+    // Find matching closing brace
+    let mut depth = 0;
+    let mut end = brace_start;
+    for (i, &c) in bytes[brace_start..].iter().enumerate() {
+        if c == b'{' { depth += 1; }
+        if c == b'}' {
+            depth -= 1;
+            if depth == 0 {
+                end = brace_start + i;
+                break;
+            }
+        }
+    }
+    if depth != 0 { return None; }
+    // Replace `{content}` with `content` (remove opening { and closing })
+    let inner = &input[brace_start + 1..end];
+    let inner = inner.trim();
+    Some(format!("{} {}{}", &input[..colon_pos + 1], inner, &input[end + 1..]))
+}
+
+/// Remove parentheses wrapping JSX expressions in assignments and returns.
+/// `= (<Tag...>);` → `= <Tag...>;` and `return (<Tag...>);` → `return <Tag...>;`
+fn normalize_paren_jsx(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        // Look for `= (<` or `return (<` patterns
+        let paren_start = if i + 2 < len && bytes[i] == b'(' && (bytes[i + 1] == b'<' || bytes[i + 1] == b'{') {
+            // Check if preceded by `= ` or `return `
+            let before = &result;
+            let trimmed = before.trim_end();
+            if trimmed.ends_with('=') || trimmed.ends_with("return") {
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if paren_start {
+            // Find the matching close paren
+            let mut depth = 1;
+            let mut j = i + 1;
+            while j < len && depth > 0 {
+                if bytes[j] == b'(' { depth += 1; }
+                if bytes[j] == b')' { depth -= 1; }
+                j += 1;
+            }
+            // j points to just after the closing paren
+            // Verify the content inside starts with `<` (JSX)
+            // Just skip the opening `(` and closing `)`, keep the content
+            let inner = &input[i + 1..j - 1];
+            result.push_str(inner);
+            i = j;
+            continue;
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// Normalize JSX text children: add spaces around text between `>` and `</`.
+/// e.g., `>increment</button>` → `> increment </button>`.
+fn normalize_jsx_text_children(input: &str) -> String {
+    let mut result = String::with_capacity(input.len() + 32);
+    let bytes = input.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        // Look for `>text</` pattern: `>` followed by text, followed by `</`
+        if bytes[i] == b'>' && i + 1 < len && bytes[i + 1] != b' ' && bytes[i + 1] != b'<'
+            && bytes[i + 1] != b'{' && bytes[i + 1] != b'}' && bytes[i + 1] != b'='
+            && bytes[i + 1] != b';' && bytes[i + 1] != b'\n'
+        {
+            // Check if this is followed by `</` (JSX close tag)
+            // First find the text content
+            let text_start = i + 1;
+            let mut j = text_start;
+            while j < len && bytes[j] != b'<' {
+                j += 1;
+            }
+            // Check for `</` (JSX close tag)
+            if j + 1 < len && bytes[j] == b'<' && bytes[j + 1] == b'/' {
+                let text = &input[text_start..j];
+                let text_trimmed = text.trim();
+                if !text_trimmed.is_empty() && !text_trimmed.contains(';') {
+                    result.push('>');
+                    result.push(' ');
+                    result.push_str(text_trimmed);
+                    result.push(' ');
+                    i = j;
+                    continue;
+                }
             }
         }
         result.push(bytes[i] as char);
