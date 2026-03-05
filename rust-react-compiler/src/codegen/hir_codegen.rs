@@ -4325,16 +4325,16 @@ impl<'a> Codegen<'a> {
                 return value.clone();
             }
         }
-        // Check if this child is a nested JsxExpression or JsxFragment (no braces needed).
-        if let Some(instr) = self.instr_map.get(&place.identifier.0) {
-            if matches!(&instr.value,
-                InstructionValue::JsxExpression { .. } | InstructionValue::JsxFragment { .. }
-            ) {
-                return self.expr(place);
-            }
+        // Check if this child is a nested JsxExpression or JsxFragment that will be
+        // emitted inline (not cached in a scope variable). Only skip braces when the
+        // actual emitted expression starts with `<` — i.e., it's inline JSX, not a
+        // variable reference like `t0` that happens to hold JSX.
+        let expr = self.expr(place);
+        if expr.starts_with('<') {
+            return expr;
         }
         // Expression child: wrap in {}.
-        format!("{{{}}}", self.expr(place))
+        format!("{{{}}}", expr)
     }
 
     fn call_arg(&self, arg: &CallArg) -> String {

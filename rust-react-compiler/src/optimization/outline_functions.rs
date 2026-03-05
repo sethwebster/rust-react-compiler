@@ -135,11 +135,6 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
                 ..
             } = &mut instr.value
             {
-                // Only outline arrow functions.
-                if *fn_type != FunctionExpressionType::Arrow {
-                    continue;
-                }
-
                 // Skip IIFEs — they are immediately called and should not be outlined.
                 if iife_fn_ids.contains(&instr.lvalue.identifier.0) {
                     continue;
@@ -150,9 +145,17 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
                     continue;
                 }
 
-                // Parse the arrow function to get param names and body text.
-                let Some(info) = parse_arrow_info(&src) else {
-                    continue;
+                // Parse the function to get param names and body text.
+                let info = if *fn_type == FunctionExpressionType::Arrow {
+                    match parse_arrow_info(&src) {
+                        Some(i) => i,
+                        None => continue,
+                    }
+                } else {
+                    match parse_function_expr_info(&src) {
+                        Some(i) => i,
+                        None => continue,
+                    }
                 };
 
                 // Check if any free variable in the body is a component-local.
@@ -310,6 +313,60 @@ fn parse_arrow_info(src: &str) -> Option<ArrowInfo> {
     })
 }
 
+/// Parse a regular function expression: `function(a, b) { body }` or `function name(a) { body }`.
+fn parse_function_expr_info(src: &str) -> Option<ArrowInfo> {
+    use oxc_allocator::Allocator;
+    use oxc_ast::ast::{BindingPatternKind, Expression, Statement};
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    let alloc = Allocator::default();
+    // Wrap in a variable so oxc treats it as an expression.
+    let stmt_src = format!("let _ = {};", src);
+    let parsed = Parser::new(&alloc, &stmt_src, SourceType::jsx()).parse();
+    if !parsed.errors.is_empty() {
+        return None;
+    }
+
+    let stmt = parsed.program.body.first()?;
+    let func_expr = match stmt {
+        Statement::VariableDeclaration(vd) => {
+            let decl = vd.declarations.first()?;
+            let init = decl.init.as_ref()?;
+            match init {
+                Expression::FunctionExpression(f) => f.as_ref(),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+
+    let mut param_names = Vec::new();
+    for param in &func_expr.params.items {
+        match &param.pattern.kind {
+            BindingPatternKind::BindingIdentifier(id) => {
+                param_names.push(id.name.to_string());
+            }
+            _ => return None,
+        }
+    }
+    if func_expr.params.rest.is_some() {
+        return None;
+    }
+
+    let body = func_expr.body.as_ref()?;
+    let prefix_len: usize = "let _ = ".len();
+    let body_start = (body.span.start as usize).saturating_sub(prefix_len);
+    let body_end = (body.span.end as usize).saturating_sub(prefix_len);
+    let body_text = src.get(body_start..body_end)?.to_string();
+
+    Some(ArrowInfo {
+        param_names,
+        body_text,
+        is_expr_body: false, // Regular functions always have block body.
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Identifier helpers
 // ---------------------------------------------------------------------------
@@ -366,7 +423,11 @@ fn extract_free_variables(body: &str, param_names: &[String]) -> HashSet<String>
             let tok = &body[start..i];
             // Property access: preceded by `.`
             let is_prop = start > 0 && bytes[start - 1] == b'.';
-            if !is_prop && !is_js_keyword(tok) && !param_set.contains(tok) {
+            // Object key: followed by `:` (skip whitespace) — e.g. `{x: value}`
+            let mut j = i;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() { j += 1; }
+            let is_obj_key = j < bytes.len() && bytes[j] == b':';
+            if !is_prop && !is_obj_key && !is_js_keyword(tok) && !param_set.contains(tok) {
                 free_vars.insert(tok.to_string());
             }
         } else {

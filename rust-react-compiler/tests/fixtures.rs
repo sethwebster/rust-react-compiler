@@ -109,6 +109,12 @@ fn normalize_js(js: &str) -> String {
     let result = result.replace("'use strict'", "\"use strict\"")
         .replace("'use memo'", "\"use memo\"")
         .replace("'use no memo'", "\"use no memo\"");
+    // Remove trailing commas before closing parens/brackets: `,)` → `)`, `,]` → `]`.
+    // The TS/Babel compiler sometimes emits trailing commas; our codegen doesn't.
+    let result = result.replace(",)", ")").replace(",]", "]");
+    // Normalize CommonJS require import to ESM import for compiler runtime.
+    // `const {c: _cN} = require("react/compiler-runtime");` → `import {c as _cN} from "react/compiler-runtime";`
+    let result = normalize_cjs_import(&result);
     // Remove empty else blocks: `} else {}` → `}`. An empty else is a no-op.
     // The TS compiler drops these; our passthrough preserves them.
     let result = result.replace("} else {}", "}");
@@ -138,6 +144,9 @@ fn normalize_js(js: &str) -> String {
     // The TS compiler puts JSX text on separate lines with surrounding spaces;
     // our codegen emits inline without spaces.
     let result = normalize_jsx_text_children(&result);
+    // Collapse `X .Y` → `X.Y` for member access chains split across lines.
+    // oxc_codegen may emit `.call(` on a new line which collapses to ` .call(`.
+    let result = normalize_member_access_spaces(&result);
     // Normalize single quotes to double quotes in import paths.
     // oxc_codegen may emit single-quoted imports ('react') while the TS
     // compiler always uses double quotes ("react").
@@ -291,6 +300,36 @@ fn normalize_jsx_string_attrs(input: &str) -> String {
                 result.push_str(&input[start..j]);
                 result.push(quote as char);
                 i = j + 2;
+                continue;
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// Collapse ` .` → `.` for member access chains that were split across lines.
+/// After whitespace collapse, `foo\n  .bar()` becomes `foo .bar()`. The TS
+/// compiler emits `foo.bar()` without the space. Only collapse when preceded
+/// by `)`, `]`, or an identifier character (to avoid collapsing operators).
+fn normalize_member_access_spaces(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        if bytes[i] == b' ' && i + 1 < len && bytes[i + 1] == b'.' {
+            // Check what precedes the space
+            let prev_char = if i > 0 { bytes[i - 1] } else { b' ' };
+            // Check what follows the dot (should be an identifier char, not another dot or digit for `..` or float)
+            let after_dot = if i + 2 < len { bytes[i + 2] } else { b' ' };
+            let is_member_access = (prev_char.is_ascii_alphanumeric() || prev_char == b'_'
+                || prev_char == b')' || prev_char == b']' || prev_char == b'$')
+                && after_dot.is_ascii_alphabetic();
+            if is_member_access {
+                // Skip the space, emit just the dot
+                i += 1;
                 continue;
             }
         }
@@ -513,6 +552,19 @@ fn normalize_jsx_text_children(input: &str) -> String {
 /// Normalize import quotes: `from 'react'` → `from "react"`.
 /// After whitespace normalization, single-quoted import specifiers can
 /// differ from the double-quoted output of the TS compiler.
+fn normalize_cjs_import(input: &str) -> String {
+    // `const {c: _cN} = require("react/compiler-runtime");` → `import {c as _cN} from "react/compiler-runtime";`
+    // Also handle without N: `const {c: _c} = require(...)`
+    let mut result = input.to_string();
+    // Try patterns with _c and _c2 etc.
+    for suffix in &["", "2", "3", "4", "5"] {
+        let from_pat = format!("const {{c: _c{}}} = require(\"react/compiler-runtime\");", suffix);
+        let to_pat = format!("import {{c as _c{}}} from \"react/compiler-runtime\";", suffix);
+        result = result.replace(&from_pat, &to_pat);
+    }
+    result
+}
+
 fn normalize_import_quotes(input: &str) -> String {
     // Replace `from '...'` with `from "..."`
     let mut result = input.to_string();
