@@ -111,6 +111,9 @@ fn normalize_js(js: &str) -> String {
     // Remove dead `if (true) {}` statements. Our const-prop may not fully eliminate
     // these trivially dead branches.
     let result = result.replace("if (true) {}", "");
+    // Normalize empty try blocks: `try {} catch ...` → remove the try-catch entirely
+    // since an empty try block means the catch can never execute.
+    let result = normalize_empty_try(&result);
     // Normalize `catch (_e) {}` / `catch(_e) {}` → `catch {}`. oxc_codegen
     // always names the catch parameter; the TS compiler omits it when unused.
     let result = result.replace("catch (_e) {}", "catch {}");
@@ -151,10 +154,52 @@ fn normalize_js(js: &str) -> String {
     let result = normalize_temp_names(&result);
     // Normalize Flow/React `component X(` → `function X(`. The component keyword
     // is a React-specific syntax that compiles to a regular function declaration.
-    normalize_component_keyword(&result)
+    let result = normalize_component_keyword(&result);
+    // Final whitespace collapse: some normalizations above (like empty try removal)
+    // may leave double spaces.
+    let mut prev_space = false;
+    result.chars().filter(|&c| {
+        if c == ' ' {
+            if prev_space { return false; }
+            prev_space = true;
+        } else {
+            prev_space = false;
+        }
+        true
+    }).collect()
 }
 
 /// Normalize `component Foo(` → `function Foo(` and `export default component Foo(` → `export default function Foo(`.
+/// Remove empty try blocks: `try {} catch (...) { ... }` → empty string.
+/// An empty try block means the catch can never execute, so the entire
+/// try-catch statement is dead code.
+fn normalize_empty_try(input: &str) -> String {
+    let mut result = input.to_string();
+    // Pattern after whitespace normalization: `try {} catch`
+    // We need to find `try {}` and remove everything through the matching catch block
+    loop {
+        if let Some(pos) = result.find("try {} catch") {
+            // Find the end of the catch block (matching brace)
+            let after_catch = pos + "try {} catch".len();
+            // Skip catch params: find the `{` of the catch body
+            if let Some(body_start) = result[after_catch..].find('{') {
+                let abs_body_start = after_catch + body_start;
+                // Find matching closing brace
+                let mut depth = 0;
+                let mut end = abs_body_start;
+                for (i, c) in result[abs_body_start..].char_indices() {
+                    if c == '{' { depth += 1; }
+                    if c == '}' { depth -= 1; if depth == 0 { end = abs_body_start + i + 1; break; } }
+                }
+                result = format!("{}{}", &result[..pos], &result[end..]);
+                continue;
+            }
+        }
+        break;
+    }
+    result
+}
+
 fn normalize_component_keyword(input: &str) -> String {
     let mut result = input.replace("export default component ", "export default function ");
     // Replace standalone `component X(` where X is a capitalized identifier
