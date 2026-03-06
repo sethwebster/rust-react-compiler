@@ -76,6 +76,10 @@ pub fn infer_reactive_places(hir: &mut HIRFunction) {
         }
     }
 
+    if std::env::var("RC_DEBUG").is_ok() {
+        let block_ids: Vec<u32> = hir.body.blocks.keys().map(|k| k.0).collect();
+        eprintln!("[reactive_places] all block ids: {:?}", block_ids);
+    }
     // Seed: all params are reactive.
     for param in &hir.params {
         match param {
@@ -167,7 +171,29 @@ pub fn infer_reactive_places(hir: &mut HIRFunction) {
                     if let Some(test_block) = hir.body.blocks.get(test_block_id) {
                         let test_reactive = test_block.instructions.last()
                             .map_or(false, |i| reactive.contains(&i.lvalue.identifier));
-                        if test_reactive {
+                        // Also check if any instruction in the loop body is reactive.
+                        let body_reactive = if !test_reactive {
+                            let mut found = false;
+                            let mut visited: HashSet<BlockId> = HashSet::new();
+                            let mut work = vec![*loop_block_id];
+                            while let Some(bk) = work.pop() {
+                                if bk == *fallthrough || bk == *test_block_id || !visited.insert(bk) { continue; }
+                                if let Some(blk) = hir.body.blocks.get(&bk) {
+                                    for instr in &blk.instructions {
+                                        if reactive.contains(&instr.lvalue.identifier) {
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                    if found { break; }
+                                    for &succ in blk.terminal.successors().iter() {
+                                        work.push(succ);
+                                    }
+                                }
+                            }
+                            found
+                        } else { false };
+                        if test_reactive || body_reactive {
                             control_reactive_blocks.insert(*fallthrough);
                             // Strategy B: vars assigned in loop body are reactive.
                             let mut visited_branch: HashSet<BlockId> = HashSet::new();
@@ -188,11 +214,42 @@ pub fn infer_reactive_places(hir: &mut HIRFunction) {
                         }
                     }
                 }
-                Terminal::For { test: test_block_id, loop_: loop_block_id, fallthrough, .. } => {
+                Terminal::For { test: test_block_id, update, loop_: loop_block_id, fallthrough, .. } => {
                     if let Some(test_block) = hir.body.blocks.get(test_block_id) {
                         let test_reactive = test_block.instructions.last()
                             .map_or(false, |i| reactive.contains(&i.lvalue.identifier));
-                        if test_reactive {
+                        // Also check if the update block or any block reachable from the loop body
+                        // (up to fallthrough) contains reactive instructions. This handles cases
+                        // like `for (let i = 0; i < 10; i += props.update)` where the update
+                        // expression uses reactive values but the test instruction itself hasn't
+                        // been marked reactive yet (phi chain hasn't propagated fully).
+                        let update_reactive = if !test_reactive {
+                            let mut found = false;
+                            let mut visited: HashSet<BlockId> = HashSet::new();
+                            let mut work = Vec::new();
+                            if let Some(u) = update { work.push(*u); }
+                            work.push(*loop_block_id);
+                            while let Some(bk) = work.pop() {
+                                if bk == *fallthrough || bk == *test_block_id || !visited.insert(bk) { continue; }
+                                if let Some(blk) = hir.body.blocks.get(&bk) {
+                                    for instr in &blk.instructions {
+                                        if reactive.contains(&instr.lvalue.identifier) {
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                    if found { break; }
+                                    for &succ in blk.terminal.successors().iter() {
+                                        work.push(succ);
+                                    }
+                                }
+                            }
+                            found
+                        } else {
+                            false
+                        };
+                        let loop_is_reactive = test_reactive || update_reactive;
+                        if loop_is_reactive {
                             control_reactive_blocks.insert(*fallthrough);
                             let mut visited_branch: HashSet<BlockId> = HashSet::new();
                             let mut work = vec![*loop_block_id];
@@ -230,6 +287,11 @@ pub fn infer_reactive_places(hir: &mut HIRFunction) {
                 } else {
                     false
                 };
+                if std::env::var("RC_DEBUG").is_ok() {
+                    let ops: Vec<(u32, u32, bool)> = phi.operands.iter().map(|(blk, op)| (blk.0, op.identifier.0, reactive.contains(&op.identifier))).collect();
+                    eprintln!("[reactive_places] phi block={:?} result={} data_reactive={} ctrl_reactive={} ops={:?}",
+                        bid.0, phi.place.identifier.0, data_reactive, ctrl_reactive, ops);
+                }
                 if data_reactive || ctrl_reactive {
                     reactive.insert(phi.place.identifier);
                 }

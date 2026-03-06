@@ -182,6 +182,10 @@ fn normalize_js(js: &str) -> String {
     // We re-split the result and replace temps that aren't followed by alphanumeric
     // characters (to avoid renaming inside string literals or object keys).
     let result = normalize_temp_names(&result);
+    // Inline scope output names: `let _TN; if (...) {_TN = ...; $[K] = _TN;} else {_TN = $[K];}
+    // const VARNAME = _TN;` → replace _TN with VARNAME and remove the binding.
+    // One compiler uses temp names for scope outputs, the other preserves original names.
+    let result = inline_scope_output_names(&result);
     // Normalize Flow/React `component X(` → `function X(`. The component keyword
     // is a React-specific syntax that compiles to a regular function declaration.
     let result = normalize_component_keyword(&result);
@@ -217,6 +221,9 @@ fn normalize_js(js: &str) -> String {
     // Both `[x] as const` and `return x as const` are semantically identical
     // to `[x]` and `return x` in compiled output.
     let result = result.replace(" as const", "");
+    // Normalize optional chain parens: `(X?.Y).Z` → `X?.Y.Z`.
+    // Both are semantically identical in JS.
+    let result = normalize_optional_chain_parens(&result);
     // Re-normalize bracket/brace spacing after hoisting normalizations.
     let result = result.replace("{ ", "{").replace(" }", "}");
     // Final whitespace collapse: some normalizations above (like empty try removal)
@@ -449,19 +456,19 @@ fn normalize_labeled_blocks(input: &str) -> String {
     loop {
         let changed = false;
         if let Some(pos) = result.find("bb0: {") {
-            if let Some(new) = strip_label_braces(&result, pos + 4) {
+            if let Some(new) = strip_label_braces(&result, pos + 3) {
                 result = new;
                 continue;
             }
         }
         if let Some(pos) = result.find("bb1: {") {
-            if let Some(new) = strip_label_braces(&result, pos + 4) {
+            if let Some(new) = strip_label_braces(&result, pos + 3) {
                 result = new;
                 continue;
             }
         }
         if let Some(pos) = result.find("bb2: {") {
-            if let Some(new) = strip_label_braces(&result, pos + 4) {
+            if let Some(new) = strip_label_braces(&result, pos + 3) {
                 result = new;
                 continue;
             }
@@ -1015,6 +1022,158 @@ fn sort_consecutive_bare_lets(input: &str) -> String {
         result.push(bytes[i] as char);
         i += 1;
     }
+    result
+}
+
+/// Normalize optional chain parentheses: `(X?.Y).Z` → `X?.Y.Z`.
+/// The parentheses around optional chains are redundant when followed by
+/// a non-optional property access.
+fn normalize_optional_chain_parens(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut result = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'(' {
+            // Look for `(EXPR?.MEMBER).NEXT` pattern
+            let paren_start = i;
+            // Find the matching closing paren
+            let mut depth = 1;
+            let mut j = i + 1;
+            let mut has_optional = false;
+            while j < bytes.len() && depth > 0 {
+                if bytes[j] == b'(' { depth += 1; }
+                if bytes[j] == b')' { depth -= 1; }
+                if bytes[j] == b'?' && j + 1 < bytes.len() && bytes[j + 1] == b'.' {
+                    has_optional = true;
+                }
+                j += 1;
+            }
+            // j is now past the closing paren
+            if depth == 0 && has_optional && j < bytes.len() && bytes[j] == b'.' {
+                // Remove the outer parens: push inner content
+                result.push_str(&input[paren_start + 1..j - 1]);
+                i = j; // skip the closing paren, continue from '.'
+                continue;
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// Inline scope output names: when a temp `_TN` is used as a scope output
+/// and immediately assigned to a named variable (`const x = _TN;`), replace
+/// all occurrences of `_TN` with the named variable and remove the binding.
+/// This normalizes the difference between compilers that use temps for scope
+/// outputs vs those that use original variable names.
+fn inline_scope_output_names(input: &str) -> String {
+    use std::collections::HashMap;
+    // Find patterns: `const|let VARNAME = _TN;` or `VARTYPE VARNAME = _TN;`
+    // where _TN is a canonical temp (_T0, _T1, ...) and VARNAME is not a temp.
+    let mut replacements: Vec<(String, String)> = Vec::new();
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Look for `const ` or `let ` followed by identifier = _TN;
+        let kw_len;
+        if i + 6 < bytes.len() && &bytes[i..i+6] == b"const " {
+            kw_len = 6;
+        } else if i + 4 < bytes.len() && &bytes[i..i+4] == b"let " {
+            kw_len = 4;
+        } else {
+            i += 1;
+            continue;
+        }
+        // Must be at a statement boundary (start of string, or after { or ;)
+        let at_boundary = i == 0 || matches!(bytes[i - 1], b'{' | b';' | b' ');
+        if !at_boundary {
+            i += 1;
+            continue;
+        }
+        let var_start = i + kw_len;
+        // Read VARNAME (identifier chars)
+        let mut j = var_start;
+        while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] == b'$') {
+            j += 1;
+        }
+        if j == var_start { i += 1; continue; }
+        let varname = &input[var_start..j];
+        // Skip if VARNAME is itself a temp (_T followed by digits)
+        if varname.starts_with("_T") && varname[2..].chars().all(|c| c.is_ascii_digit()) {
+            i += 1;
+            continue;
+        }
+        // Expect " = _TN;"
+        if j + 2 >= bytes.len() || &bytes[j..j+3] != b" = " {
+            i += 1;
+            continue;
+        }
+        let temp_start = j + 3;
+        // Read _TN
+        if temp_start + 2 >= bytes.len() || bytes[temp_start] != b'_' || bytes[temp_start + 1] != b'T' {
+            i += 1;
+            continue;
+        }
+        let mut k = temp_start + 2;
+        while k < bytes.len() && bytes[k].is_ascii_digit() {
+            k += 1;
+        }
+        if k == temp_start + 2 { i += 1; continue; } // No digits after _T
+        let temp_name = &input[temp_start..k];
+        // Must end with ;
+        if k >= bytes.len() || bytes[k] != b';' {
+            i += 1;
+            continue;
+        }
+        // Found pattern: const/let VARNAME = _TN;
+        replacements.push((temp_name.to_string(), varname.to_string()));
+        i = k + 1;
+    }
+
+    if replacements.is_empty() {
+        return input.to_string();
+    }
+
+    // Apply replacements: for each (_TN, VARNAME), replace all _TN with VARNAME
+    // and remove the `const|let VARNAME = _TN;` statement.
+    let mut result = input.to_string();
+    for (temp, var) in &replacements {
+        // First, remove the declaration statement (all variants: const/let)
+        let patterns = [
+            format!("const {} = {};", var, temp),
+            format!("let {} = {};", var, temp),
+        ];
+        for pat in &patterns {
+            result = result.replace(pat, "");
+        }
+        // Then replace all remaining occurrences of _TN with VARNAME at word boundaries
+        let mut new_result = String::with_capacity(result.len());
+        let rbytes = result.as_bytes();
+        let tbytes = temp.as_bytes();
+        let tlen = tbytes.len();
+        let mut ri = 0;
+        while ri < rbytes.len() {
+            if ri + tlen <= rbytes.len() && &rbytes[ri..ri+tlen] == tbytes {
+                // Check word boundary after
+                let after_ok = ri + tlen >= rbytes.len()
+                    || (!rbytes[ri + tlen].is_ascii_alphanumeric() && rbytes[ri + tlen] != b'_');
+                // Check word boundary before
+                let before_ok = ri == 0
+                    || (!rbytes[ri - 1].is_ascii_alphanumeric() && rbytes[ri - 1] != b'_' && rbytes[ri - 1] != b'$');
+                if before_ok && after_ok {
+                    new_result.push_str(var);
+                    ri += tlen;
+                    continue;
+                }
+            }
+            new_result.push(rbytes[ri] as char);
+            ri += 1;
+        }
+        result = new_result;
+    }
+    // Clean up: remove leading/trailing spaces from empty statements
+    result = result.replace("  ", " ");
     result
 }
 

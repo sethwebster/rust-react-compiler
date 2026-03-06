@@ -689,11 +689,12 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
                         continue;
                     };
                     // Determine if this dep is relevant:
-                    // - Reactive deps always qualify.
+                    // - Reactive deps always qualify (either the operand itself or the resolved base).
                     // - Non-reactive deps qualify if they are always-invalidating (Object/Array/Function/JSX)
                     //   with a direct (empty path) reference. This matches TS's isAlwaysInvalidatingType
                     //   which keeps such deps in pruneNonReactiveDependencies and enables canMergeScopes Case 2b.
-                    let relevant = place.reactive || (path.is_empty() && {
+                    let is_reactive = place.reactive || reactive_ids.contains(&base_id);
+                    let relevant = is_reactive || (path.is_empty() && {
                         let val_id = store_local_value.get(&base_id).copied().unwrap_or(base_id);
                         is_always_invalidating.get(&val_id).copied().unwrap_or(false)
                             || is_always_invalidating.get(&base_id).copied().unwrap_or(false)
