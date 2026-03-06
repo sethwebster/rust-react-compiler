@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 34.1% (424/1244) |
+| Correct rate | 34.3% (427/1244) |
 | Error (expected) | 191 |
 | Error (unexpected) | 5 (should-error fixtures that pass) |
 | Uncommitted changes | none — clean tree |
@@ -46,7 +46,7 @@ Update the following before stopping:
 
 **Active work**: Normalizations + codegen improvements. Two agents running. Good momentum.
 
-Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 397 → 413 → 416 → 415 → 424 (34.1%).
+Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 397 → 413 → 416 → 415 → 424 → 427 (34.3%).
 
 Recent commits (this session):
 - 22b442b: let-hoisting normalization, let-sorting, cleanup (389/1048, 415/1244)
@@ -114,6 +114,7 @@ Recent commits (this session):
 ## Completed This Session
 
 Commits (newest first):
+- `4fbff24` reactive loop deps, scope output name inlining, labeled block fix (401/1048, 427/1244)
 - `67fe4c2` improve outlining (HIR context, destructuring params) + compound assignment norm (398/1048, 424/1244)
 - `f317d51` JSX self-closing, for-loop comma, disambig suffix normalizations (397/1048, 423→424/1244)
 - `1e1c12d` JSX self-closing normalization, arrow expr body in codegen (415/1244)
@@ -158,7 +159,7 @@ Key file changes:
 | eliminate_redundant_phi | ssa/eliminate_redundant_phi.rs | REAL | 352 |
 | rewrite_instruction_kinds | ssa/rewrite_instruction_kinds... | REAL | 223 |
 | infer_mutation_aliasing_ranges | inference/infer_mutation_aliasing_ranges.rs | REAL | 860 |
-| infer_reactive_places | inference/infer_reactive_places.rs | REAL | 465 |
+| infer_reactive_places | inference/infer_reactive_places.rs | REAL | 527 |
 | aliasing_effects | inference/aliasing_effects.rs | REAL | 98 |
 | analyse_functions | inference/analyse_functions.rs | STUB | 5 |
 | drop_manual_memoization | inference/drop_manual_memoization.rs | REAL | 125 |
@@ -173,7 +174,7 @@ Key file changes:
 | prune_maybe_throws | optimization/prune_maybe_throws.rs | STUB | 2 |
 | infer_reactive_scope_variables | reactive_scopes/infer_reactive_scope_variables.rs | REAL | 636 |
 | merge_reactive_scopes_that_invalidate_together | reactive_scopes/merge_reactive_scopes... | REAL | 569 |
-| propagate_scope_dependencies_hir | reactive_scopes/propagate_scope_dependencies_hir.rs | REAL | 817 |
+| propagate_scope_dependencies_hir | reactive_scopes/propagate_scope_dependencies_hir.rs | REAL | 818 |
 | merge_overlapping_reactive_scopes_hir | reactive_scopes/merge_overlapping... | REAL | 339 |
 | prune_unused_scopes | reactive_scopes/prune_unused_scopes.rs | REAL | 402 |
 | promote_used_temporaries | reactive_scopes/promote_used_temporaries.rs | REAL | 45 |
@@ -267,4 +268,4 @@ codegen (currently bypasses ReactiveFunction) → oxc_codegen → JS output
 | 2026-03-05 | 84.2 | 31.9 | — | 18 | 28 | closure rewrite, destructuring defaults, dead phi DCE, SSA, scope fixes (+29) |
 | 2026-03-05 | 84.2 | 32.9 | — | 18 | 28 | function outlining, scope output counting, test normalizations (+12) |
 | 2026-03-05 | 84.2 | 33.2 | — | 18 | 28 | TSX parsing, type annotation stripping, as-const norm (+5) |
-| 2026-03-05 | 84.2 | 34.1 | — | 18 | 28 | JSX self-close, for-loop comma, disambig suffix, slot count, scope output norms (+11) |
+| 2026-03-06 | 84.2 | 34.3 | — | 18 | 28 | reactive loop deps, scope output inlining, JSX self-close, for-loop comma norms (+14) |
