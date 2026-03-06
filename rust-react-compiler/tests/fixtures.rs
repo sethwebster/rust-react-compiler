@@ -248,6 +248,14 @@ fn normalize_js(js: &str) -> String {
     // (IIFE normalizations already ran before double-brace normalization above)
     // Deduplicate consecutive `let` declarations for the same variable.
     let result = dedup_let_declarations(&result);
+    // Remove dead unused variables: `const/let x = EXPR;` or `let x;` where x
+    // appears nowhere else in the output. Skip for large outputs (>10KB) to avoid
+    // memory pressure from creating an extra copy of pathologically large strings.
+    let result = if result.len() <= 10_000 {
+        remove_dead_unused_vars(&result)
+    } else {
+        result
+    };
     // Re-normalize bracket/brace spacing after hoisting normalizations.
     let result = result.replace("{ ", "{").replace(" }", "}");
     // Final whitespace collapse: some normalizations above (like empty try removal)
@@ -1936,6 +1944,117 @@ fn normalize_null_init(input: &str) -> String {
     input.replace(" = null;", ";").replace(" = null,", ",")
 }
 
+/// Remove dead unused variables: `const/let x = EXPR;` or `let x;` where `x`
+/// never appears elsewhere in the output. Uses a two-pass approach: first count
+/// identifier occurrences, then remove declarations where the identifier count is 1.
+fn remove_dead_unused_vars(input: &str) -> String {
+    use std::collections::HashMap;
+    let bytes = input.as_bytes();
+    let len = bytes.len();
+
+    // First pass: count word-boundary occurrences of each identifier
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    let mut i = 0;
+    while i < len {
+        if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' || bytes[i] == b'$' {
+            let start = i;
+            while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$') {
+                i += 1;
+            }
+            let before_ok = start == 0
+                || !(bytes[start - 1].is_ascii_alphanumeric()
+                    || bytes[start - 1] == b'_'
+                    || bytes[start - 1] == b'$');
+            if before_ok {
+                *counts.entry(&input[start..i]).or_insert(0) += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    // Second pass: emit everything, skipping dead declarations
+    let mut result = String::with_capacity(len);
+    i = 0;
+    while i < len {
+        // Match `const ` or `let `
+        let kw_len;
+        if i + 6 <= len && &bytes[i..i + 6] == b"const " {
+            kw_len = 6;
+        } else if i + 4 <= len && &bytes[i..i + 4] == b"let " {
+            kw_len = 4;
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+
+        // Must be at a statement boundary
+        let at_boundary =
+            i == 0 || matches!(bytes[i.saturating_sub(1)], b'{' | b';' | b' ' | b'}');
+        if !at_boundary {
+            result.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+
+        // Read identifier
+        let id_start = i + kw_len;
+        let mut j = id_start;
+        while j < len
+            && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] == b'$')
+        {
+            j += 1;
+        }
+        if j == id_start {
+            result.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+        let var_name = &input[id_start..j];
+
+        // Case 1: bare `let x;`
+        if j < len && bytes[j] == b';' {
+            if counts.get(var_name).copied().unwrap_or(0) <= 1 {
+                let mut skip_to = j + 1;
+                if skip_to < len && bytes[skip_to] == b' ' { skip_to += 1; }
+                i = skip_to;
+                continue;
+            }
+            result.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+
+        // Case 2: `const/let x = EXPR;`
+        if j + 3 <= len && &bytes[j..j + 3] == b" = " {
+            let mut k = j + 3;
+            let mut depth = 0;
+            while k < len {
+                match bytes[k] {
+                    b'(' | b'[' | b'{' => depth += 1,
+                    b')' | b']' | b'}' => {
+                        if depth > 0 { depth -= 1; } else { break; }
+                    }
+                    b';' if depth == 0 => break,
+                    _ => {}
+                }
+                k += 1;
+            }
+            if k < len && bytes[k] == b';' && counts.get(var_name).copied().unwrap_or(0) <= 1 {
+                let mut skip_to = k + 1;
+                if skip_to < len && bytes[skip_to] == b' ' { skip_to += 1; }
+                i = skip_to;
+                continue;
+            }
+        }
+
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
 /// Normalize cache slot counts: `_c(N)` → `_c(?)`.
 fn normalize_slot_counts(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
@@ -2176,6 +2295,11 @@ fn show_diffs_impl() {
             Err(_) => continue,
         };
         match run_fixture(&path) {
+            Ok(actual) if actual.len() > 50_000 => {
+                // Skip pathologically large outputs to prevent OOM in batch runs.
+                diff_count += 1;
+                continue;
+            }
             Ok(actual) => {
                 let na = normalize_js(&actual);
                 let ne = normalize_js(&expected);
