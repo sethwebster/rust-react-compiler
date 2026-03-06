@@ -35,10 +35,11 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | ~34.8% (433+/1244) — OOM prevents recheck, for-of commit landed |
+| Correct rate | ~34.8%+ (433+/1244) — OOM prevents recheck with 2 agents running |
 | Error (expected) | 191 |
 | Error (unexpected) | 5 (should-error fixtures that pass) |
 | Uncommitted changes | none — clean tree |
+| NOTE | Memory pressure: 2 agents + dockerd = ~6.5GB/7.8GB, fixture tests OOM killed |
 
 ---
 
@@ -122,6 +123,8 @@ Recent commits (this session, newest first):
 ## Completed This Session
 
 Commits (newest first):
+- `2005b97` fix: reorder IIFE normalization before double-brace collapse
+- `b3c412f` normalize bare-return and no-return IIFEs (400/1048)
 - `765ce7c` for-of/for-in destructuring lowering + inline codegen (408/1048)
 - `c82cd42` normalizations for try-return, case merge, dedup-let (407/1048, 433/1244)
 - `b57c9ce` propagate reactivity through InlineJs/optional chaining (406/1048)
