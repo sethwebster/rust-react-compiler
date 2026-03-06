@@ -278,6 +278,12 @@ fn resolve_dep_path_inner(
             | InstructionValue::LoadContext { place, .. } => {
                 return resolve_dep_path_inner(place.identifier, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited);
             }
+            // ComputedLoad: trace through the object operand. We can't represent
+            // computed property indices in the dep path, but tracking the base
+            // object is better than no dep at all.
+            InstructionValue::ComputedLoad { object, .. } => {
+                return resolve_dep_path_inner(object.identifier, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited);
+            }
             // Internal allocations: trace through to operands.
             InstructionValue::ObjectExpression { properties, .. } => {
                 for prop in properties {
