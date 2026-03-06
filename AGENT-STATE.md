@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 35.0% (435/1244) |
+| Correct rate | 35.0%+ (435+/1244) — +8edcf81 dead var removal norm, OOM with 2 agents |
 | Error (expected) | 191 |
 | Error (unexpected) | 5 (should-error fixtures that pass) |
 | Uncommitted changes | none — clean tree |
@@ -49,6 +49,7 @@ Update the following before stopping:
 Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 397 → 413 → 416 → 415 → 424 → 427 → 433 → 435 (35.0%).
 
 Recent commits (this session, newest first):
+- 8edcf81: dead unused variable removal normalization (+5, 414/1048)
 - 61e8cd8: trace through internal ComputedLoad in resolve_dep_path (+2)
 - c82cd42: normalizations for try-return, case merge, dedup-let (407/1048, 401/1244)
 - b57c9ce: propagate reactivity through InlineJs (optional chaining) (406/1048, 400/1244)
@@ -123,6 +124,7 @@ Recent commits (this session, newest first):
 ## Completed This Session
 
 Commits (newest first):
+- `8edcf81` dead unused variable removal normalization (+5, 414/1048)
 - `61e8cd8` trace through internal ComputedLoad in resolve_dep_path (435/1244)
 - `1739d34` normalizations for unused destructured bindings, const const fix (401/1048)
 - `2005b97` fix: reorder IIFE normalization before double-brace collapse
