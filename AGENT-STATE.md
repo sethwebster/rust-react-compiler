@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 34.8% (433/1244) |
+| Correct rate | ~34.8% (433+/1244) — OOM prevents recheck, for-of commit landed |
 | Error (expected) | 191 |
 | Error (unexpected) | 5 (should-error fixtures that pass) |
 | Uncommitted changes | none — clean tree |
@@ -46,7 +46,7 @@ Update the following before stopping:
 
 **Active work**: Normalizations + reactive scope improvements. Two agents running. Good momentum.
 
-Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 397 → 413 → 416 → 415 → 424 → 427 → 433 (34.8%).
+Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 397 → 413 → 416 → 415 → 424 → 427 → 433+ (34.8%+).
 
 Recent commits (this session, newest first):
 - c82cd42: normalizations for try-return, case merge, dedup-let (407/1048, 401/1244)
@@ -122,6 +122,7 @@ Recent commits (this session, newest first):
 ## Completed This Session
 
 Commits (newest first):
+- `765ce7c` for-of/for-in destructuring lowering + inline codegen (408/1048)
 - `c82cd42` normalizations for try-return, case merge, dedup-let (407/1048, 433/1244)
 - `b57c9ce` propagate reactivity through InlineJs/optional chaining (406/1048)
 - `34bf193` compact temp names normalization, fix drop warnings (404/1048)
