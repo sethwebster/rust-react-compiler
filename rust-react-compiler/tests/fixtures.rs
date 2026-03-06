@@ -157,6 +157,11 @@ fn normalize_js(js: &str) -> String {
     // oxc_codegen may emit single-quoted imports ('react') while the TS
     // compiler always uses double quotes ("react").
     let result = normalize_import_quotes(&result);
+    // Normalize simple IIFEs BEFORE double-brace normalization to prevent
+    // the `;}}`→`;}` replacement from eating the IIFE's closing brace.
+    let result = normalize_simple_iife(&result);
+    // Normalize multi-return IIFEs to labeled blocks.
+    let result = normalize_multi_return_iife(&result);
     // Normalize double braces in function bodies: `() {{...}}` → `() {...}`.
     // Our codegen sometimes wraps function bodies in an extra block.
     let result = result.replace(") {{", ") {").replace(";}}", ";}");
@@ -235,9 +240,7 @@ fn normalize_js(js: &str) -> String {
     // Normalize `let x = EXPR; return x;` → `const x = EXPR; return x;`
     // When a variable is initialized and immediately returned, let/const is equivalent.
     let result = normalize_let_return_const(&result);
-    // Normalize simple IIFEs: `VAR = (() => {BODY; return EXPR;})();` → `BODY; VAR = EXPR;`
-    // Only when the IIFE body has exactly one return at the end (no early returns).
-    let result = normalize_simple_iife(&result);
+    // (IIFE normalizations already ran before double-brace normalization above)
     // Deduplicate consecutive `let` declarations for the same variable.
     let result = dedup_let_declarations(&result);
     // Re-normalize bracket/brace spacing after hoisting normalizations.
@@ -1265,20 +1268,145 @@ fn normalize_simple_iife(input: &str) -> String {
             };
             result = new_text;
         } else if return_count == 1 && body.matches("return ").count() == 1 {
-            // Single-return IIFE: `VAR = (() => {BODY; return EXPR;})();` → `BODY; VAR = EXPR;`
+            // Single-return IIFE: `VAR = (() => {BODY; return EXPR; POST})();` → `BODY; VAR = EXPR; POST`
             let ret_pos = body.rfind("return ").unwrap();
             let ret_end = body[ret_pos..].find(';').map(|p| ret_pos + p);
             if ret_end.is_none() { break; }
             let ret_end = ret_end.unwrap();
             let return_expr = &body[ret_pos + 7..ret_end];
             let pre_return = &body[..ret_pos];
-            let new_text = format!("{}{}{} = {};{}", prefix, pre_return.trim(), var_name, return_expr, suffix);
+            let post_return = &body[ret_end + 1..]; // text after return's semicolon
+            let pre = pre_return.trim();
+            let post = post_return.trim();
+            let new_text = if post.is_empty() {
+                format!("{}{}{} = {};{}", prefix, pre, var_name, return_expr, suffix)
+            } else {
+                format!("{}{}{} = {};{}{}", prefix, pre, var_name, return_expr, post, suffix)
+            };
             result = new_text;
         } else {
             // Multiple returns — can't simplify
             break;
         }
         // Continue loop to handle nested IIFEs
+    }
+    result
+}
+
+/// Convert IIFEs with returns (including conditional) to labeled blocks:
+/// `VAR = (() => {if (a) {return EXPR1;}})();`
+/// → `bb0: if (a) {VAR = EXPR1; break bb0;} VAR = undefined;`
+/// Replaces ALL `return EXPR;` with `VAR = EXPR; break LABEL;` and adds an
+/// implicit `VAR = undefined;` at the end if the body doesn't end with a return.
+fn normalize_multi_return_iife(input: &str) -> String {
+    let pat = "(() => {";
+    let mut result = input.to_string();
+    let mut label_counter = 0;
+    loop {
+        let Some(iife_start) = result.find(pat) else { break; };
+        let before = &result[..iife_start];
+        let eq_pos = before.rfind("= ");
+        if eq_pos.is_none() { break; }
+        let eq_pos = eq_pos.unwrap();
+        let var_part = before[..eq_pos].trim_end();
+        let var_start = var_part.rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '$')
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        let var_name = &var_part[var_start..];
+        if var_name.is_empty() { break; }
+
+        // Find matching `})();`
+        let body_start = iife_start + pat.len();
+        let mut depth = 1;
+        let bytes = result.as_bytes();
+        let mut i = body_start;
+        while i < bytes.len() && depth > 0 {
+            if bytes[i] == b'{' { depth += 1; }
+            if bytes[i] == b'}' { depth -= 1; }
+            if depth > 0 { i += 1; }
+        }
+        let body_end = i;
+        if body_end + 4 > bytes.len() || &result[body_end..body_end+4] != "})()".to_string().as_str() {
+            break;
+        }
+        let iife_end = body_end + 4;
+        let full_end = if iife_end < bytes.len() && bytes[iife_end] == b';' { iife_end + 1 } else { iife_end };
+
+        let body = result[body_start..body_end].to_string();
+        // Count return statements (at any brace depth, but not inside nested functions)
+        let mut return_count = 0;
+        {
+            let b = body.as_bytes();
+            let mut j = 0;
+            while j < b.len() {
+                // Skip nested function expressions
+                if j + 11 <= b.len() && &body[j..j+11] == "function () " {
+                    // Skip to matching brace
+                    if let Some(brace) = body[j..].find('{') {
+                        let start = j + brace;
+                        let mut d = 0;
+                        let mut k = start;
+                        while k < b.len() {
+                            if b[k] == b'{' { d += 1; }
+                            if b[k] == b'}' { d -= 1; if d == 0 { j = k + 1; break; } }
+                            k += 1;
+                        }
+                        continue;
+                    }
+                }
+                if j + 7 <= b.len() && (&body[j..j+7] == "return " || &body[j..j+7] == "return;") {
+                    return_count += 1;
+                }
+                j += 1;
+            }
+        }
+        if return_count == 0 {
+            break; // Already handled by simple IIFE normalization
+        }
+
+        let label = format!("bb{}", label_counter);
+        label_counter += 1;
+        // Replace `return EXPR;` → `VAR = EXPR; break LABEL;` and
+        // `return;` → `VAR = undefined; break LABEL;`
+        let mut new_body = String::new();
+        let b = body.as_bytes();
+        let mut j = 0;
+        while j < b.len() {
+            if j + 7 <= b.len() && &body[j..j+7] == "return " {
+                let ret_start = j + 7;
+                // Find the semicolon (respecting braces for object literals)
+                let mut ret_end = ret_start;
+                let mut rd: i32 = 0;
+                while ret_end < b.len() {
+                    if b[ret_end] == b'{' { rd += 1; }
+                    if b[ret_end] == b'}' { rd -= 1; }
+                    if rd == 0 && b[ret_end] == b';' { break; }
+                    ret_end += 1;
+                }
+                let expr = &body[ret_start..ret_end];
+                new_body.push_str(&format!("{} = {}; break {};", var_name, expr, label));
+                j = ret_end + 1;
+                continue;
+            } else if j + 7 <= b.len() && &body[j..j+7] == "return;" {
+                new_body.push_str(&format!("{} = undefined; break {};", var_name, label));
+                j += 7;
+                continue;
+            }
+            new_body.push(b[j] as char);
+            j += 1;
+        }
+        // Check if body ends with a break (last return was converted).
+        // If not, add implicit `VAR = undefined;` at end.
+        let trimmed_end = new_body.trim_end();
+        let needs_implicit_undefined = !trimmed_end.ends_with(&format!("break {};", label));
+        if needs_implicit_undefined {
+            new_body.push_str(&format!(" {} = undefined;", var_name));
+        }
+
+        let prefix = &result[..var_start];
+        let suffix = if full_end < result.len() { &result[full_end..] } else { "" };
+        let new_text = format!("{}{}: {}{}", prefix, label, new_body, suffix);
+        result = new_text;
     }
     result
 }
