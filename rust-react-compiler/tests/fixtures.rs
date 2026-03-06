@@ -105,6 +105,8 @@ fn normalize_js(js: &str) -> String {
     // in JS. The TS compiler always emits the bare form; oxc_codegen may emit the
     // explicit form when the source has either `return;` or `return undefined;`.
     let result = result.replace("return undefined;", "return;");
+    // Fix double `const const` codegen bug: `const const x` → `const x`.
+    let result = result.replace("const const ", "const ");
     // Normalize directive quotes: `'use strict'` → `"use strict"`, `'use memo'` → `"use memo"`.
     let result = result.replace("'use strict'", "\"use strict\"")
         .replace("'use memo'", "\"use memo\"")
@@ -199,6 +201,9 @@ fn normalize_js(js: &str) -> String {
     // const VARNAME = _TN;` → replace _TN with VARNAME and remove the binding.
     // One compiler uses temp names for scope outputs, the other preserves original names.
     let result = inline_scope_output_names(&result);
+    // Remove unused destructured bindings: `const {a, b} = X` → `const {a} = X`
+    // when `b` doesn't appear elsewhere in the output.
+    let result = remove_unused_destructured_bindings(&result);
     // Normalize Flow/React `component X(` → `function X(`. The component keyword
     // is a React-specific syntax that compiles to a regular function declaration.
     let result = normalize_component_keyword(&result);
@@ -288,6 +293,115 @@ fn normalize_empty_try(input: &str) -> String {
         break;
     }
     result
+}
+
+/// Remove unused destructured bindings from `const {a, b, c} = X` patterns.
+/// If a binding name doesn't appear elsewhere in the text (as a word), remove it.
+/// E.g., `const {a, b} = _T0` where `b` is unused → `const {a} = _T0`.
+/// Only handles simple (non-nested) destructuring for performance.
+fn remove_unused_destructured_bindings(input: &str) -> String {
+    let mut result = input.to_string();
+    let patterns = ["const {", "let {"];
+    for pat in &patterns {
+        let mut search_from = 0;
+        loop {
+            let pos = match result[search_from..].find(pat) {
+                Some(p) => search_from + p,
+                None => break,
+            };
+            search_from = pos + 1;
+
+            // Word boundary check
+            if pos > 0 {
+                let prev = result.as_bytes()[pos - 1];
+                if prev != b' ' && prev != b';' && prev != b'{' && prev != b'(' { continue; }
+            }
+
+            let brace_start = pos + pat.len() - 1;
+            let bytes = result.as_bytes();
+            let len = bytes.len();
+
+            // Find matching `}` (skip nested)
+            let mut depth = 1;
+            let mut j = brace_start + 1;
+            while j < len && depth > 0 {
+                if bytes[j] == b'{' { depth += 1; }
+                if bytes[j] == b'}' { depth -= 1; }
+                j += 1;
+            }
+            if depth != 0 { continue; }
+            let brace_end = j - 1;
+
+            // Must be ` = EXPR;`
+            if !result[brace_end + 1..].starts_with(" = ") { continue; }
+            let semi = match result[brace_end + 1..].find(';') {
+                Some(p) => brace_end + 1 + p,
+                None => continue,
+            };
+            let full_end = semi + 1;
+
+            // Only simple destructuring (no nested patterns)
+            let bindings_str = &result[brace_start + 1..brace_end];
+            if bindings_str.contains('{') || bindings_str.contains('[') { continue; }
+            let parts: Vec<&str> = bindings_str.split(',').collect();
+            if parts.len() <= 1 { continue; }
+
+            let before = &result[..pos];
+            let after = &result[full_end..];
+
+            let mut kept = Vec::new();
+            let mut removed_any = false;
+            for part in &parts {
+                let b = part.trim();
+                if b.is_empty() { continue; }
+                if b.starts_with("...") { kept.push(b); continue; }
+                // Extract local name from `key: name` or `name` or `key: name = default`
+                let local = if let Some(c) = b.find(':') { b[c+1..].trim() } else { b };
+                let local = if let Some(e) = local.find('=') { local[..e].trim() } else { local };
+                let local = local.trim();
+                if local.is_empty() || has_word(before, local) || has_word(after, local) {
+                    kept.push(b);
+                } else {
+                    removed_any = true;
+                }
+            }
+            if !removed_any { continue; }
+
+            if kept.is_empty() {
+                let mut new = result[..pos].to_string();
+                let skip = if full_end < result.len() && result.as_bytes()[full_end] == b' ' { full_end + 1 } else { full_end };
+                new.push_str(&result[skip..]);
+                result = new;
+                search_from = pos;
+            } else {
+                let kw = &pat[..pat.len() - 1];
+                let new_destr = format!("{}{{{}}}{}", kw, kept.join(", "), &result[brace_end + 1..full_end]);
+                let mut new = result[..pos].to_string();
+                new.push_str(&new_destr);
+                new.push_str(&result[full_end..]);
+                search_from = pos + new_destr.len();
+                result = new;
+            }
+        }
+    }
+    result
+}
+
+/// Check if `word` appears as a whole word in `text`.
+fn has_word(text: &str, word: &str) -> bool {
+    let wb = word.as_bytes();
+    let tb = text.as_bytes();
+    let is_id = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
+    let mut i = 0;
+    while i + wb.len() <= tb.len() {
+        if tb[i..].starts_with(wb) {
+            let before_ok = i == 0 || !is_id(tb[i - 1]);
+            let after_ok = i + wb.len() >= tb.len() || !is_id(tb[i + wb.len()]);
+            if before_ok && after_ok { return true; }
+        }
+        i += 1;
+    }
+    false
 }
 
 fn normalize_component_keyword(input: &str) -> String {
