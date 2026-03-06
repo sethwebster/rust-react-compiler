@@ -39,7 +39,7 @@ Update the following before stopping:
 | Error (expected) | 191 |
 | Error (unexpected) | 5 (should-error fixtures that pass) |
 | Uncommitted changes | none — clean tree |
-| Fixture denominator | **1244** (top-level only — do NOT change to 1717; subdirs untested) |
+| Fixture denominator | **1244** currently (top-level only) — **TARGET: 1717** (user confirmed). Fix: make `run_all_fixtures_impl` recursive (walk subdirs: fault-tolerance/, propagate-scope-deps-hir-fork/, reduce-reactive-deps/, exhaustive-deps/, etc.) |
 
 ---
 
@@ -72,6 +72,7 @@ Recent commits (this session, newest first):
 **In progress (uncommitted)**: none — clean tree
 
 **Next priorities** (by impact):
+0. **Make fixture runner recursive** — `run_all_fixtures_impl` uses flat `read_dir`; switch to `walkdir` or recursive `read_dir` to cover all 1717 fixtures (473 in subdirs missed currently)
 1. Missing memoization (56 fixtures) — scope inference gaps for optional calls, closures
 2. Passthrough DCE/const-prop improvements (72 fixtures)
 3. Remaining $tN naming issues (67 fixtures with $tN in output)
