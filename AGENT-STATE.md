@@ -35,10 +35,11 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 35.0%+ (435+/1244) — +8edcf81 dead var removal norm, OOM with 2 agents |
+| Correct rate | 35.0% (435/1244) |
 | Error (expected) | 191 |
 | Error (unexpected) | 5 (should-error fixtures that pass) |
 | Uncommitted changes | none — clean tree |
+| Fixture denominator | **1244** (top-level only — do NOT change to 1717; subdirs untested) |
 
 ---
 
@@ -291,4 +292,4 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-05 | 84.2 | 32.9 | — | 18 | 28 | function outlining, scope output counting, test normalizations (+12) |
 | 2026-03-05 | 84.2 | 33.2 | — | 18 | 28 | TSX parsing, type annotation stripping, as-const norm (+5) |
 | 2026-03-06 | 84.2 | 35.0 | — | 18 | 28 | ComputedLoad dep tracing, for-of destructuring, IIFE/binding norms (+22) |
-| 2026-03-06 | 84.2 | 35.0+ | — | 18 | 28 | Discovered 1717 total fixtures (473 in subdirs missed by flat read_dir) |
+| 2026-03-06 | 84.2 | 35.0 | — | 18 | 28 | Discovered 1717 total fixtures (473 in subdirs); denominator stays 1244 (top-level tested) |
