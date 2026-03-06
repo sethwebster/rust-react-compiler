@@ -710,7 +710,7 @@ pub fn run_with_environment(
     }
 
     // --- Phase: Reactivity ---
-    infer_reactive_places(hir);
+    infer_reactive_places(hir, env);
     rewrite_instruction_kinds_based_on_reassignment(hir, env);
 
     if env.enable_memoization() {

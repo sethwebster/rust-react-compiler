@@ -15,9 +15,10 @@ use indexmap::IndexMap;
 use crate::hir::hir::{
     ArrayElement, BasicBlock, BlockId, HIRFunction, IdentifierId, InstructionValue, NonLocalBinding, ObjectPatternProperty, Param, Pattern, Terminal,
 };
+use crate::hir::environment::Environment;
 use crate::hir::visitors::{each_instruction_value_operand, each_instruction_value_operand_mut};
 
-pub fn infer_reactive_places(hir: &mut HIRFunction) {
+pub fn infer_reactive_places(hir: &mut HIRFunction, env: &Environment) {
     let mut reactive: HashSet<IdentifierId> = HashSet::new();
 
     // Pre-scan: collect identifiers that hold stable-hook references.
@@ -90,6 +91,40 @@ pub fn infer_reactive_places(hir: &mut HIRFunction) {
                 reactive.insert(p.identifier);
             }
             Param::Spread(s) => { reactive.insert(s.place.identifier); }
+        }
+    }
+
+    // Build name → identifier mapping for InlineJs reactivity tracking.
+    // InlineJs instructions reference variables by name (not by Place operand),
+    // so we need to map names back to identifiers to check reactivity.
+    let mut name_to_ids: HashMap<String, Vec<IdentifierId>> = HashMap::new();
+    for (_, block) in &hir.body.blocks {
+        for instr in &block.instructions {
+            if let InstructionValue::StoreLocal { lvalue, .. }
+            | InstructionValue::DeclareLocal { lvalue, .. } = &instr.value
+            {
+                if let Some(ident) = env.get_identifier(lvalue.place.identifier) {
+                    if let Some(name) = ident.name.as_ref() {
+                        name_to_ids.entry(name.value().to_string())
+                            .or_default()
+                            .push(lvalue.place.identifier);
+                    }
+                }
+            }
+        }
+    }
+    // Also add params to name_to_ids
+    for param in &hir.params {
+        let pid = match param {
+            Param::Place(p) => p.identifier,
+            Param::Spread(s) => s.place.identifier,
+        };
+        if let Some(ident) = env.get_identifier(pid) {
+            if let Some(name) = ident.name.as_ref() {
+                name_to_ids.entry(name.value().to_string())
+                    .or_default()
+                    .push(pid);
+            }
         }
     }
 
@@ -318,6 +353,15 @@ pub fn infer_reactive_places(hir: &mut HIRFunction) {
                 let has_reactive = each_instruction_value_operand(&instr.value)
                     .iter()
                     .any(|p| reactive.contains(&p.identifier));
+                // InlineJs instructions reference variables by name, not operands.
+                // Check if any referenced named variable is reactive.
+                let has_reactive = has_reactive || if let InstructionValue::InlineJs { source, .. } = &instr.value {
+                    name_to_ids.iter().any(|(name, ids)| {
+                        contains_as_word(source, name) && ids.iter().any(|id| reactive.contains(id))
+                    })
+                } else {
+                    false
+                };
                 let is_hook = value_is_hook_source(&instr.value);
                 if has_reactive || is_hook {
                     reactive.insert(instr.lvalue.identifier);
@@ -524,4 +568,22 @@ fn destructure_pattern_ids(pattern: &Pattern) -> Vec<IdentifierId> {
         }
     }
     out
+}
+
+/// Check if `pattern` appears as a whole word in `s` (not part of a larger identifier).
+fn contains_as_word(s: &str, pattern: &str) -> bool {
+    if pattern.is_empty() { return false; }
+    let is_id = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let mut start = 0;
+    while let Some(rel_pos) = s[start..].find(pattern) {
+        let pos = start + rel_pos;
+        let before_ok = pos == 0 || !is_id(s[..pos].chars().next_back().unwrap_or('\0'));
+        let end = pos + pattern.len();
+        let after_ok = end >= s.len() || !is_id(s[end..].chars().next().unwrap_or('\0'));
+        if before_ok && after_ok {
+            return true;
+        }
+        start = pos + 1;
+    }
+    false
 }

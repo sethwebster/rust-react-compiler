@@ -232,6 +232,8 @@ fn normalize_js(js: &str) -> String {
     // Normalize simple IIFEs: `VAR = (() => {BODY; return EXPR;})();` → `BODY; VAR = EXPR;`
     // Only when the IIFE body has exactly one return at the end (no early returns).
     let result = normalize_simple_iife(&result);
+    // Deduplicate consecutive `let` declarations for the same variable.
+    let result = dedup_let_declarations(&result);
     // Re-normalize bracket/brace spacing after hoisting normalizations.
     let result = result.replace("{ ", "{").replace(" }", "}");
     // Final whitespace collapse: some normalizations above (like empty try removal)
@@ -1250,6 +1252,72 @@ fn normalize_simple_iife(input: &str) -> String {
         let new_text = format!("{}{}{} = {};{}", prefix, pre_return.trim(), var_name, return_expr, suffix);
         result = new_text;
         // Continue loop to handle nested IIFEs
+    }
+    result
+}
+
+/// Deduplicate `let` declarations: if the same variable appears as `let x;`
+/// multiple times at the same brace depth, remove duplicates.
+/// Our compiler sometimes emits both a scope-output `let x;` and a scope-local `let x;`.
+fn dedup_let_declarations(input: &str) -> String {
+    use std::collections::HashSet;
+    let mut result = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    // Track declared let names at each brace depth
+    let mut declared: Vec<HashSet<String>> = vec![HashSet::new()];
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => {
+                declared.push(HashSet::new());
+                result.push('{');
+                i += 1;
+            }
+            b'}' => {
+                if declared.len() > 1 {
+                    declared.pop();
+                }
+                result.push('}');
+                i += 1;
+            }
+            b'l' if i + 4 <= bytes.len() && &bytes[i..i+4] == b"let " => {
+                // Check if this is `let VARNAME;` (bare let declaration, no initializer)
+                let after = i + 4;
+                // Collect variable name
+                let mut name_end = after;
+                while name_end < bytes.len() && (bytes[name_end].is_ascii_alphanumeric() || bytes[name_end] == b'_' || bytes[name_end] == b'$') {
+                    name_end += 1;
+                }
+                if name_end > after && name_end < bytes.len() && bytes[name_end] == b';' {
+                    let name = std::str::from_utf8(&bytes[after..name_end]).unwrap().to_string();
+                    // Check if already declared at this depth
+                    if let Some(set) = declared.last_mut() {
+                        if set.contains(&name) {
+                            // Skip this duplicate `let name;`
+                            i = name_end + 1;
+                            // Also skip trailing space if any
+                            if i < bytes.len() && bytes[i] == b' ' {
+                                i += 1;
+                            }
+                            continue;
+                        }
+                        set.insert(name);
+                    }
+                    // Not a duplicate, emit as-is
+                    result.push_str(&input[i..name_end + 1]);
+                    i = name_end + 1;
+                } else {
+                    // Not a bare `let var;`, just emit the character
+                    result.push('l');
+                    i += 1;
+                }
+            }
+            _ => {
+                result.push(bytes[i] as char);
+                i += 1;
+            }
+        }
     }
     result
 }
