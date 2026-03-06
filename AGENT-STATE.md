@@ -34,12 +34,12 @@ Update the following before stopping:
 
 | Metric | Value |
 |--------|-------|
-| Compile rate | 84.2% (1048/1244) |
-| Correct rate | 35.0% (435/1244) |
+| Compile rate | 61.0% (1048/1717) — 84.2% of tested 1244 top-level |
+| Correct rate | 25.3% (435/1717) — 35.0% of tested 1244 top-level |
 | Error (expected) | 191 |
 | Error (unexpected) | 5 (should-error fixtures that pass) |
 | Uncommitted changes | none — clean tree |
-| Fixture denominator | **1244** currently (top-level only) — **TARGET: 1717** (user confirmed). Fix: make `run_all_fixtures_impl` recursive (walk subdirs: fault-tolerance/, propagate-scope-deps-hir-fork/, reduce-reactive-deps/, exhaustive-deps/, etc.) |
+| Fixture denominator | **1717** total (1244 top-level tested + 473 in subdirs untested). **PRIORITY 0**: make `run_all_fixtures_impl` recursive to cover all fixtures. |
 
 ---
 
