@@ -124,6 +124,9 @@ fn normalize_js(js: &str) -> String {
     // Normalize empty try blocks: `try {} catch ...` → remove the try-catch entirely
     // since an empty try block means the catch can never execute.
     let result = normalize_empty_try(&result);
+    // Normalize try blocks that immediately return: `try {return EXPR;} catch (...) {...} REMAINING`
+    // → `return EXPR;` since the catch is unreachable.
+    let result = normalize_try_immediate_return(&result);
     // Normalize `catch (_e) {}` / `catch(_e) {}` → `catch {}`. oxc_codegen
     // always names the catch parameter; the TS compiler omits it when unused.
     let result = result.replace("catch (_e) {}", "catch {}");
@@ -165,6 +168,9 @@ fn normalize_js(js: &str) -> String {
     let result = result.replace("default: {}", "default:");
     // Remove empty case bodies — `case N: {}` → `case N:`
     let result = normalize_empty_case_bodies(&result);
+    // Merge consecutive identical case bodies: `case 0: {break bb0;} case 1: {break bb0;}`
+    // → `case 0: case 1: {break bb0;}`
+    let result = merge_identical_case_bodies(&result);
     // Normalize JSX brace-wrapped string attributes: `attr={"val"}` → `attr="val"`.
     // The TS compiler wraps JSX string attribute values in braces; our codegen
     // emits plain quoted attributes. Unwrap braces around string literals.
@@ -1252,6 +1258,152 @@ fn normalize_simple_iife(input: &str) -> String {
         let new_text = format!("{}{}{} = {};{}", prefix, pre_return.trim(), var_name, return_expr, suffix);
         result = new_text;
         // Continue loop to handle nested IIFEs
+    }
+    result
+}
+
+/// Merge consecutive switch cases with identical bodies into fallthrough.
+/// `case 0: {break bb0;} case 1: {break bb0;}` → `case 0: case 1: {break bb0;}`
+fn merge_identical_case_bodies(input: &str) -> String {
+    let mut result = input.to_string();
+    // Pattern: `case X: {BODY} case Y: {BODY}` where BODY is identical
+    // Repeatedly find and merge
+    loop {
+        let bytes = result.as_bytes();
+        let mut found = false;
+        // Find `case X: {` patterns
+        let mut i = 0;
+        while i + 5 < bytes.len() {
+            if &bytes[i..i+5] == b"case " {
+                // Find the colon
+                let mut colon = i + 5;
+                while colon < bytes.len() && bytes[colon] != b':' { colon += 1; }
+                if colon >= bytes.len() { break; }
+                // After colon, expect optional space then `{`
+                let mut body_start = colon + 1;
+                while body_start < bytes.len() && bytes[body_start] == b' ' { body_start += 1; }
+                if body_start >= bytes.len() || bytes[body_start] != b'{' { i = colon + 1; continue; }
+                // Find matching `}`
+                let mut depth = 0;
+                let mut body_end = body_start;
+                for j in body_start..bytes.len() {
+                    if bytes[j] == b'{' { depth += 1; }
+                    if bytes[j] == b'}' {
+                        depth -= 1;
+                        if depth == 0 { body_end = j + 1; break; }
+                    }
+                }
+                let body1 = &result[body_start..body_end];
+                // After body_end, check for ` case ` (next case)
+                let after = &result[body_end..];
+                let trimmed = after.trim_start();
+                if trimmed.starts_with("case ") {
+                    let next_case_start = result.len() - trimmed.len();
+                    // Find the body of the next case
+                    let rest = &result[next_case_start..];
+                    if let Some(next_colon) = rest.find(':') {
+                        let abs_colon = next_case_start + next_colon;
+                        let mut next_body_start = abs_colon + 1;
+                        while next_body_start < bytes.len() && result.as_bytes()[next_body_start] == b' ' { next_body_start += 1; }
+                        if next_body_start < bytes.len() && result.as_bytes()[next_body_start] == b'{' {
+                            let mut depth = 0;
+                            let mut next_body_end = next_body_start;
+                            for j in next_body_start..bytes.len() {
+                                if bytes[j] == b'{' { depth += 1; }
+                                if bytes[j] == b'}' {
+                                    depth -= 1;
+                                    if depth == 0 { next_body_end = j + 1; break; }
+                                }
+                            }
+                            let body2 = &result[next_body_start..next_body_end];
+                            if body1 == body2 {
+                                // Merge: remove body1 from first case, keep second case with body
+                                // `case X: {BODY} case Y: {BODY}` → `case X: case Y: {BODY}`
+                                let case_label = &result[i..colon + 1]; // "case X:"
+                                let next_case = &result[next_case_start..next_body_end]; // "case Y: {BODY}"
+                                let new_text = format!("{} {}", case_label, next_case);
+                                result = format!("{}{}{}", &result[..i], new_text, &result[next_body_end..]);
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+        if !found { break; }
+    }
+    result
+}
+
+/// Normalize try blocks that immediately return:
+/// `try {return EXPR;} catch (...) {...}` followed by remaining code until `}`
+/// → `return EXPR;` (removes catch and remaining dead code).
+fn normalize_try_immediate_return(input: &str) -> String {
+    let mut result = input.to_string();
+    loop {
+        let Some(try_pos) = result.find("try {return ") else { break; };
+        let after_try = try_pos + "try {return ".len();
+        // Find the `}` that closes the try block. Be careful with nested braces.
+        let mut depth = 1;
+        let mut return_end = None;
+        for (i, c) in result[after_try..].char_indices() {
+            if c == '{' { depth += 1; }
+            if c == '}' {
+                depth -= 1;
+                if depth == 0 {
+                    return_end = Some(after_try + i);
+                    break;
+                }
+            }
+        }
+        let Some(try_close) = return_end else { break; };
+        // Check if the try block contains only a return statement
+        let try_body = result[after_try..try_close].trim();
+        // The body should be `EXPR;` (the return value and semicolon)
+        if !try_body.ends_with(';') { break; }
+        // Check that there are no other statements (no semicolons except the final one)
+        let body_without_last = &try_body[..try_body.len()-1];
+        if body_without_last.contains(';') || body_without_last.contains('{') { break; }
+
+        // After try block close, expect `catch (...) {...}` and possibly remaining code
+        let after_close = try_close + 1;
+        let rest = result[after_close..].trim_start();
+        if !rest.starts_with("catch") { break; }
+
+        // Find the catch block
+        let catch_start = result.len() - rest.len();
+        let catch_body_open = result[catch_start..].find('{');
+        let Some(catch_body_start) = catch_body_open.map(|p| catch_start + p) else { break; };
+        let mut depth = 0;
+        let mut catch_end = catch_body_start;
+        for (i, c) in result[catch_body_start..].char_indices() {
+            if c == '{' { depth += 1; }
+            if c == '}' {
+                depth -= 1;
+                if depth == 0 { catch_end = catch_body_start + i + 1; break; }
+            }
+        }
+
+        // Now remove everything from try_pos to catch_end and replace with `return EXPR;`
+        // Also remove any remaining dead code after the catch until the next `}`
+        let return_stmt = format!("return {};", body_without_last);
+        // Find remaining dead code: everything from catch_end to the closing `}` of the enclosing function
+        let after_catch = &result[catch_end..];
+        // Remove trailing dead code (statements after the try-catch that are now unreachable)
+        // We'll keep everything after the closing `}` of the function
+        let mut remaining_start = catch_end;
+        let trimmed_after = after_catch.trim_start();
+        if !trimmed_after.is_empty() && !trimmed_after.starts_with('}') {
+            // There's dead code after catch. Find the next `}` which closes the function.
+            if let Some(next_close) = trimmed_after.find('}') {
+                remaining_start = result.len() - trimmed_after.len() + next_close;
+            }
+        }
+
+        result = format!("{}{}{}", &result[..try_pos], return_stmt, &result[remaining_start..]);
+        continue;
     }
     result
 }
