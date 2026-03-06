@@ -344,7 +344,7 @@ pub fn lower_for_of<'a>(
     // ---- loop body block ----
     ctx.switch_to(loop_id, BlockKind::Loop);
     // Bind the loop variable(s) to the current iterator value.
-    lower_for_of_left(ctx, &stmt.left, next_place, &loc)?;
+    lower_for_of_left(ctx, semantic, &stmt.left, next_place, &loc, lower_expr)?;
 
     ctx.push_scope(Scope::Loop {
         label: None,
@@ -417,7 +417,7 @@ pub fn lower_for_in<'a>(
     // ---- loop body block ----
     ctx.switch_to(loop_id, BlockKind::Loop);
     // Bind the loop variable to the current property key.
-    lower_for_in_left(ctx, &stmt.left, next_place, &loc)?;
+    lower_for_in_left(ctx, semantic, &stmt.left, next_place, &loc, lower_expr)?;
 
     ctx.push_scope(Scope::Loop {
         label: None,
@@ -603,9 +603,11 @@ fn lower_var_decl_for_init<'a>(
 /// Bind the for-of left-hand side to `value_place`.
 fn lower_for_of_left<'a>(
     ctx: &mut LoweringContext,
+    semantic: &Semantic<'a>,
     left: &ForStatementLeft<'a>,
     value_place: Place,
     loc: &SourceLocation,
+    lower_expr: &mut dyn FnMut(&Expression<'a>, &mut LoweringContext) -> Result<Place>,
 ) -> Result<()> {
     match left {
         ForStatementLeft::VariableDeclaration(decl) => {
@@ -644,11 +646,10 @@ fn lower_for_of_left<'a>(
                         );
                     }
                     _ => {
-                        // Destructuring pattern — emit unsupported.
-                        ctx.push(
-                            InstructionValue::UnsupportedNode { loc: bind_loc.clone() },
-                            bind_loc,
-                        );
+                        // Destructuring pattern (ObjectPattern, ArrayPattern, etc.)
+                        super::patterns::lower_binding_pattern(
+                            ctx, semantic, &declarator.id, value_place.clone(), kind, lower_expr,
+                        )?;
                     }
                 }
             }
@@ -709,9 +710,11 @@ fn lower_for_of_left<'a>(
 /// Identical logic to for-of left binding.
 fn lower_for_in_left<'a>(
     ctx: &mut LoweringContext,
+    semantic: &Semantic<'a>,
     left: &ForStatementLeft<'a>,
     value_place: Place,
     loc: &SourceLocation,
+    lower_expr: &mut dyn FnMut(&Expression<'a>, &mut LoweringContext) -> Result<Place>,
 ) -> Result<()> {
-    lower_for_of_left(ctx, left, value_place, loc)
+    lower_for_of_left(ctx, semantic, left, value_place, loc, lower_expr)
 }

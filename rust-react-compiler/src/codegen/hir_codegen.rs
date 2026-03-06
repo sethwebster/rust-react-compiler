@@ -20,7 +20,7 @@ use std::fmt::Write;
 use crate::hir::hir::{
     ArrayElement, BlockId, BinaryOperator, CallArg, DeclarationId, FunctionExpressionType,
     GotoVariant, HIRFunction, Instruction, InstructionId, InstructionKind, InstructionValue,
-    JsxAttribute, JsxTag, NonLocalBinding, ObjectExpressionProperty, ObjectProperty,
+    JsxAttribute, JsxTag, LValuePattern, NonLocalBinding, ObjectExpressionProperty, ObjectProperty,
     ObjectPropertyKey, ObjectPatternProperty, Param, Pattern, Place, PrimitiveValue,
     ReactiveScope, ReactiveScopeDependency, ScopeId, Terminal, UnaryOperator, UpdateOperator,
 };
@@ -1572,9 +1572,15 @@ impl<'a> Codegen<'a> {
                         inlined_ids.insert(binding_id);
                     }
 
+                    // Check if loop body starts with a Destructure of the loop variable.
+                    // If so, emit the destructuring pattern directly in the for-of header.
+                    let for_of_pattern = self.try_inline_for_of_destructure(
+                        loop_bid, iter_next_id, &loop_var_name, inlined_ids,
+                    );
+
                     visited.insert(test_bid);
 
-                    let _ = writeln!(out, "{pad}for (const {loop_var_name} of {iterable_expr}) {{");
+                    let _ = writeln!(out, "{pad}for (const {for_of_pattern} of {iterable_expr}) {{");
                     let body_pad = indent + 1;
                     let mut vis2 = visited.clone();
                     vis2.insert(test_bid);
@@ -2454,7 +2460,10 @@ impl<'a> Codegen<'a> {
                 if binding_id != 0 {
                     inlined_ids.insert(binding_id);
                 }
-                let _ = writeln!(out, "{loop_body_pad}for (const {loop_var_name} of {iterable_expr}) {{");
+                let for_of_pattern = self.try_inline_for_of_destructure(
+                    loop_bid, iter_next_id, &loop_var_name, inlined_ids,
+                );
+                let _ = writeln!(out, "{loop_body_pad}for (const {for_of_pattern} of {iterable_expr}) {{");
                 let mut vis2 = visited.clone();
                 vis2.insert(fo_test_bid);
                 self.emit_cfg_region(
@@ -4349,6 +4358,69 @@ impl<'a> Codegen<'a> {
 
     fn call_args(&self, args: &[CallArg]) -> String {
         args.iter().map(|a| self.call_arg(a)).collect::<Vec<_>>().join(", ")
+    }
+
+    /// Format a destructuring pattern (from a Destructure instruction's LValuePattern)
+    /// as a string like `{a, b}` or `[x, y]`, suitable for use in `for (const PATTERN of ...)`.
+    fn format_lvalue_pattern(&self, lvalue: &LValuePattern) -> String {
+        match &lvalue.pattern {
+            Pattern::Array(ap) => {
+                let mut items: Vec<String> = ap.items.iter().map(|e| match e {
+                    ArrayElement::Place(p) => {
+                        if *self.use_count.get(&p.identifier.0).unwrap_or(&0) == 0 {
+                            String::new()
+                        } else {
+                            self.ident_name(p.identifier)
+                        }
+                    }
+                    ArrayElement::Spread(s) => format!("...{}", self.ident_name(s.place.identifier)),
+                    ArrayElement::Hole => String::new(),
+                }).collect();
+                while items.last().map_or(false, |s| s.is_empty()) {
+                    items.pop();
+                }
+                format!("[{}]", items.join(", "))
+            }
+            Pattern::Object(op) => {
+                let props: Vec<String> = op.properties.iter().map(|p| match p {
+                    ObjectPatternProperty::Property(prop) => {
+                        let key_str = self.obj_key(prop.key.clone());
+                        let ident_str = self.ident_name(prop.place.identifier);
+                        let is_shorthand = matches!(prop.key, ObjectPropertyKey::Identifier(_))
+                            && key_str == ident_str;
+                        if is_shorthand { key_str } else { format!("{key_str}: {ident_str}") }
+                    }
+                    ObjectPatternProperty::Spread(s) => format!("...{}", self.ident_name(s.place.identifier)),
+                }).collect();
+                let props_str = props.join(", ");
+                if props_str.is_empty() { "{}".to_string() } else { format!("{{ {} }}", props_str) }
+            }
+        }
+    }
+
+    /// Check if the loop body starts with a Destructure of the loop variable (identified by
+    /// iter_next_id). If so, return the formatted pattern string and mark the Destructure as inlined.
+    fn try_inline_for_of_destructure(
+        &self,
+        loop_bid: BlockId,
+        iter_next_id: Option<u32>,
+        loop_var_name: &str,
+        inlined_ids: &mut std::collections::HashSet<u32>,
+    ) -> String {
+        if let Some(iter_id) = iter_next_id {
+            if let Some(b) = self.hir.body.blocks.get(&loop_bid) {
+                for instr in &b.instructions {
+                    if let InstructionValue::Destructure { lvalue, value, .. } = &instr.value {
+                        if value.identifier.0 == iter_id {
+                            let pat = self.format_lvalue_pattern(lvalue);
+                            inlined_ids.insert(instr.lvalue.identifier.0);
+                            return pat;
+                        }
+                    }
+                }
+            }
+        }
+        loop_var_name.to_string()
     }
 
     fn obj_key(&self, key: ObjectPropertyKey) -> String {
