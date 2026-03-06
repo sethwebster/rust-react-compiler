@@ -224,6 +224,12 @@ fn normalize_js(js: &str) -> String {
     // Normalize optional chain parens: `(X?.Y).Z` → `X?.Y.Z`.
     // Both are semantically identical in JS.
     let result = normalize_optional_chain_parens(&result);
+    // Normalize `let x = EXPR; return x;` → `const x = EXPR; return x;`
+    // When a variable is initialized and immediately returned, let/const is equivalent.
+    let result = normalize_let_return_const(&result);
+    // Normalize simple IIFEs: `VAR = (() => {BODY; return EXPR;})();` → `BODY; VAR = EXPR;`
+    // Only when the IIFE body has exactly one return at the end (no early returns).
+    let result = normalize_simple_iife(&result);
     // Re-normalize bracket/brace spacing after hoisting normalizations.
     let result = result.replace("{ ", "{").replace(" }", "}");
     // Final whitespace collapse: some normalizations above (like empty try removal)
@@ -1021,6 +1027,261 @@ fn sort_consecutive_bare_lets(input: &str) -> String {
         }
         result.push(bytes[i] as char);
         i += 1;
+    }
+    result
+}
+
+/// Compact temp names: reuse _TN names across non-overlapping live ranges.
+/// Scans through the text to find the first and last occurrence of each _TN,
+/// then reassigns names so that non-overlapping ranges share names.
+fn compact_temp_names(input: &str) -> String {
+    use std::collections::BTreeMap;
+
+    // Find all _TN occurrences and their positions
+    let bytes = input.as_bytes();
+    let mut temp_positions: BTreeMap<String, (usize, usize)> = BTreeMap::new(); // temp -> (first_pos, last_pos)
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'_' && i + 2 < bytes.len() && bytes[i + 1] == b'T' && bytes[i + 2].is_ascii_digit() {
+            let before_ok = i == 0 || (!bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_' && bytes[i - 1] != b'$');
+            if before_ok {
+                let start = i;
+                i += 2;
+                while i < bytes.len() && bytes[i].is_ascii_digit() { i += 1; }
+                let after_ok = i >= bytes.len() || (!bytes[i].is_ascii_alphanumeric() && bytes[i] != b'_');
+                if after_ok {
+                    let name = &input[start..i];
+                    let entry = temp_positions.entry(name.to_string()).or_insert((start, start));
+                    entry.1 = start; // update last position
+                    continue;
+                }
+                i = start + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+
+    if temp_positions.is_empty() {
+        return input.to_string();
+    }
+
+    // Sort temps by their first occurrence
+    let mut temps: Vec<(String, usize, usize)> = temp_positions
+        .into_iter()
+        .map(|(name, (first, last))| (name, first, last))
+        .collect();
+    temps.sort_by_key(|(_, first, _)| *first);
+
+    // Greedy allocation: assign canonical names, reusing when possible
+    // Track which canonical names are free (their last_pos is before current first_pos)
+    let mut assignments: BTreeMap<String, String> = BTreeMap::new();
+    let mut used_slots: Vec<usize> = Vec::new(); // (last_pos) for each canonical slot
+    for (name, first, last) in &temps {
+        // Find the lowest canonical slot whose last_pos < first
+        let mut assigned_slot = None;
+        for (slot, slot_last) in used_slots.iter_mut().enumerate() {
+            if *slot_last < *first {
+                assigned_slot = Some(slot);
+                *slot_last = *last;
+                break;
+            }
+        }
+        let slot = match assigned_slot {
+            Some(s) => s,
+            None => {
+                used_slots.push(*last);
+                used_slots.len() - 1
+            }
+        };
+        let canonical = format!("_T{}", slot);
+        assignments.insert(name.clone(), canonical);
+    }
+
+    // Check if any assignment actually changes
+    let any_change = assignments.iter().any(|(k, v)| k != v);
+    if !any_change {
+        return input.to_string();
+    }
+
+    // Apply replacements using a placeholder to avoid conflicts
+    // First pass: replace all _TN with unique placeholders
+    let mut result = input.to_string();
+    // Sort by length descending to avoid substring issues
+    let mut sorted_names: Vec<&String> = assignments.keys().collect();
+    sorted_names.sort_by(|a, b| b.len().cmp(&a.len()));
+
+    // Use two-pass replacement to avoid conflicts
+    let mut placeholders: Vec<(String, String)> = Vec::new();
+    for (orig, canonical) in &assignments {
+        if orig != canonical {
+            let placeholder = format!("__TEMP_PH_{}_", orig.replace("_T", ""));
+            placeholders.push((orig.clone(), placeholder.clone()));
+        }
+    }
+    // Phase 1: orig → placeholder
+    for (orig, ph) in &placeholders {
+        result = replace_word_boundary(&result, orig, ph);
+    }
+    // Phase 2: placeholder → canonical
+    for (orig, ph) in &placeholders {
+        let canonical = &assignments[orig];
+        result = result.replace(ph.as_str(), canonical);
+    }
+
+    result
+}
+
+fn replace_word_boundary(input: &str, from: &str, to: &str) -> String {
+    let bytes = input.as_bytes();
+    let fbytes = from.as_bytes();
+    let flen = fbytes.len();
+    let mut result = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + flen <= bytes.len() && &bytes[i..i+flen] == fbytes {
+            let before_ok = i == 0 || (!bytes[i-1].is_ascii_alphanumeric() && bytes[i-1] != b'_' && bytes[i-1] != b'$');
+            let after_ok = i + flen >= bytes.len() || (!bytes[i+flen].is_ascii_alphanumeric() && bytes[i+flen] != b'_');
+            if before_ok && after_ok {
+                result.push_str(to);
+                i += flen;
+                continue;
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// Normalize `let x = EXPR; return x;` → `const x = EXPR; return x;`.
+/// When a variable is initialized with let and immediately returned without
+/// any intermediate reassignment, let and const are semantically equivalent.
+fn normalize_let_return_const(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut result = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // Look for `let VARNAME = EXPR; return VARNAME;`
+        if i + 4 < bytes.len() && &bytes[i..i+4] == b"let " {
+            // Check boundary
+            let at_boundary = i == 0 || matches!(bytes[i - 1], b'{' | b';' | b' ');
+            if at_boundary {
+                let var_start = i + 4;
+                let mut j = var_start;
+                while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] == b'$') {
+                    j += 1;
+                }
+                let varname = &input[var_start..j];
+                if !varname.is_empty() && j + 3 < bytes.len() && &bytes[j..j+3] == b" = " {
+                    // Find the semicolon ending the assignment
+                    let expr_start = j + 3;
+                    // Count braces/parens to find the statement end
+                    let mut depth = 0;
+                    let mut k = expr_start;
+                    while k < bytes.len() {
+                        match bytes[k] {
+                            b'{' | b'(' | b'[' => depth += 1,
+                            b'}' | b')' | b']' => depth -= 1,
+                            b';' if depth == 0 => break,
+                            _ => {}
+                        }
+                        k += 1;
+                    }
+                    if k < bytes.len() && bytes[k] == b';' {
+                        // Check if next non-space token is `return VARNAME;`
+                        let after_semi = k + 1;
+                        let mut m = after_semi;
+                        while m < bytes.len() && bytes[m] == b' ' { m += 1; }
+                        let ret_pat = format!("return {};", varname);
+                        if m + ret_pat.len() <= bytes.len() && &input[m..m+ret_pat.len()] == ret_pat {
+                            // Replace `let` with `const`
+                            result.push_str("const ");
+                            i = var_start;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// Normalize simple IIFEs: transform `VAR = (() => {BODY return EXPR;})();`
+/// into `BODY VAR = EXPR;` when the IIFE has exactly one return at the end.
+fn normalize_simple_iife(input: &str) -> String {
+    let pat = "(() => {";
+    let mut result = input.to_string();
+    loop {
+        let Some(iife_start) = result.find(pat) else { break; };
+        // Check what's before the IIFE: should be `VAR = ` or `VAR =`
+        let before = &result[..iife_start];
+        // Find the `= ` before `(() => {`
+        let eq_pos = before.rfind("= ");
+        if eq_pos.is_none() {
+            // Can't inline — just break to avoid infinite loop
+            break;
+        }
+        let eq_pos = eq_pos.unwrap();
+        // Find VAR name before `= `
+        let var_part = before[..eq_pos].trim_end();
+        // VAR is the last word before `= `
+        let var_start = var_part.rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '$')
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        let var_name = &var_part[var_start..];
+        if var_name.is_empty() {
+            break;
+        }
+
+        // Find the matching closing of the IIFE: `})();`
+        let body_start = iife_start + pat.len();
+        let mut depth = 1;
+        let bytes = result.as_bytes();
+        let mut i = body_start;
+        while i < bytes.len() && depth > 0 {
+            if bytes[i] == b'{' { depth += 1; }
+            if bytes[i] == b'}' { depth -= 1; }
+            if depth > 0 { i += 1; }
+        }
+        // i should be at the closing } of the arrow body
+        let body_end = i;
+        // Check for `})();` after
+        if body_end + 4 > bytes.len() || &result[body_end..body_end+4] != "})()".to_string().as_str() {
+            break;
+        }
+        let iife_end = body_end + 4; // past `})()`
+        // Skip optional `;`
+        let full_end = if iife_end < bytes.len() && bytes[iife_end] == b';' {
+            iife_end + 1
+        } else {
+            iife_end
+        };
+
+        let body = &result[body_start..body_end];
+        // Count returns in the body (only at depth 0 relative to the IIFE body)
+        let return_count = body.matches("return ").count();
+        if return_count != 1 {
+            // Not a simple IIFE (has early returns or no return)
+            break;
+        }
+        // Find the last `return EXPR;` in the body
+        let ret_pos = body.rfind("return ").unwrap();
+        let ret_end = body[ret_pos..].find(';').map(|p| ret_pos + p);
+        if ret_end.is_none() { break; }
+        let ret_end = ret_end.unwrap();
+        let return_expr = &body[ret_pos + 7..ret_end]; // everything between `return ` and `;`
+        let pre_return = &body[..ret_pos];
+
+        // Build replacement: BODY VAR = EXPR;
+        let prefix = &result[..var_start];
+        let suffix = if full_end < result.len() { &result[full_end..] } else { "" };
+        let new_text = format!("{}{}{} = {};{}", prefix, pre_return.trim(), var_name, return_expr, suffix);
+        result = new_text;
+        // Continue loop to handle nested IIFEs
     }
     result
 }
