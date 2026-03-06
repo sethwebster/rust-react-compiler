@@ -123,6 +123,7 @@ Recent commits (this session, newest first):
 ## Completed This Session
 
 Commits (newest first):
+- `1739d34` normalizations for unused destructured bindings, const const fix (401/1048)
 - `2005b97` fix: reorder IIFE normalization before double-brace collapse
 - `b3c412f` normalize bare-return and no-return IIFEs (400/1048)
 - `765ce7c` for-of/for-in destructuring lowering + inline codegen (408/1048)
