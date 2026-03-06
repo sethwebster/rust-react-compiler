@@ -182,6 +182,8 @@ fn normalize_js(js: &str) -> String {
     // We re-split the result and replace temps that aren't followed by alphanumeric
     // characters (to avoid renaming inside string literals or object keys).
     let result = normalize_temp_names(&result);
+    // Compact temp names: reuse _TN names across non-overlapping live ranges.
+    let result = compact_temp_names(&result);
     // Inline scope output names: `let _TN; if (...) {_TN = ...; $[K] = _TN;} else {_TN = $[K];}
     // const VARNAME = _TN;` → replace _TN with VARNAME and remove the binding.
     // One compiler uses temp names for scope outputs, the other preserves original names.
@@ -1034,12 +1036,14 @@ fn sort_consecutive_bare_lets(input: &str) -> String {
 /// Compact temp names: reuse _TN names across non-overlapping live ranges.
 /// Scans through the text to find the first and last occurrence of each _TN,
 /// then reassigns names so that non-overlapping ranges share names.
+/// Uses a single-pass replacement to avoid conflicts.
 fn compact_temp_names(input: &str) -> String {
     use std::collections::BTreeMap;
 
-    // Find all _TN occurrences and their positions
+    // Find all _TN tokens and their positions (by scanning byte-by-byte)
     let bytes = input.as_bytes();
-    let mut temp_positions: BTreeMap<String, (usize, usize)> = BTreeMap::new(); // temp -> (first_pos, last_pos)
+    let mut temp_ranges: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    let mut all_tokens: Vec<(usize, usize, String)> = Vec::new(); // (start, end, name)
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'_' && i + 2 < bytes.len() && bytes[i + 1] == b'T' && bytes[i + 2].is_ascii_digit() {
@@ -1050,9 +1054,10 @@ fn compact_temp_names(input: &str) -> String {
                 while i < bytes.len() && bytes[i].is_ascii_digit() { i += 1; }
                 let after_ok = i >= bytes.len() || (!bytes[i].is_ascii_alphanumeric() && bytes[i] != b'_');
                 if after_ok {
-                    let name = &input[start..i];
-                    let entry = temp_positions.entry(name.to_string()).or_insert((start, start));
-                    entry.1 = start; // update last position
+                    let name = input[start..i].to_string();
+                    let entry = temp_ranges.entry(name.clone()).or_insert((start, start));
+                    entry.1 = start;
+                    all_tokens.push((start, i, name));
                     continue;
                 }
                 i = start + 1;
@@ -1062,95 +1067,58 @@ fn compact_temp_names(input: &str) -> String {
         i += 1;
     }
 
-    if temp_positions.is_empty() {
+    if temp_ranges.is_empty() {
         return input.to_string();
     }
 
-    // Sort temps by their first occurrence
-    let mut temps: Vec<(String, usize, usize)> = temp_positions
+    // Sort temps by first occurrence
+    let mut temps: Vec<(String, usize, usize)> = temp_ranges
         .into_iter()
         .map(|(name, (first, last))| (name, first, last))
         .collect();
     temps.sort_by_key(|(_, first, _)| *first);
 
-    // Greedy allocation: assign canonical names, reusing when possible
-    // Track which canonical names are free (their last_pos is before current first_pos)
+    // Greedy slot allocation
     let mut assignments: BTreeMap<String, String> = BTreeMap::new();
-    let mut used_slots: Vec<usize> = Vec::new(); // (last_pos) for each canonical slot
+    let mut slot_ends: Vec<usize> = Vec::new();
     for (name, first, last) in &temps {
-        // Find the lowest canonical slot whose last_pos < first
-        let mut assigned_slot = None;
-        for (slot, slot_last) in used_slots.iter_mut().enumerate() {
+        let mut best_slot = None;
+        for (slot, slot_last) in slot_ends.iter_mut().enumerate() {
             if *slot_last < *first {
-                assigned_slot = Some(slot);
+                best_slot = Some(slot);
                 *slot_last = *last;
                 break;
             }
         }
-        let slot = match assigned_slot {
+        let slot = match best_slot {
             Some(s) => s,
-            None => {
-                used_slots.push(*last);
-                used_slots.len() - 1
-            }
+            None => { slot_ends.push(*last); slot_ends.len() - 1 }
         };
-        let canonical = format!("_T{}", slot);
-        assignments.insert(name.clone(), canonical);
+        assignments.insert(name.clone(), format!("_T{}", slot));
     }
 
-    // Check if any assignment actually changes
-    let any_change = assignments.iter().any(|(k, v)| k != v);
-    if !any_change {
+    // Check if any change needed
+    if assignments.iter().all(|(k, v)| k == v) {
         return input.to_string();
     }
 
-    // Apply replacements using a placeholder to avoid conflicts
-    // First pass: replace all _TN with unique placeholders
-    let mut result = input.to_string();
-    // Sort by length descending to avoid substring issues
-    let mut sorted_names: Vec<&String> = assignments.keys().collect();
-    sorted_names.sort_by(|a, b| b.len().cmp(&a.len()));
-
-    // Use two-pass replacement to avoid conflicts
-    let mut placeholders: Vec<(String, String)> = Vec::new();
-    for (orig, canonical) in &assignments {
-        if orig != canonical {
-            let placeholder = format!("__TEMP_PH_{}_", orig.replace("_T", ""));
-            placeholders.push((orig.clone(), placeholder.clone()));
-        }
-    }
-    // Phase 1: orig → placeholder
-    for (orig, ph) in &placeholders {
-        result = replace_word_boundary(&result, orig, ph);
-    }
-    // Phase 2: placeholder → canonical
-    for (orig, ph) in &placeholders {
-        let canonical = &assignments[orig];
-        result = result.replace(ph.as_str(), canonical);
-    }
-
-    result
-}
-
-fn replace_word_boundary(input: &str, from: &str, to: &str) -> String {
-    let bytes = input.as_bytes();
-    let fbytes = from.as_bytes();
-    let flen = fbytes.len();
+    // Single-pass replacement: walk through the text, replacing tokens as we go
     let mut result = String::with_capacity(input.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if i + flen <= bytes.len() && &bytes[i..i+flen] == fbytes {
-            let before_ok = i == 0 || (!bytes[i-1].is_ascii_alphanumeric() && bytes[i-1] != b'_' && bytes[i-1] != b'$');
-            let after_ok = i + flen >= bytes.len() || (!bytes[i+flen].is_ascii_alphanumeric() && bytes[i+flen] != b'_');
-            if before_ok && after_ok {
-                result.push_str(to);
-                i += flen;
-                continue;
-            }
+    let mut pos = 0;
+    for (tok_start, tok_end, tok_name) in &all_tokens {
+        // Append text before this token
+        result.push_str(&input[pos..*tok_start]);
+        // Append the replacement
+        if let Some(canonical) = assignments.get(tok_name) {
+            result.push_str(canonical);
+        } else {
+            result.push_str(tok_name);
         }
-        result.push(bytes[i] as char);
-        i += 1;
+        pos = *tok_end;
     }
+    // Append remaining text
+    result.push_str(&input[pos..]);
+
     result
 }
 
@@ -1687,7 +1655,7 @@ fn show_diffs() {
         .expect("spawn")
         .join()
         .expect("join");
-    drop(result);
+    let _ = result;
 }
 
 fn show_diffs_impl() {
@@ -1771,7 +1739,7 @@ fn run_all_fixtures() {
         .expect("spawn")
         .join()
         .expect("join");
-    drop(result);
+    let _ = result;
 }
 
 fn run_all_fixtures_impl() {
