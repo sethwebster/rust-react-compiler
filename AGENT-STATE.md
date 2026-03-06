@@ -249,6 +249,7 @@ Key file changes:
 - **Fixtures**: `react/compiler/packages/babel-plugin-react-compiler/src/__tests__/fixtures/compiler/`
 - **`react/` is NOT part of this repo** — it is a local reference checkout only (for reading source/fixtures). Never `git add` or commit anything under `react/`.
 - **inlined_exprs propagation**: After scope emission assigns tN names, must propagate through inlined_exprs to update stale $tN references. Done at both emit_scope_block_inner sites.
+- **Fixture total is 1717, not 1244**: The fixture dir has 18 subdirectories (`fault-tolerance/`, `propagate-scope-deps-hir-fork/`, `reduce-reactive-deps/`, `exhaustive-deps/`, `rules-of-hooks/`, etc.) containing 473 additional fixtures. `run_all_fixtures_impl` uses flat `read_dir` (non-recursive) so only counts the 1244 top-level files. The 1717 figure is what the TS compiler actually tests against.
 
 ---
 
@@ -290,3 +291,4 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-05 | 84.2 | 32.9 | — | 18 | 28 | function outlining, scope output counting, test normalizations (+12) |
 | 2026-03-05 | 84.2 | 33.2 | — | 18 | 28 | TSX parsing, type annotation stripping, as-const norm (+5) |
 | 2026-03-06 | 84.2 | 35.0 | — | 18 | 28 | ComputedLoad dep tracing, for-of destructuring, IIFE/binding norms (+22) |
+| 2026-03-06 | 84.2 | 35.0+ | — | 18 | 28 | Discovered 1717 total fixtures (473 in subdirs missed by flat read_dir) |
