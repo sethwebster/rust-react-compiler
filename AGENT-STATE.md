@@ -268,29 +268,28 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 
 ## History
 
-| Date | Compile % | Correct % | Overall % | Passes Real | Stubs |
-|------|-----------|-----------|-----------|-------------|-------|
-| 2026-03-02 | 84.2 | 17.3 | 29 | 14 | 38 |
-| 2026-03-02 | 84.2 | 21.5 | — | 14 | 38 | codegen, SSA, scope passes |
-| 2026-03-02 | 84.2 | 22.0 | — | 15 | 37 | drop_manual_memoization, IIFE unwrap |
-| 2026-03-03 | 84.2 | 22.7 | — | 16 | 36 | PruneNonEscapingScopes (DeclarationId), dep hoisting |
-| 2026-03-03 | 84.2 | 22.8 | — | 16 | 36 | optional chaining fix, mismatch analysis, plan |
-| 2026-03-03 | 84.2 | 23.1 | — | 16 | 36 | Phase 1 codegen: $tN leak, for-init, lambda hoisting |
-| 2026-03-03 | 84.2 | 23.8 | — | 16 | 36 | switch braces (+3), for-loop update DCE + continue (+6) |
-| 2026-03-03 | 84.2 | 23.8 | — | 16 | 36 | ralph-loop iter1: flatten_reactive_loops deferred, near-miss analysis |
-| 2026-03-03 | 84.2 | 24.1 | — | 16 | 36 | ralph-loop iter2: alloc dep tracing (+4), rename_variables deferred |
-| 2026-03-03 | 84.2 | 24.1 | — | 16 | 36 | ralph-loop iter3: tree builder skeleton, scope inference investigation |
-| 2026-03-03 | 84.2 | 24.1 | — | 16 | 36 | fixed propagate_scope_dependencies compile regression |
-| 2026-03-03 | 84.2 | 24.1 | — | 16 | 36 | scope-terminals + loop-flatten passes behind flags |
-| 2026-03-04 | 84.2 | 24.4 | — | 17 | 35 | align_reactive_scopes_to_block_scopes_hir: stub->REAL (+4) |
-| 2026-03-04 | 84.2 | 26.4 | — | 17 | 35 | const-prop folding (+1), hook method call (+2), scope output naming (+4), lint mode + use-no-memo (+17) |
-| 2026-03-04 | 84.2 | 27.7 | — | 17 | 35 | pragma support (+6), update expr results (+2), @gating (+1) |
-| 2026-03-04 | 84.2 | 27.9 | — | 17 | 35 | destructuring const->let for mutated bindings (+2) |
-| 2026-03-05 | 84.2 | 28.8 | — | 17 | 35 | lattice const-prop, dep hoisting, return/else codegen (+11) |
-| 2026-03-05 | 84.2 | 29.0 | — | 18 | 28 | SCCP branch folding, phi self-loop fix, catch norm (+3) |
-| 2026-03-05 | 84.2 | 29.6 | — | 18 | 28 | catch space norm, brace/JSX spacing norm (+7) |
-| 2026-03-05 | 84.2 | 31.9 | — | 18 | 28 | closure rewrite, destructuring defaults, dead phi DCE, SSA, scope fixes (+29) |
-| 2026-03-05 | 84.2 | 32.9 | — | 18 | 28 | function outlining, scope output counting, test normalizations (+12) |
-| 2026-03-05 | 84.2 | 33.2 | — | 18 | 28 | TSX parsing, type annotation stripping, as-const norm (+5) |
-| 2026-03-06 | 84.2 | 35.0 | — | 18 | 28 | ComputedLoad dep tracing, for-of destructuring, IIFE/binding norms (+22) |
-| 2026-03-06 | 84.2 | 35.0 | — | 18 | 28 | Discovered 1717 total fixtures (473 in subdirs); denominator stays 1244 (top-level tested) |
+| Date | Compile % | Correct % | Overall % | Passes Real | Stubs | Notes |
+|------|-----------|-----------|-----------|-------------|-------|-------|
+| 2026-03-02 | 61.0 | 12.5 | — | 14 | 38 | baseline |
+| 2026-03-02 | 61.0 | 15.6 | — | 14 | 38 | codegen, SSA, scope passes |
+| 2026-03-02 | 61.0 | 16.0 | — | 15 | 37 | drop_manual_memoization, IIFE unwrap |
+| 2026-03-03 | 61.0 | 16.4 | — | 16 | 36 | PruneNonEscapingScopes (DeclarationId), dep hoisting |
+| 2026-03-03 | 61.0 | 16.5 | — | 16 | 36 | optional chaining fix, mismatch analysis, plan |
+| 2026-03-03 | 61.0 | 16.7 | — | 16 | 36 | Phase 1 codegen: $tN leak, for-init, lambda hoisting |
+| 2026-03-03 | 61.0 | 17.2 | — | 16 | 36 | switch braces (+3), for-loop update DCE + continue (+6) |
+| 2026-03-03 | 61.0 | 17.2 | — | 16 | 36 | ralph-loop iter1: flatten_reactive_loops deferred, near-miss analysis |
+| 2026-03-03 | 61.0 | 17.5 | — | 16 | 36 | ralph-loop iter2: alloc dep tracing (+4), rename_variables deferred |
+| 2026-03-03 | 61.0 | 17.5 | — | 16 | 36 | ralph-loop iter3: tree builder skeleton, scope inference investigation |
+| 2026-03-03 | 61.0 | 17.5 | — | 16 | 36 | fixed propagate_scope_dependencies compile regression |
+| 2026-03-03 | 61.0 | 17.5 | — | 16 | 36 | scope-terminals + loop-flatten passes behind flags |
+| 2026-03-04 | 61.0 | 17.7 | — | 17 | 35 | align_reactive_scopes_to_block_scopes_hir: stub->REAL (+4) |
+| 2026-03-04 | 61.0 | 19.1 | — | 17 | 35 | const-prop folding (+1), hook method call (+2), scope output naming (+4), lint mode + use-no-memo (+17) |
+| 2026-03-04 | 61.0 | 20.1 | — | 17 | 35 | pragma support (+6), update expr results (+2), @gating (+1) |
+| 2026-03-04 | 61.0 | 20.2 | — | 17 | 35 | destructuring const->let for mutated bindings (+2) |
+| 2026-03-05 | 61.0 | 20.9 | — | 17 | 35 | lattice const-prop, dep hoisting, return/else codegen (+11) |
+| 2026-03-05 | 61.0 | 21.0 | — | 18 | 28 | SCCP branch folding, phi self-loop fix, catch norm (+3) |
+| 2026-03-05 | 61.0 | 21.4 | — | 18 | 28 | catch space norm, brace/JSX spacing norm (+7) |
+| 2026-03-05 | 61.0 | 23.1 | — | 18 | 28 | closure rewrite, destructuring defaults, dead phi DCE, SSA, scope fixes (+29) |
+| 2026-03-05 | 61.0 | 23.8 | — | 18 | 28 | function outlining, scope output counting, test normalizations (+12) |
+| 2026-03-05 | 61.0 | 24.1 | — | 18 | 28 | TSX parsing, type annotation stripping, as-const norm (+5) |
+| 2026-03-06 | 61.0 | 25.3 | — | 18 | 28 | ComputedLoad dep tracing, for-of destructuring, IIFE/binding norms (+22) |
