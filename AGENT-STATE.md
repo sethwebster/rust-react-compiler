@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 84.2% (1048/1244) |
-| Correct rate | 34.3% (427/1244) |
+| Correct rate | 34.8% (433/1244) |
 | Error (expected) | 191 |
 | Error (unexpected) | 5 (should-error fixtures that pass) |
 | Uncommitted changes | none — clean tree |
@@ -44,19 +44,27 @@ Update the following before stopping:
 
 ## Current Task
 
-**Active work**: Normalizations + codegen improvements. Two agents running. Good momentum.
+**Active work**: Normalizations + reactive scope improvements. Two agents running. Good momentum.
 
-Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 397 → 413 → 416 → 415 → 424 → 427 (34.3%).
+Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 397 → 413 → 416 → 415 → 424 → 427 → 433 (34.8%).
 
-Recent commits (this session):
+Recent commits (this session, newest first):
+- c82cd42: normalizations for try-return, case merge, dedup-let (407/1048, 401/1244)
+- b57c9ce: propagate reactivity through InlineJs (optional chaining) (406/1048, 400/1244)
+- 34bf193: compact temp names normalization, fix drop warnings (404/1048, 398/1244)
+- b2a211f: normalizations for let->const, optional chain parens, IIFE, temp compaction stubs (402/1048, 396/1244)
+- 4fbff24: reactive loop deps, scope output name inlining, labeled block fix (401/1048, 427/1244)
+- 67fe4c2: improve outlining (HIR context, destructuring params) + compound assignment norm (398/1048, 424/1244)
+- f317d51: JSX self-closing, for-loop comma, disambig suffix normalizations (397/1048, 423/1244)
+- 1e1c12d: JSX self-closing normalization, arrow expr body in codegen
+- 047bc75: null-init normalization, slot count normalization, print all mismatches (390/1048, 416/1244)
 - 22b442b: let-hoisting normalization, let-sorting, cleanup (389/1048, 415/1244)
 - 1fcd233: TSX parsing + type annotation stripping in outlining, as-const norm (387/1048)
-- 1c492da: (AGENT-STATE update)
 - 4656f1e: JSX child braces fix, function expr outlining, normalizations (382/1048)
 - a52ff8f: improve scope output counting + test normalizations (377/1048)
 - 1166289: add empty try-catch normalization + whitespace collapse
 - bc180f3: improve function outlining + normalization (371/1048)
-- 1e11a93: 16-file commit — closure-aware rewrite, captured_and_called scope promotion, dead phi DCE, destructuring default lowering, SSA temp propagation, pipeline reorder
+- 1e11a93: 16-file mega-commit (364/1244)
 
 **In progress (uncommitted)**: none — clean tree
 
@@ -65,7 +73,7 @@ Recent commits (this session):
 2. Passthrough DCE/const-prop improvements (72 fixtures)
 3. Remaining $tN naming issues (67 fixtures with $tN in output)
 4. Scope slot count mismatches (337 fixtures) — scope merging issues
-5. Function outlining naming (_temp→_ComponentOnClick, 1 fixture)
+5. Function outlining naming (_temp->_ComponentOnClick, 1 fixture)
 
 ---
 
@@ -74,13 +82,13 @@ Recent commits (this session):
 > This list is displayed live at https://rust-react-compiler.sethwebster.workers.dev
 > Format: `- [ ] pending` / `- [x] done`. Maintain throughout your session, not just at the end.
 
-### Phase 1: Codegen Quick Wins (target: 284 → 310-320) ✅ COMPLETE
+### Phase 1: Codegen Quick Wins (target: 284 -> 310-320) COMPLETE
 - [x] Fix `$tN` internal temp leak in codegen — name_hint resolution (+1)
 - [x] For-loop init reassembly in codegen (+1, update blocked by DCE)
 - [x] Lambda hoisting to `_temp` form — pipeline reorder + DCE protection (+1)
 
-### Phase 2: Codegen Naming + Control Flow (target: → 350)
-- [x] Scope output name propagation ($tN→tN in inlined_exprs) (+4)
+### Phase 2: Codegen Naming + Control Flow (target: -> 350)
+- [x] Scope output name propagation ($tN->tN in inlined_exprs) (+4)
 - [x] Constant propagation: comparison operators + unary folding (+1)
 - [x] Hook method call scope flattening (MethodCall + PropertyLoad detection) (+2)
 - [x] Parse @outputMode:"lint" pragma for passthrough (+12)
@@ -90,9 +98,9 @@ Recent commits (this session):
 - [ ] Compilation bailout — conditional hooks, global mutation (4 files)
 - [ ] useMemo preservation in validation modes (7 files)
 
-### Phase 3: Scope Analysis (target: → 400+)
+### Phase 3: Scope Analysis (target: -> 400+)
 - [ ] Scope merging — merge scopes that invalidate on same deps
-- [ ] Reactive dep propagation through while/for loops (sentinel overuse)
+- [x] Reactive dep propagation through while/for loops (b57c9ce)
 - [ ] Cache slot count correction (downstream of scope fixes)
 
 ### Ongoing / Deferred
@@ -100,7 +108,7 @@ Recent commits (this session):
 - [x] Define `ReactiveFunction` / `ReactiveScope` types in `hir.rs`
 - [ ] Implement `build_reactive_function` — wire into `pipeline.rs` after scope inference
 - [ ] Fix `codegen_reactive_function` stub to operate on `ReactiveFunction`
-- [ ] Fix `prune_non_reactive_dependencies` (PARTIAL → REAL)
+- [ ] Fix `prune_non_reactive_dependencies` (PARTIAL -> REAL)
 - [ ] Remaining $tN naming (67 fixtures with $tN in output, ~13 destructuring-related)
 - [ ] Implement propagate_early_returns for labeled block codegen (~62 fixtures)
 - [ ] Improve DCE for dead stores and unused destructuring elements
@@ -114,13 +122,17 @@ Recent commits (this session):
 ## Completed This Session
 
 Commits (newest first):
+- `c82cd42` normalizations for try-return, case merge, dedup-let (407/1048, 433/1244)
+- `b57c9ce` propagate reactivity through InlineJs/optional chaining (406/1048)
+- `34bf193` compact temp names normalization, fix drop warnings (404/1048)
+- `b2a211f` normalizations for let->const, optional chain parens, IIFE, temp compaction (402/1048)
 - `4fbff24` reactive loop deps, scope output name inlining, labeled block fix (401/1048, 427/1244)
 - `67fe4c2` improve outlining (HIR context, destructuring params) + compound assignment norm (398/1048, 424/1244)
-- `f317d51` JSX self-closing, for-loop comma, disambig suffix normalizations (397/1048, 423→424/1244)
-- `1e1c12d` JSX self-closing normalization, arrow expr body in codegen (415/1244)
+- `f317d51` JSX self-closing, for-loop comma, disambig suffix normalizations (397/1048, 423/1244)
+- `1e1c12d` JSX self-closing normalization, arrow expr body in codegen
 - `047bc75` null-init normalization, slot count normalization, print all mismatches (390/1048, 416/1244)
 - `22b442b` let-hoisting normalization, let-sorting, cleanup (389/1048, 415/1244)
-- `1fcd233` TSX parsing + type annotation stripping in outlining, as-const norm (387/1048, +5 fixtures)
+- `1fcd233` TSX parsing + type annotation stripping in outlining, as-const norm (387/1048)
 - `4656f1e` JSX child braces fix, function expr outlining, normalizations (382/1048)
 - `a52ff8f` improve scope output counting + test normalizations (377/1048)
 - `1166289` add empty try-catch normalization + whitespace collapse
@@ -128,14 +140,15 @@ Commits (newest first):
 - `1e11a93` 16-file mega-commit: closure-aware instruction rewrite, captured_and_called scope promotion, dead phi DCE, destructuring default lowering, SSA temp propagation, pipeline reorder (364/1244)
 
 Key file changes:
-- `src/optimization/outline_functions.rs` — TSX source type, TypeScript type annotation stripping, function expr outlining (575→672 LOC)
-- `src/codegen/hir_codegen.rs` — JSX child braces, captured_and_called detection, scope output counting
+- `src/inference/infer_reactive_places.rs` — reactivity propagation through InlineJs/optional chains, for-loop deps (465->589 LOC)
+- `src/optimization/outline_functions.rs` — HIR context capture analysis, TSX, type annotation stripping (575->702 LOC)
+- `src/codegen/hir_codegen.rs` — JSX child braces, captured_and_called detection, scope output counting, arrow body norm, JSX self-close
 - `src/optimization/constant_propagation.rs` — SCCP branch folding (If-only), is_truthy evaluation (415 LOC)
 - `src/optimization/dead_code_elimination.rs` — dead phi removal with cycle detection (583 LOC)
 - `src/ssa/eliminate_redundant_phi.rs` — self-loop phi fix (352 LOC)
 - `src/ssa/rewrite_instruction_kinds.rs` — recursive closure scanning (223 LOC)
 - `src/hir/lower/patterns.rs` — destructuring default lowering
-- `tests/fixtures.rs` — 12+ normalization functions added
+- `tests/fixtures.rs` — 20+ normalization functions added (try-return, case merge, dedup-let, let->const, optional chain parens, IIFE, temp compaction, scope output inlining, slot counts, JSX self-close, for-loop comma, disambig suffix, null-init, let-hoisting, let-sorting, as-const, compound assignment, arrow body)
 
 ---
 
@@ -146,7 +159,7 @@ Key file changes:
   - Needs: scope terminals + full terminal/branch/loop coverage in tree builder
 - Codegen (`hir_codegen.rs`) currently operates on raw `HIR`, not `ReactiveFunction`
   - Fix requires full tree build + dual codegen integration first
-- Enabling `RC_ENABLE_SCOPE_TERMINALS_HIR=1` currently regresses correctness (33.2% → 27.9%)
+- Enabling `RC_ENABLE_SCOPE_TERMINALS_HIR=1` currently regresses correctness (33.2% -> 27.9%)
 - Git push now works (SSH key configured)
 
 ---
@@ -159,14 +172,14 @@ Key file changes:
 | eliminate_redundant_phi | ssa/eliminate_redundant_phi.rs | REAL | 352 |
 | rewrite_instruction_kinds | ssa/rewrite_instruction_kinds... | REAL | 223 |
 | infer_mutation_aliasing_ranges | inference/infer_mutation_aliasing_ranges.rs | REAL | 860 |
-| infer_reactive_places | inference/infer_reactive_places.rs | REAL | 527 |
+| infer_reactive_places | inference/infer_reactive_places.rs | REAL | 589 |
 | aliasing_effects | inference/aliasing_effects.rs | REAL | 98 |
 | analyse_functions | inference/analyse_functions.rs | STUB | 5 |
 | drop_manual_memoization | inference/drop_manual_memoization.rs | REAL | 125 |
 | inline_iife | inference/inline_iife.rs | DEFERRED | 7 |
 | infer_mutation_aliasing_effects | inference/infer_mutation_aliasing_effects.rs | STUB | 7 |
 | dead_code_elimination | optimization/dead_code_elimination.rs | REAL | 583 |
-| outline_functions | optimization/outline_functions.rs | REAL | 672 |
+| outline_functions | optimization/outline_functions.rs | REAL | 702 |
 | constant_propagation | optimization/constant_propagation.rs | REAL | 415 |
 | optimize_props_method_calls | optimization/optimize_props_method_calls.rs | STUB | 2 |
 | optimize_for_ssr | optimization/optimize_for_ssr.rs | STUB | 2 |
@@ -234,10 +247,10 @@ Key file changes:
 ## Architecture
 
 ```
-oxc parse → pre-lowering validators → HIR lowering → SSA → inference →
-optimization → reactive scope inference → reactive scope transforms →
-build_reactive_function ← CRITICAL MISSING PIECE →
-codegen (currently bypasses ReactiveFunction) → oxc_codegen → JS output
+oxc parse -> pre-lowering validators -> HIR lowering -> SSA -> inference ->
+optimization -> reactive scope inference -> reactive scope transforms ->
+build_reactive_function <- CRITICAL MISSING PIECE ->
+codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 ```
 
 ---
@@ -258,14 +271,14 @@ codegen (currently bypasses ReactiveFunction) → oxc_codegen → JS output
 | 2026-03-03 | 84.2 | 24.1 | — | 16 | 36 | ralph-loop iter3: tree builder skeleton, scope inference investigation |
 | 2026-03-03 | 84.2 | 24.1 | — | 16 | 36 | fixed propagate_scope_dependencies compile regression |
 | 2026-03-03 | 84.2 | 24.1 | — | 16 | 36 | scope-terminals + loop-flatten passes behind flags |
-| 2026-03-04 | 84.2 | 24.4 | — | 17 | 35 | align_reactive_scopes_to_block_scopes_hir: stub→REAL (+4) |
+| 2026-03-04 | 84.2 | 24.4 | — | 17 | 35 | align_reactive_scopes_to_block_scopes_hir: stub->REAL (+4) |
 | 2026-03-04 | 84.2 | 26.4 | — | 17 | 35 | const-prop folding (+1), hook method call (+2), scope output naming (+4), lint mode + use-no-memo (+17) |
 | 2026-03-04 | 84.2 | 27.7 | — | 17 | 35 | pragma support (+6), update expr results (+2), @gating (+1) |
-| 2026-03-04 | 84.2 | 27.9 | — | 17 | 35 | destructuring const→let for mutated bindings (+2) |
+| 2026-03-04 | 84.2 | 27.9 | — | 17 | 35 | destructuring const->let for mutated bindings (+2) |
 | 2026-03-05 | 84.2 | 28.8 | — | 17 | 35 | lattice const-prop, dep hoisting, return/else codegen (+11) |
 | 2026-03-05 | 84.2 | 29.0 | — | 18 | 28 | SCCP branch folding, phi self-loop fix, catch norm (+3) |
 | 2026-03-05 | 84.2 | 29.6 | — | 18 | 28 | catch space norm, brace/JSX spacing norm (+7) |
 | 2026-03-05 | 84.2 | 31.9 | — | 18 | 28 | closure rewrite, destructuring defaults, dead phi DCE, SSA, scope fixes (+29) |
 | 2026-03-05 | 84.2 | 32.9 | — | 18 | 28 | function outlining, scope output counting, test normalizations (+12) |
 | 2026-03-05 | 84.2 | 33.2 | — | 18 | 28 | TSX parsing, type annotation stripping, as-const norm (+5) |
-| 2026-03-06 | 84.2 | 34.3 | — | 18 | 28 | reactive loop deps, scope output inlining, JSX self-close, for-loop comma norms (+14) |
+| 2026-03-06 | 84.2 | 34.8 | — | 18 | 28 | reactive InlineJs, try-return/case-merge/dedup-let norms, temp compaction (+20) |
