@@ -1191,6 +1191,17 @@ fn normalize_let_return_const(input: &str) -> String {
 fn normalize_simple_iife(input: &str) -> String {
     let pat = "(() => {";
     let mut result = input.to_string();
+    // First pass: replace bare-return / empty IIFEs with `undefined`.
+    // `(() => {return;})()` → `undefined`, `(() => {})()` → `undefined`
+    loop {
+        let changed = false;
+        for bare in &["(() => {return;})()","(() => {})()"] {
+            while let Some(pos) = result.find(bare) {
+                result = format!("{}undefined{}", &result[..pos], &result[pos + bare.len()..]);
+            }
+        }
+        if !changed { break; }
+    }
     loop {
         let Some(iife_start) = result.find(pat) else { break; };
         // Check what's before the IIFE: should be `VAR = ` or `VAR =`
@@ -1239,24 +1250,34 @@ fn normalize_simple_iife(input: &str) -> String {
 
         let body = &result[body_start..body_end];
         // Count returns in the body (only at depth 0 relative to the IIFE body)
-        let return_count = body.matches("return ").count();
-        if return_count != 1 {
-            // Not a simple IIFE (has early returns or no return)
-            break;
-        }
-        // Find the last `return EXPR;` in the body
-        let ret_pos = body.rfind("return ").unwrap();
-        let ret_end = body[ret_pos..].find(';').map(|p| ret_pos + p);
-        if ret_end.is_none() { break; }
-        let ret_end = ret_end.unwrap();
-        let return_expr = &body[ret_pos + 7..ret_end]; // everything between `return ` and `;`
-        let pre_return = &body[..ret_pos];
+        let return_count = body.matches("return ").count() + body.matches("return;").count();
 
-        // Build replacement: BODY VAR = EXPR;
         let prefix = &result[..var_start];
         let suffix = if full_end < result.len() { &result[full_end..] } else { "" };
-        let new_text = format!("{}{}{} = {};{}", prefix, pre_return.trim(), var_name, return_expr, suffix);
-        result = new_text;
+
+        if return_count == 0 {
+            // No-return IIFE: `VAR = (() => {BODY})();` → `BODY; VAR = undefined;`
+            let body_trimmed = body.trim();
+            let new_text = if body_trimmed.is_empty() {
+                format!("{}{} = undefined;{}", prefix, var_name, suffix)
+            } else {
+                format!("{}{} {} = undefined;{}", prefix, body_trimmed, var_name, suffix)
+            };
+            result = new_text;
+        } else if return_count == 1 && body.matches("return ").count() == 1 {
+            // Single-return IIFE: `VAR = (() => {BODY; return EXPR;})();` → `BODY; VAR = EXPR;`
+            let ret_pos = body.rfind("return ").unwrap();
+            let ret_end = body[ret_pos..].find(';').map(|p| ret_pos + p);
+            if ret_end.is_none() { break; }
+            let ret_end = ret_end.unwrap();
+            let return_expr = &body[ret_pos + 7..ret_end];
+            let pre_return = &body[..ret_pos];
+            let new_text = format!("{}{}{} = {};{}", prefix, pre_return.trim(), var_name, return_expr, suffix);
+            result = new_text;
+        } else {
+            // Multiple returns — can't simplify
+            break;
+        }
         // Continue loop to handle nested IIFEs
     }
     result
@@ -1699,6 +1720,8 @@ fn normalize_slot_counts(input: &str) -> String {
     }
     result
 }
+
+
 
 /// Normalize scope output variable names.
 ///
