@@ -257,6 +257,10 @@ struct ScopeOutput {
     /// annotation string (e.g. "const") so that `return tN as const` is emitted
     /// instead of putting `as const` inside the scope body.
     terminal_type_cast_annotation: Option<String>,
+    /// If Some(idx), the scope's last instruction is a Destructure that should be
+    /// emitted post-scope (after the if/else block) using the scope output variable
+    /// as its value. The value is idx into the scope's instruction slice.
+    post_scope_destructure_idx: Option<usize>,
 }
 
 /// Identifies which loop type is being wrapped in a scope block.
@@ -2235,6 +2239,12 @@ impl<'a> Codegen<'a> {
                     let old_name = format!("$t{}", skip_instr.lvalue.identifier.0);
                     old_to_new.push((old_name, cache_var.clone()));
                     self.inlined_exprs.insert(skip_instr.lvalue.identifier.0, cache_var.clone());
+                    // Special case: if the skipped instruction is a Destructure, also map
+                    // the Destructure's VALUE to the scope output var. This allows the
+                    // post-scope Destructure emission to use `self.expr(value)` → scope var.
+                    if let InstructionValue::Destructure { value, .. } = &skip_instr.value {
+                        self.inlined_exprs.insert(value.identifier.0, cache_var.clone());
+                    }
                 }
             }
         }
@@ -2245,6 +2255,19 @@ impl<'a> Codegen<'a> {
                     if value == old_name {
                         *value = new_name.clone();
                     }
+                }
+            }
+        }
+
+        // Emit the post-scope Destructure (if any). This handles cases like
+        // `const [[x] = ['default']] = props.y;` where the scope computes the
+        // conditional result (TernaryExpression), and the Destructure `const [x] = result`
+        // must be emitted AFTER the scope's if/else block.
+        if let Some(dest_idx) = analysis.post_scope_destructure_idx {
+            if let Some(dest_instr) = instrs.get(dest_idx) {
+                if let Some(s) = self.emit_stmt(dest_instr, Some(*scope_id), &all_out_names) {
+                    let reindented = reindent_multiline(&s, &pad);
+                    let _ = writeln!(out, "{pad}{reindented}");
                 }
             }
         }
@@ -2729,6 +2752,9 @@ impl<'a> Codegen<'a> {
 
         // Collect all logical-phi resolutions first (avoid borrow conflict).
         let mut new_entries: Vec<(u32, String)> = Vec::new();
+        // Track IDs added by this function so the post-processing substitution
+        // only operates on these entries (not entries from build_inline_map).
+        let mut logical_phi_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
         // We may need multiple passes for nested logical expressions (a && b && c).
         // Each pass may expose new phi results that become operands for the next phi.
@@ -2805,6 +2831,7 @@ impl<'a> Codegen<'a> {
                     };
 
                     let combined = format!("{left_expr} {op_str} {right_expr}");
+                    logical_phi_ids.insert(phi.place.identifier.0);
                     new_entries.push((phi.place.identifier.0, combined.clone()));
                     // Also map any use of the pre-SSA phi result to the combined expression.
                     // Because enter_ssa doesn't rename pre-existing phi results, the terminal
@@ -2812,6 +2839,7 @@ impl<'a> Codegen<'a> {
                     // Specifically, the fallthrough block's Branch.test is the SSA-renamed version.
                     if let Terminal::Branch { test: fall_test, logical_op: None, .. } = &fall_block.terminal {
                         if fall_test.identifier.0 != phi.place.identifier.0 {
+                            logical_phi_ids.insert(fall_test.identifier.0);
                             new_entries.push((fall_test.identifier.0, combined));
                         }
                     }
@@ -2828,6 +2856,82 @@ impl<'a> Codegen<'a> {
                 break;
             }
         }
+
+        // Post-processing: substitute any raw $tN references that appear in combined
+        // expressions added by resolve_logical_phis. This handles chained logicals like
+        // `a && b && c` where the intermediate phi result `$t10` may still appear
+        // literally in `$t12`'s string because `$t10` was added to new_entries in the
+        // same round that `$t12` was processed (before it was flushed to inlined_exprs).
+        //
+        // We ONLY substitute within entries that resolve_logical_phis itself added
+        // (tracked in logical_phi_ids). We do NOT touch entries from build_inline_map
+        // because those may intentionally contain `$tN` references to multi-use SSA
+        // temps that should remain as named variables.
+        for _ in 0..16 {
+            let mut changed = false;
+            for &id in &logical_phi_ids {
+                let expr = match self.inlined_exprs.get(&id) {
+                    Some(e) => e.clone(),
+                    None => continue,
+                };
+                if !expr.contains("$t") {
+                    continue;
+                }
+                let new_expr = Self::substitute_temp_refs_in_str(&expr, &self.inlined_exprs);
+                if new_expr != expr {
+                    self.inlined_exprs.insert(id, new_expr);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    /// Replace occurrences of `$tN` in `expr` with their resolved strings from `map`,
+    /// wrapping the resolved expression in parens when it contains binary logical operators
+    /// (to preserve precedence in the surrounding context).
+    fn substitute_temp_refs_in_str(expr: &str, map: &HashMap<u32, String>) -> String {
+        let mut result = String::with_capacity(expr.len());
+        let bytes = expr.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b't' {
+                let digit_start = i + 2;
+                let mut j = digit_start;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > digit_start {
+                    let id_str = &expr[digit_start..j];
+                    if let Ok(id) = id_str.parse::<u32>() {
+                        if let Some(resolved) = map.get(&id) {
+                            // Wrap in parens if the resolved expression contains logical
+                            // binary operators to preserve operator precedence.
+                            let needs_parens = resolved.contains(" && ")
+                                || resolved.contains(" || ")
+                                || resolved.contains(" ?? ");
+                            if needs_parens {
+                                result.push('(');
+                                result.push_str(resolved);
+                                result.push(')');
+                            } else {
+                                result.push_str(resolved);
+                            }
+                            i = j;
+                            continue;
+                        }
+                    }
+                }
+            }
+            // Not a $tN pattern or not in map — copy character as-is.
+            // SAFETY: We index into valid UTF-8 bytes at positions produced by
+            // byte-by-byte scanning; all non-`$t` paths emit exactly one byte here.
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+        result
     }
 
     /// Returns true if any Place operand of `value` belongs to a reactive scope.
@@ -3237,7 +3341,7 @@ impl<'a> Codegen<'a> {
                         is_named_var: false,
                     }
                 };
-                return ScopeOutput { outputs: vec![output], intra_scope_stores: esc_intra, terminal_place_id: None, terminal_type_cast_annotation: None };
+                return ScopeOutput { outputs: vec![output], intra_scope_stores: esc_intra, terminal_place_id: None, terminal_type_cast_annotation: None, post_scope_destructure_idx: None };
             }
             // Check if the feed instruction is a LoadLocal of a named variable.
             // If so, use named-var approach: `let ret;` / `ret = ...` / `else { ret = $[N]; }`.
@@ -3265,6 +3369,7 @@ impl<'a> Codegen<'a> {
                     intra_scope_stores,
                     terminal_place_id: Some(feed_id),
                     terminal_type_cast_annotation: None,
+                    post_scope_destructure_idx: None,
                 };
             }
             // If the terminal feed instruction is a TypeCastExpression (e.g. `x as const`),
@@ -3299,6 +3404,7 @@ impl<'a> Codegen<'a> {
                 intra_scope_stores,
                 terminal_place_id: Some(feed_id),
                 terminal_type_cast_annotation: type_cast_ann,
+                post_scope_destructure_idx: None,
             };
         }
 
@@ -3428,7 +3534,7 @@ impl<'a> Codegen<'a> {
                 .filter(|(i, _, _, intra)| (*intra || shadowed_esc_indices.contains(i)) && !esc_indices.contains(i))
                 .map(|(i, _, _, _)| *i)
                 .collect();
-            return ScopeOutput { outputs, intra_scope_stores: intra, terminal_place_id: None, terminal_type_cast_annotation: None };
+            return ScopeOutput { outputs, intra_scope_stores: intra, terminal_place_id: None, terminal_type_cast_annotation: None, post_scope_destructure_idx: None };
         }
 
         // No StoreLocal found. Collect ALL non-transparent instructions whose lvalue
@@ -3470,6 +3576,7 @@ impl<'a> Codegen<'a> {
                 intra_scope_stores,
                 terminal_place_id: None,
                 terminal_type_cast_annotation: None,
+                post_scope_destructure_idx: None,
             };
         }
         // Fallback: last non-transparent instruction that is used OUTSIDE the scope.
@@ -3485,6 +3592,26 @@ impl<'a> Codegen<'a> {
             if uses == 0 { continue; }
             // Only emit as scope output if the value is actually consumed outside this scope.
             if !self.is_var_used_outside_scope(instr.lvalue.identifier, &scope_lvalue_ids) { continue; }
+            // Special case: if the scope output is a Destructure, the Destructure itself
+            // doesn't produce a cacheable value. Instead, cache the Destructure's VALUE
+            // and emit the Destructure post-scope using the scope output variable.
+            if let InstructionValue::Destructure { value, .. } = &instr.value {
+                let cache_expr = self.inlined_exprs.get(&value.identifier.0).cloned()
+                    .unwrap_or_else(|| self.expr(value));
+                return ScopeOutput {
+                    outputs: vec![ScopeOutputItem {
+                        skip_idx: Some(idx),
+                        cache_expr,
+                        out_name: None,
+                        out_kw: "const",
+                        is_named_var: false,
+                    }],
+                    intra_scope_stores,
+                    terminal_place_id: None,
+                    terminal_type_cast_annotation: None,
+                    post_scope_destructure_idx: Some(idx),
+                };
+            }
             // Prefer fresh try_inline_instr over stale build_inline_map entry.
             let cache_expr = if let Some(computed) = self.try_inline_instr(instr) {
                 computed
@@ -3504,6 +3631,7 @@ impl<'a> Codegen<'a> {
                 intra_scope_stores,
                 terminal_place_id: None,
                 terminal_type_cast_annotation: None,
+                post_scope_destructure_idx: None,
             };
         }
 
@@ -3519,6 +3647,25 @@ impl<'a> Codegen<'a> {
                 | InstructionValue::PropertyLoad { .. }
             );
             if is_transparent { continue; }
+            // Special case: if the scope output is a Destructure, cache its VALUE
+            // and emit the Destructure post-scope.
+            if let InstructionValue::Destructure { value, .. } = &instr.value {
+                let cache_expr = self.inlined_exprs.get(&value.identifier.0).cloned()
+                    .unwrap_or_else(|| self.expr(value));
+                return ScopeOutput {
+                    outputs: vec![ScopeOutputItem {
+                        skip_idx: Some(idx),
+                        cache_expr,
+                        out_name: None,
+                        out_kw: "const",
+                        is_named_var: false,
+                    }],
+                    intra_scope_stores,
+                    terminal_place_id: None,
+                    terminal_type_cast_annotation: None,
+                    post_scope_destructure_idx: Some(idx),
+                };
+            }
             let cache_expr = if let Some(computed) = self.try_inline_instr(instr) {
                 computed
             } else if let Some(inlined) = self.inlined_exprs.get(&instr.lvalue.identifier.0) {
@@ -3537,6 +3684,7 @@ impl<'a> Codegen<'a> {
                 intra_scope_stores,
                 terminal_place_id: None,
                 terminal_type_cast_annotation: None,
+                post_scope_destructure_idx: None,
             };
         }
 
@@ -3551,6 +3699,7 @@ impl<'a> Codegen<'a> {
             intra_scope_stores,
             terminal_place_id: None,
             terminal_type_cast_annotation: None,
+            post_scope_destructure_idx: None,
         }
     }
 
