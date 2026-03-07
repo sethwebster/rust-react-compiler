@@ -639,6 +639,43 @@ pub fn enter_ssa_with_env(hir: &mut HIRFunction, env: Option<&mut Environment>) 
         }
     }
 
+    // Fix up pre-existing phi operands that were created before SSA (e.g. by
+    // lower_logical for &&/||/?? expressions).  Their operand identifiers still
+    // reference pre-SSA ids; we resolve each one via get_id_at so they match the
+    // SSA-renamed instruction lvalues.
+    let final_block_ids: Vec<BlockId> = hir.body.blocks.keys().copied().collect();
+    for block_id in final_block_ids {
+        let phi_count = hir.body.blocks[&block_id].phis.len();
+        // For each pre-existing phi, collect (pred_id, old_id) pairs then resolve.
+        for phi_idx in 0..phi_count {
+            // Collect without holding a borrow into blocks.
+            let updates: Vec<(BlockId, IdentifierId)> = hir.body.blocks[&block_id].phis[phi_idx]
+                .operands
+                .iter()
+                .map(|(&pred, op)| (pred, op.identifier))
+                .collect();
+
+            // Resolve each operand to its SSA id.
+            let resolved: Vec<(BlockId, IdentifierId)> = updates
+                .into_iter()
+                .map(|(pred_id, old_id)| {
+                    let new_id = builder.get_id_at(old_id, pred_id, &mut hir.body.blocks);
+                    (pred_id, new_id)
+                })
+                .collect();
+
+            // Apply resolved ids — re-index by phi_idx (phi_count may grow if
+            // get_id_at triggered add_phi, but those are appended after phi_idx).
+            if let Some(phi) = hir.body.blocks.get_mut(&block_id).and_then(|b| b.phis.get_mut(phi_idx)) {
+                for (pred_id, new_id) in resolved {
+                    if let Some(op) = phi.operands.get_mut(&pred_id) {
+                        op.identifier = new_id;
+                    }
+                }
+            }
+        }
+    }
+
     // Write back newly created identifiers to env.
     if let Some(e) = env {
         for new_ident in builder.new_identifiers {

@@ -55,8 +55,11 @@ pub fn lower_if_statement<'a>(
     // --- Consequent arm ---
     ctx.switch_to(consq_id, BlockKind::Block);
     lower_stmt(&stmt.consequent, ctx)?;
-    // Only emit a goto if the arm did not already terminate (e.g. via return/throw).
-    if ctx.current_block_id() == consq_id {
+    // Emit a goto to the fallthrough if the current block is still alive.
+    // Note: lowering the consequent may have changed the current block (e.g.
+    // via a logical expression `??`/`&&`/`||` that creates new blocks). We
+    // must seal whatever the current block is, not just `consq_id`.
+    if !ctx.current_dead {
         let goto_id = ctx.next_instruction_id();
         ctx.terminate(Terminal::Goto {
             block: fall_id,
@@ -70,7 +73,7 @@ pub fn lower_if_statement<'a>(
     if let Some(alternate) = &stmt.alternate {
         ctx.switch_to(alt_id, BlockKind::Block);
         lower_stmt(alternate, ctx)?;
-        if ctx.current_block_id() == alt_id {
+        if !ctx.current_dead {
             let goto_id = ctx.next_instruction_id();
             ctx.terminate(Terminal::Goto {
                 block: fall_id,
@@ -212,6 +215,7 @@ pub fn lower_conditional<'a>(
         consequent: consq_id,
         alternate: alt_id,
         fallthrough: fall_id,
+        logical_op: None,
         id,
         loc: loc.clone(),
     });
@@ -307,6 +311,11 @@ pub fn lower_logical<'a>(
         consequent,
         alternate,
         fallthrough: fall_id,
+        logical_op: Some(match expr.operator {
+            oxc_ast::ast::LogicalOperator::And => crate::hir::hir::LogicalOperator::And,
+            oxc_ast::ast::LogicalOperator::Or => crate::hir::hir::LogicalOperator::Or,
+            oxc_ast::ast::LogicalOperator::Coalesce => crate::hir::hir::LogicalOperator::NullishCoalescing,
+        }),
         id,
         loc: loc.clone(),
     });

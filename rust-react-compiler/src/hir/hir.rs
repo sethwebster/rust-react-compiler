@@ -520,6 +520,9 @@ pub enum Terminal {
         consequent: BlockId,
         alternate: BlockId,
         fallthrough: BlockId,
+        /// Set when this Branch encodes a logical expression (&&, ||, ??).
+        /// None when used as a loop condition.
+        logical_op: Option<LogicalOperator>,
         id: InstructionId,
         loc: SourceLocation,
     },

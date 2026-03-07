@@ -620,6 +620,12 @@ impl<'a> Codegen<'a> {
             for op in each_terminal_operand(&block.terminal) {
                 *use_count.entry(op.identifier.0).or_insert(0) += 1;
             }
+            // Count phi operands — they are uses of instructions that feed into join blocks.
+            for phi in &block.phis {
+                for (_, op) in &phi.operands {
+                    *use_count.entry(op.identifier.0).or_insert(0) += 1;
+                }
+            }
         }
 
         // Count how many function params were promoted to tN names.
@@ -866,6 +872,10 @@ impl<'a> Codegen<'a> {
 
         // Build inlined_exprs for transparent single-use temps.
         self.build_inline_map(&ordered);
+
+        // Resolve phi results from logical expressions (&&, ||, ??) into
+        // inlined JS expressions so they emit as `a && b` instead of `$tN`.
+        self.resolve_logical_phis();
 
         // Determine which scope each instruction belongs to.
         let instr_scope = self.assign_instructions_to_scopes(&ordered);
@@ -1348,13 +1358,7 @@ impl<'a> Codegen<'a> {
 
                     // Normal do-while loop (no scope wrapping).
                     visited.insert(test_bid);
-                    let test_expr = self.hir.body.blocks.get(&test_bid).and_then(|b| {
-                        if let Terminal::Branch { test, .. } = &b.terminal {
-                            Some(self.expr(test))
-                        } else {
-                            None
-                        }
-                    }).unwrap_or_else(|| "true".to_string());
+                    let test_expr = self.do_while_test_expr(test_bid);
                     let _ = writeln!(out, "{pad}do {{");
                     let body_pad = indent + 1;
                     let mut vis2 = visited.clone();
@@ -2047,12 +2051,21 @@ impl<'a> Codegen<'a> {
         }
 
         // Build body lines (after hoisting so inlined_exprs is updated).
+        // Instructions after the last scope-output store should be emitted AFTER
+        // the scope output assignment, not before. Split into before/after groups.
+        let max_skip_idx = skip_set.iter().copied().max().unwrap_or(0);
         let mut body_lines: Vec<String> = Vec::new();
+        let mut post_scope_lines: Vec<String> = Vec::new();
         for (i, instr) in instrs.iter().enumerate() {
             if skip_set.contains(&i) { continue; }
             if inlined_ids.contains(&instr.lvalue.identifier.0) && !intra_set.contains(&i) {
                 continue;
             }
+            let target_list = if i > max_skip_idx && !skip_set.is_empty() {
+                &mut post_scope_lines
+            } else {
+                &mut body_lines
+            };
             if intra_set.contains(&i) {
                 if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
                     let var_name = self.env
@@ -2074,13 +2087,13 @@ impl<'a> Codegen<'a> {
                                 _ => format!("let {n} = {val_expr};"),
                             }
                         };
-                        body_lines.push(stmt);
+                        target_list.push(stmt);
                         continue;
                     }
                 }
             }
             if let Some(s) = self.emit_stmt(instr, Some(*scope_id), &all_out_names) {
-                body_lines.push(s);
+                target_list.push(s);
             }
         }
 
@@ -2130,6 +2143,10 @@ impl<'a> Codegen<'a> {
                     }
                 }
             }
+            for line in &post_scope_lines {
+                let reindented = reindent_multiline(line, &pad);
+                let _ = writeln!(out, "{pad}{reindented}");
+            }
         } else {
             for cache_var in &output_cache_vars {
                 let _ = writeln!(out, "{pad}let {cache_var};");
@@ -2162,6 +2179,10 @@ impl<'a> Codegen<'a> {
                         }
                     }
                 }
+            }
+            for line in &post_scope_lines {
+                let reindented = reindent_multiline(line, &pad);
+                let _ = writeln!(out, "{pad}{reindented}");
             }
         }
 
@@ -2440,11 +2461,7 @@ impl<'a> Codegen<'a> {
             LoopType::DoWhile => {
                 // Get test expression.
                 visited.insert(test_bid);
-                let test_expr = self.hir.body.blocks.get(&test_bid).and_then(|b| {
-                    if let Terminal::Branch { test, .. } = &b.terminal {
-                        Some(self.expr(test))
-                    } else { None }
-                }).unwrap_or_else(|| "true".to_string());
+                let test_expr = self.do_while_test_expr(test_bid);
 
                 let _ = writeln!(out, "{loop_body_pad}do {{");
                 let mut vis2 = visited.clone();
@@ -2662,6 +2679,115 @@ impl<'a> Codegen<'a> {
             }
         }
 
+    }
+
+    /// Resolve phi nodes that result from logical expressions (&&, ||, ??) into
+    /// inlined JS expressions. Must be called AFTER build_inline_map so that
+    /// the phi operand places already have entries in inlined_exprs.
+    fn resolve_logical_phis(&mut self) {
+        use crate::hir::hir::{Terminal, LogicalOperator};
+
+        // Collect all logical-phi resolutions first (avoid borrow conflict).
+        let mut new_entries: Vec<(u32, String)> = Vec::new();
+
+        // We may need multiple passes for nested logical expressions (a && b && c).
+        // Each pass may expose new phi results that become operands for the next phi.
+        for _round in 0..16 {
+            let mut added_this_round = 0;
+
+            for (_, block) in &self.hir.body.blocks {
+                // Only process blocks that are join points after a logical Branch.
+                // We identify these by finding blocks whose predecessor has
+                // Terminal::Branch { logical_op: Some(op), fallthrough: this_block }.
+                // We'll scan all blocks for such terminals.
+                let _ = block; // placeholder; we iterate blocks below
+            }
+
+            // Scan all blocks for Terminal::Branch { logical_op: Some(op), .. }
+            let block_ids: Vec<crate::hir::hir::BlockId> =
+                self.hir.body.blocks.keys().copied().collect();
+
+            for bid in &block_ids {
+                let Some(block) = self.hir.body.blocks.get(bid) else { continue };
+                let Terminal::Branch {
+                    test,
+                    consequent,
+                    alternate,
+                    fallthrough,
+                    logical_op: Some(op),
+                    ..
+                } = &block.terminal else { continue };
+
+                let op = *op;
+                let test_place = test.clone();
+                let consequent_bid = *consequent;
+                let alternate_bid = *alternate;
+                let fallthrough_bid = *fallthrough;
+                let left_block_id = *bid;
+
+                // The right arm is the block that evaluates the RHS of the operator.
+                // For &&: right arm = consequent (evaluate right only if left truthy)
+                // For ||/??:  right arm = alternate (evaluate right only if left falsy)
+                let right_arm_bid = match op {
+                    LogicalOperator::And => consequent_bid,
+                    LogicalOperator::Or | LogicalOperator::NullishCoalescing => alternate_bid,
+                };
+
+                // Look at the fallthrough block's phis.
+                let Some(fall_block) = self.hir.body.blocks.get(&fallthrough_bid) else { continue };
+
+                for phi in &fall_block.phis {
+                    // Skip if already resolved.
+                    if self.inlined_exprs.contains_key(&phi.place.identifier.0)
+                        || new_entries.iter().any(|(id, _)| *id == phi.place.identifier.0)
+                    {
+                        continue;
+                    }
+
+                    // The phi should have an operand from left_block_id (the left value)
+                    // and an operand from right_arm_bid (the right value).
+                    let left_op = phi.operands.get(&left_block_id);
+                    let right_op = phi.operands.get(&right_arm_bid);
+
+                    let (Some(left_place), Some(right_place)) = (left_op, right_op) else {
+                        continue;
+                    };
+
+                    let left_expr = self.expr_for_phi_operand(left_place);
+                    let right_expr = self.expr_for_phi_operand(right_place);
+
+                    // Skip if operands aren't resolved yet (still raw $tN).
+                    // They may get resolved in a later round.
+                    let op_str = match op {
+                        LogicalOperator::And => "&&",
+                        LogicalOperator::Or => "||",
+                        LogicalOperator::NullishCoalescing => "??",
+                    };
+
+                    let combined = format!("{left_expr} {op_str} {right_expr}");
+                    new_entries.push((phi.place.identifier.0, combined.clone()));
+                    // Also map any use of the pre-SSA phi result to the combined expression.
+                    // Because enter_ssa doesn't rename pre-existing phi results, the terminal
+                    // that uses the phi result may have a different SSA id from phi.place.identifier.
+                    // Specifically, the fallthrough block's Branch.test is the SSA-renamed version.
+                    if let Terminal::Branch { test: fall_test, logical_op: None, .. } = &fall_block.terminal {
+                        if fall_test.identifier.0 != phi.place.identifier.0 {
+                            new_entries.push((fall_test.identifier.0, combined));
+                        }
+                    }
+                    added_this_round += 1;
+                }
+            }
+
+            // Apply collected entries.
+            for (id, expr) in new_entries.drain(..) {
+                self.inlined_exprs.insert(id, expr);
+            }
+
+            if added_this_round == 0 {
+                break;
+            }
+        }
     }
 
     /// Returns true if any Place operand of `value` belongs to a reactive scope.
@@ -4238,6 +4364,52 @@ impl<'a> Codegen<'a> {
     fn expr(&self, place: &Place) -> String {
         if let Some(s) = self.inlined_exprs.get(&place.identifier.0) {
             return s.clone();
+        }
+        self.ident_name(place.identifier)
+    }
+
+    /// Get the test expression for a do-while loop test block.
+    /// When the test block has a logical_op (&&/||/??), the actual result is
+    /// the phi in the fallthrough block — follow the chain until we find a
+    /// Block without logical_op, then return that block's Branch.test.
+    fn do_while_test_expr(&self, test_bid: crate::hir::hir::BlockId) -> String {
+        use crate::hir::hir::Terminal;
+        let mut current = test_bid;
+        // Follow fallthrough through logical-op branches until we reach the
+        // "real" branch (logical_op: None) whose test holds the phi result.
+        for _ in 0..32 {
+            let block = match self.hir.body.blocks.get(&current) {
+                Some(b) => b,
+                None => break,
+            };
+            match &block.terminal {
+                Terminal::Branch { fallthrough, logical_op: Some(_), .. } => {
+                    current = *fallthrough;
+                }
+                Terminal::Branch { test, .. } => {
+                    return self.expr(test);
+                }
+                _ => break,
+            }
+        }
+        // Fallback: use the original test block
+        self.hir.body.blocks.get(&test_bid)
+            .and_then(|b| if let Terminal::Branch { test, .. } = &b.terminal { Some(self.expr(test)) } else { None })
+            .unwrap_or_else(|| "true".to_string())
+    }
+
+    /// Like `expr` but also tries to inline via `try_inline_instr`, ignoring
+    /// use-count restrictions.  Used for phi operands in logical expressions
+    /// where the same temp may appear multiple times (as Branch test + phi operand)
+    /// but should still be inlined as a sub-expression.
+    fn expr_for_phi_operand(&self, place: &Place) -> String {
+        if let Some(s) = self.inlined_exprs.get(&place.identifier.0) {
+            return s.clone();
+        }
+        if let Some(instr) = self.instr_map.get(&place.identifier.0) {
+            if let Some(s) = self.try_inline_instr(instr) {
+                return s;
+            }
         }
         self.ident_name(place.identifier)
     }

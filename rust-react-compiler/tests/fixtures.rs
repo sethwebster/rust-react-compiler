@@ -117,6 +117,15 @@ fn normalize_js(js: &str) -> String {
     // Normalize CommonJS require import to ESM import for compiler runtime.
     // `const {c: _cN} = require("react/compiler-runtime");` → `import {c as _cN} from "react/compiler-runtime";`
     let result = normalize_cjs_import(&result);
+    // Merge duplicate imports from the same module:
+    // `import {a} from "M"; import {b} from "M";` → `import {a, b} from "M";`
+    // This handles cases where we emit a separate runtime import and the source
+    // already has an import from the same module.
+    let result = merge_duplicate_imports(&result);
+    // Normalize import specifier order: sort specifiers within each named import
+    // to make comparison order-independent. Both `{a, b}` and `{b, a}` normalize
+    // to the same form.
+    let result = normalize_import_specifier_order(&result);
     // Remove empty else blocks: `} else {}` → `}`. An empty else is a no-op.
     // The TS compiler drops these; our passthrough preserves them.
     let result = result.replace("} else {}", "}");
@@ -902,6 +911,129 @@ fn normalize_jsx_text_children(input: &str) -> String {
         i += 1;
     }
     result
+}
+
+/// Merge duplicate named imports from the same module:
+/// `import {a} from "M"; import {b} from "M";` → `import {a, b} from "M";`
+/// This normalizes cases where we emit a separate runtime import and the
+/// source file already had an import from the same module. After whitespace
+/// normalization, both imports appear on one line without newlines, so we
+/// scan for patterns like `import {X} from "M"; import {Y} from "M";`.
+fn merge_duplicate_imports(input: &str) -> String {
+    // After whitespace normalization, imports look like: `import {A B C} from "M";`
+    // (no newlines, spaces inside braces collapsed). We scan for two consecutive
+    // imports from the same module and merge their specifier lists.
+    let mut result = input.to_string();
+    loop {
+        let mut merged = false;
+        // Find pattern: `import {SPECS1} from "MOD"; import {SPECS2} from "MOD";`
+        // We look for two import statements from the same module.
+        if let Some(first_import) = result.find("import {") {
+            // Find the end of the first import statement.
+            let after_first = first_import + 8;
+            if let Some(brace_close1) = result[after_first..].find('}') {
+                let specs1_start = first_import + 8;
+                let specs1_end = after_first + brace_close1;
+                // After `}`, expect ` from "MODULE";`
+                let after_brace1 = specs1_end + 1; // skip `}`
+                if result[after_brace1..].starts_with(" from \"") {
+                    if let Some(quote_end1) = result[after_brace1 + 7..].find('"') {
+                        let module1_start = after_brace1 + 7;
+                        let module1_end = module1_start + quote_end1;
+                        let module1 = result[module1_start..module1_end].to_string();
+                        // After `from "MODULE";`, look for another import from the same module.
+                        let after_stmt1 = module1_end + 2; // skip closing `";`
+                        if after_stmt1 < result.len() {
+                            let rest = result[after_stmt1..].trim_start();
+                            let rest_offset = after_stmt1 + (result[after_stmt1..].len() - rest.len());
+                            if rest.starts_with(&format!("import {{")) {
+                                if let Some(brace_close2) = rest[8..].find('}') {
+                                    let specs2_start_in_rest = 8;
+                                    let specs2_end_in_rest = 8 + brace_close2;
+                                    let after_brace2 = specs2_end_in_rest + 1;
+                                    if rest[after_brace2..].starts_with(&format!(" from \"{module1}\";")) {
+                                        // Found two imports from same module! Merge them.
+                                        let specs1 = result[specs1_start..specs1_end].trim().to_string();
+                                        let specs2 = rest[specs2_start_in_rest..specs2_end_in_rest].trim().to_string();
+                                        let after_stmt2 = rest_offset + after_brace2 + 8 + module1.len() + 2;
+                                        // Sort combined specs alphabetically for determinism,
+                                        // but normalize: split by comma and space.
+                                        let mut all_specs: Vec<String> = specs1.split(',')
+                                            .chain(specs2.split(','))
+                                            .map(|s| s.trim().to_string())
+                                            .filter(|s| !s.is_empty())
+                                            .collect();
+                                        // Remove duplicates.
+                                        all_specs.dedup();
+                                        let merged_specs = all_specs.join(", ");
+                                        let merged_import = format!("import {{{merged_specs}}} from \"{module1}\";"
+                                        );
+                                        result = format!("{}{}{}", &result[..first_import], merged_import, &result[after_stmt2..]);
+                                        merged = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !merged { break; }
+    }
+    result
+}
+
+/// Sort named import specifiers within each import statement.
+/// `import {b, a} from "M"` → `import {a, b} from "M"`
+/// Handles `as` aliases: `import {c as _c, b} from "M"` → sorted by original name.
+/// This makes import specifier order comparison-independent.
+fn normalize_import_specifier_order(input: &str) -> String {
+    let mut result = input.to_string();
+    // After whitespace normalization, import looks like: `import {A B C} from "M";`
+    // (spaces inside braces instead of commas due to tokenization).
+    // Actually, after tokenization specifiers are space-separated: `{a as _a b}`.
+    // We need to find `import {SPECS} from "M";` patterns and sort the specifiers.
+    // Specifiers are space-separated tokens; `a as _a` is one specifier (3 tokens).
+    // Simple heuristic: split by `, ` and sort.
+    let mut out = String::new();
+    let mut i = 0;
+    let bytes = result.as_bytes();
+    while i < bytes.len() {
+        // Look for `import {`
+        if i + 8 <= bytes.len() && &bytes[i..i+8] == b"import {" {
+            // Find closing `}`
+            let start = i + 8;
+            let mut depth = 1usize;
+            let mut j = start;
+            while j < bytes.len() && depth > 0 {
+                if bytes[j] == b'{' { depth += 1; }
+                if bytes[j] == b'}' { depth -= 1; }
+                if depth > 0 { j += 1; }
+            }
+            if depth == 0 {
+                // bytes[start..j] is the specifiers text
+                let specs_str = &result[start..j];
+                // Split by ", " to get individual specifiers
+                let mut specs: Vec<&str> = specs_str.split(", ").collect();
+                if specs.len() > 1 {
+                    specs.sort_unstable();
+                    out.push_str("import {");
+                    out.push_str(&specs.join(", "));
+                    out.push('}');
+                } else {
+                    out.push_str("import {");
+                    out.push_str(specs_str);
+                    out.push('}');
+                }
+                i = j + 1;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    // Only replace if something changed (to avoid reallocation when no imports)
+    if out.len() == result.len() && out == result { result } else { out }
 }
 
 /// Normalize import quotes: `from 'react'` → `from "react"`.
@@ -2778,16 +2910,21 @@ fn run_all_fixtures_impl_subset(limit: usize) {
         match run_fixture(path) {
             Ok(actual) if !expect_error => {
                 passed += 1;
-                let expect_path = expect_md_path(path);
-                if let Ok(md) = std::fs::read_to_string(&expect_path) {
-                    if let Some(expected) = parse_expected_code(&md) {
-                        if normalize_js(&actual) == normalize_js(&expected) {
-                            output_correct += 1;
-                        } else {
-                            output_mismatches.push(path.file_name().unwrap().to_str().unwrap().to_string());
-                        }
+                // Skip normalization for pathologically large outputs to avoid OOM.
+                if actual.len() > 50_000 {
+                    output_mismatches.push(path.file_name().unwrap().to_str().unwrap().to_string());
+                } else {
+                    let expect_path = expect_md_path(path);
+                    if let Ok(md) = std::fs::read_to_string(&expect_path) {
+                        if let Some(expected) = parse_expected_code(&md) {
+                            if normalize_js(&actual) == normalize_js(&expected) {
+                                output_correct += 1;
+                            } else {
+                                output_mismatches.push(path.file_name().unwrap().to_str().unwrap().to_string());
+                            }
+                        } else { output_correct += 1; }
                     } else { output_correct += 1; }
-                } else { output_correct += 1; }
+                }
             }
             Ok(_) if expect_error => { error_unexpected += 1; }
             Err(_) if expect_error => { error_expected += 1; }
@@ -2914,4 +3051,5 @@ fn run_all_fixtures_impl() {
         println!("  [OK] {}", name);
     }
 }
+
 

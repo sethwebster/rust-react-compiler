@@ -61,6 +61,9 @@ pub fn eliminate_redundant_phi(hir: &mut HIRFunction) {
                     1 => {
                         // All operands agree on a single non-self value.
                         let replacement = *non_self.iter().next().unwrap();
+                        if std::env::var("RC_DEBUG_SSA").is_ok() {
+                            eprintln!("[ssa] ELIMINATE: $t{} -> $t{}", phi_id.0, replacement.0);
+                        }
                         replacements.insert(phi_id, replacement);
                     }
                     _ => {
@@ -112,9 +115,11 @@ fn apply_replacements(
     let rp = |id: IdentifierId| -> IdentifierId { resolve(id) };
 
     for block in hir.body.blocks.values_mut() {
-        // Phi places and operands.
+        // Phi places: do NOT rewrite — a phi's result identifier is its definition,
+        // not a use.  Rewriting it would corrupt the retain check that uses the
+        // pre-replacement identifier to decide which phis to drop.
+        // Phi operands: DO rewrite, because they are uses of other identifiers.
         for phi in &mut block.phis {
-            phi.place.identifier = rp(phi.place.identifier);
             for operand in phi.operands.values_mut() {
                 operand.identifier = rp(operand.identifier);
             }

@@ -48,6 +48,7 @@ pub fn lower_while<'a>(
         consequent: loop_id,
         alternate: fall_id,
         fallthrough: fall_id,
+        logical_op: None,
         id,
         loc: loc.clone(),
     });
@@ -135,6 +136,7 @@ pub fn lower_do_while<'a>(
         consequent: loop_id,
         alternate: fall_id,
         fallthrough: fall_id,
+        logical_op: None,
         id,
         loc: loc.clone(),
     });
@@ -217,6 +219,7 @@ pub fn lower_for<'a>(
             consequent: loop_id,
             alternate: fall_id,
             fallthrough: fall_id,
+            logical_op: None,
             id,
             loc: loc.clone(),
         });
@@ -337,6 +340,7 @@ pub fn lower_for_of<'a>(
         consequent: loop_id,
         alternate: fall_id,
         fallthrough: fall_id,
+        logical_op: None,
         id,
         loc: loc.clone(),
     });
