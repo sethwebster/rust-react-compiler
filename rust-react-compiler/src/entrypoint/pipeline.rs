@@ -339,19 +339,43 @@ fn splice_compiled_fns(
     // OR (for passthrough/no-scope):
     //   function Foo() {...}\n
     // We want: the function body (everything after the import line, if any).
-    let import_line = "import { c as _c } from \"react/compiler-runtime\";";
-    let mut has_runtime_import = false;
+    let module_path = "react/compiler-runtime";
+    let mut runtime_alias: Option<String> = None; // e.g. "_c" or "_c2"
     let mut fn_bodies: Vec<(u32, u32, String)> = Vec::new();
 
     for &(start, end, ref js) in compiled_fns {
-        let body = if let Some(rest) = js.strip_prefix(import_line) {
-            has_runtime_import = true;
-            rest.trim_start_matches('\n').to_string()
+        // Detect import line of the form `import { c as ALIAS } from "react/compiler-runtime";`
+        let body = if js.starts_with("import { c as ") && js.contains("} from \"react/compiler-runtime\";") {
+            // Extract alias.
+            let after = &js["import { c as ".len()..];
+            if let Some(sp) = after.find(" }") {
+                let alias = after[..sp].to_string();
+                if runtime_alias.is_none() {
+                    runtime_alias = Some(alias);
+                }
+                // Strip the import line (first line).
+                if let Some(nl) = js.find('\n') {
+                    js[nl + 1..].to_string()
+                } else {
+                    String::new()
+                }
+            } else {
+                js.trim_start_matches('\n').to_string()
+            }
         } else {
             js.trim_start_matches('\n').to_string()
         };
         fn_bodies.push((start, end, body));
     }
+    let has_runtime_import = runtime_alias.is_some();
+    // Build the import line from the alias (if needed).
+    let import_line_owned;
+    let import_line: &str = if let Some(ref alias) = runtime_alias {
+        import_line_owned = format!("import {{ c as {alias} }} from \"{module_path}\";");
+        &import_line_owned
+    } else {
+        ""
+    };
 
     // Step 2: parse the source to get clean passthrough of non-function regions.
     // We need to passthrough all statements that are NOT in fn_bodies spans.
@@ -376,6 +400,7 @@ fn splice_compiled_fns(
     let mut output = String::new();
 
     // Prepend the runtime import once if any function needed it.
+    // We'll handle merging with existing source imports in a post-processing step.
     if has_runtime_import {
         output.push_str(import_line);
         output.push('\n');
@@ -421,7 +446,76 @@ fn splice_compiled_fns(
         }
     }
 
+    // Post-process: if output has both a prepended `import { c as ALIAS } from "MODULE"` and
+    // the source passthrough also had an `import { ... } from "MODULE"`, merge them.
+    // This keeps the source's import in place and removes the prepended duplicate.
+    if has_runtime_import {
+        output = merge_runtime_import_into_existing(&output, module_path, import_line);
+    }
+
     output
+}
+
+/// If `output` has a prepended `import_line` (the first line) AND also contains another
+/// import from the same module later, merge the specifiers into the later import and remove
+/// the prepended one. Otherwise, leave as-is.
+fn merge_runtime_import_into_existing(output: &str, module_path: &str, import_line: &str) -> String {
+    // Check if output starts with the import line we prepended.
+    if !output.starts_with(import_line) {
+        return output.to_string();
+    }
+    // Extract the specifier from import_line: `import { c as ALIAS } from "MODULE";`
+    // Get everything between `import { ` and ` } from`.
+    let spec_start = "import { ".len();
+    let spec_end = import_line.find(" } from").unwrap_or(import_line.len());
+    let our_spec = import_line[spec_start..spec_end].to_string(); // e.g. "c as _c"
+
+    // Skip the prepended import line + its newline, work on the rest.
+    let skip = import_line.len() + 1; // +1 for \n
+    let rest_text = &output[skip..];
+    let pattern = format!("}} from \"{module_path}\"");
+    let pattern2 = format!("}} from '{module_path}'");
+
+    // Find a `import { ... } from "module_path"` in rest_text.
+    let find_import_brace = |text: &str, pat: &str| -> Option<(usize, usize, usize)> {
+        let mut search_start = 0;
+        while let Some(close_pos) = text[search_start..].find(pat) {
+            let abs_close = search_start + close_pos;
+            if let Some(rel) = text[..abs_close].rfind("import {") {
+                let between = &text[rel + 8..abs_close];
+                if !between.contains('}') && !between.contains('{') {
+                    let stmt_end = abs_close + pat.len() + 1; // +1 for `;`
+                    return Some((rel, abs_close + 1, stmt_end.min(text.len())));
+                }
+            }
+            search_start = abs_close + 1;
+        }
+        None
+    };
+
+    let found = find_import_brace(rest_text, &pattern)
+        .or_else(|| find_import_brace(rest_text, &pattern2));
+
+    if let Some((import_start, close_brace, stmt_end)) = found {
+        // Extract current specs from the existing import.
+        let existing_specs_start = import_start + "import {".len();
+        let existing_specs_str = rest_text[existing_specs_start..close_brace - 1].trim();
+        let mut all_specs: Vec<String> = existing_specs_str.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !all_specs.contains(&our_spec) {
+            all_specs.push(our_spec);
+        }
+        let merged_specs = all_specs.join(", ");
+        let new_import = format!("import {{{merged_specs}}} from \"{module_path}\";");
+        let before = &rest_text[..import_start];
+        let after = &rest_text[stmt_end..];
+        format!("{before}{new_import}{after}")
+    } else {
+        // No existing import from this module in the source — keep prepended as-is.
+        output.to_string()
+    }
 }
 
 /// Quick heuristic check: does a function body source string contain hook calls or JSX?

@@ -251,6 +251,27 @@ fn resolve_dep_path_inner(
                 _ => {}
             }
         }
+        // Check if this is a phi node result with no def_at entry (phi block had no instructions).
+        // Phi results are NOT external params — trace through their operands.
+        // These phi nodes arise at logical-expression join points (&&/||/??).
+        // We return only the base identifier (no path) because the phi value could be
+        // EITHER the short-circuit operand OR the fully-evaluated operand, so the
+        // most conservative and correct dep is the reactive base param itself.
+        if def.is_none() {
+            if let Some(ops) = phi_operands.get(&place_id) {
+                let ops: Vec<IdentifierId> = ops.clone();
+                for op_id in ops {
+                    if op_id == place_id { continue; }
+                    if let Some((base_id, _path)) = resolve_dep_path_inner(op_id, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited) {
+                        // Strip path: the phi could yield either operand at runtime,
+                        // so we only know the base reactive identifier is a dep.
+                        return Some((base_id, vec![]));
+                    }
+                }
+                return None;
+            }
+        }
+
         // Already an external base — return with empty path.
         if std::env::var("RC_DEBUG2").is_ok() {
             eprintln!("[resolve_ext] id={} depth={} def_at={:?} → Some({})", place_id.0, depth,
@@ -472,15 +493,49 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
     // Collect loop test block IDs: only these blocks' Branch terminals contribute to
     // scope deps. If-condition blocks are NOT loop test blocks and must not add their
     // test conditions as deps (control deps ≠ value deps).
+    //
+    // For compound conditions like `x.length && props.cond`, the logical-AND evaluation
+    // spans MULTIPLE blocks (one per `&&`/`||` operand). We must add ALL blocks in the
+    // test-evaluation subgraph, not just the direct test block, so that deps from inner
+    // blocks (e.g., `props.cond` in the consequent of a Branch with logical_op=Some) are
+    // also captured.
     use crate::hir::hir::{BlockId, Terminal};
     let mut loop_test_blocks: HashSet<BlockId> = HashSet::new();
+
+    // Helper closure: recursively collect all blocks reachable from `start` that are
+    // part of the test-evaluation subgraph (not the loop body or fallthrough).
+    fn collect_test_subgraph(
+        start: BlockId,
+        loop_bid: BlockId,
+        fallthrough_bid: BlockId,
+        blocks: &indexmap::IndexMap<BlockId, crate::hir::hir::BasicBlock>,
+        result: &mut HashSet<BlockId>,
+    ) {
+        if !result.insert(start) {
+            return; // already visited
+        }
+        let Some(block) = blocks.get(&start) else { return };
+        for succ in block.terminal.successors() {
+            // Don't cross into the loop body or the exit — those aren't test blocks.
+            if succ != loop_bid && succ != fallthrough_bid {
+                collect_test_subgraph(succ, loop_bid, fallthrough_bid, blocks, result);
+            }
+        }
+    }
+
     for (_, block) in &hir.body.blocks {
         match &block.terminal {
-            Terminal::While { test, .. }
-            | Terminal::DoWhile { test, .. }
-            | Terminal::For { test, .. }
-            | Terminal::ForOf { test, .. } => {
-                loop_test_blocks.insert(*test);
+            Terminal::DoWhile { test, loop_, fallthrough, .. } => {
+                collect_test_subgraph(*test, *loop_, *fallthrough, &hir.body.blocks, &mut loop_test_blocks);
+            }
+            Terminal::While { test, loop_, fallthrough, .. } => {
+                collect_test_subgraph(*test, *loop_, *fallthrough, &hir.body.blocks, &mut loop_test_blocks);
+            }
+            Terminal::For { test, loop_, fallthrough, .. } => {
+                collect_test_subgraph(*test, *loop_, *fallthrough, &hir.body.blocks, &mut loop_test_blocks);
+            }
+            Terminal::ForOf { test, loop_, fallthrough, .. } => {
+                collect_test_subgraph(*test, *loop_, *fallthrough, &hir.body.blocks, &mut loop_test_blocks);
             }
             _ => {}
         }
@@ -744,13 +799,12 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
             }
         }
 
-        // Scan terminal operands for reactive deps within the scope range.
-        // Only scan loop test blocks (while/for test blocks) — if-condition blocks
-        // introduce control deps, not value deps, and must be excluded.
+        // Scan terminal operands (Branch/If tests) for reactive deps within the scope range.
+        // We scan ALL blocks — both loop test blocks and if-condition blocks within the scope.
+        // If-conditions inside the scope body are control deps that affect which value the
+        // scope produces, so they ARE real deps (not just external control flow guards).
+        // The range filter below ensures we only capture deps from within the scope body.
         for (_, block) in &hir.body.blocks {
-            if !loop_test_blocks.contains(&block.id) {
-                continue;
-            }
             let term_id = block.terminal.id();
             if std::env::var("RC_DEBUG").is_ok() {
                 eprintln!("[prop_dep] terminal scan: block {:?} term_id={} range=[{},{})", block.id.0, term_id.0, range_start.0, range_end.0);

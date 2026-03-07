@@ -891,9 +891,23 @@ impl<'a> Codegen<'a> {
         let params = self.emit_params();
 
         // Only emit the runtime import when there are actual cache slots.
-        if self.num_scopes > 0 {
-            let _ = writeln!(out, "import {{ c as _c }} from \"react/compiler-runtime\";");
-        }
+        // Choose a non-conflicting alias for the `c` import: start with `_c`,
+        // then `_c2`, `_c3`, ... if `_c` is already a name in the source.
+        let cache_fn_name = if self.num_scopes > 0 {
+            let source_names: std::collections::HashSet<String> = self.env.identifiers.values()
+                .filter_map(|id| id.name.as_ref().map(|n| n.value().to_string()))
+                .collect();
+            let mut alias = "_c".to_string();
+            let mut suffix = 2u32;
+            while source_names.contains(&alias) {
+                alias = format!("_c{suffix}");
+                suffix += 1;
+            }
+            let _ = writeln!(out, "import {{ c as {alias} }} from \"react/compiler-runtime\";");
+            alias
+        } else {
+            "_c".to_string()
+        };
         if self.hir.is_arrow {
             // Arrow function form: `const Name = (params) => { ... };`
             let export_kw = if self.hir.is_default_export { "export default " }
@@ -914,7 +928,7 @@ impl<'a> Codegen<'a> {
         }
 
         if self.num_scopes > 0 {
-            let _ = writeln!(out, "  const $ = _c({});", self.num_scopes);
+            let _ = writeln!(out, "  const $ = {}({});", cache_fn_name, self.num_scopes);
         }
 
         if std::env::var("RC_DEBUG").is_ok() {
@@ -998,8 +1012,8 @@ impl<'a> Codegen<'a> {
             }
             let actual_slots = (max_slot + 1) as usize;
             if actual_slots != self.num_scopes && actual_slots > 0 {
-                let old = format!("_c({});", self.num_scopes);
-                let new = format!("_c({});", actual_slots);
+                let old = format!("{}({});", cache_fn_name, self.num_scopes);
+                let new = format!("{}({});", cache_fn_name, actual_slots);
                 out = out.replacen(&old, &new, 1);
             }
         }

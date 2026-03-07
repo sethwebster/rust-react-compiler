@@ -921,65 +921,103 @@ fn normalize_jsx_text_children(input: &str) -> String {
 /// scan for patterns like `import {X} from "M"; import {Y} from "M";`.
 fn merge_duplicate_imports(input: &str) -> String {
     // After whitespace normalization, imports look like: `import {A B C} from "M";`
-    // (no newlines, spaces inside braces collapsed). We scan for two consecutive
-    // imports from the same module and merge their specifier lists.
-    let mut result = input.to_string();
-    loop {
-        let mut merged = false;
-        // Find pattern: `import {SPECS1} from "MOD"; import {SPECS2} from "MOD";`
-        // We look for two import statements from the same module.
-        if let Some(first_import) = result.find("import {") {
-            // Find the end of the first import statement.
-            let after_first = first_import + 8;
-            if let Some(brace_close1) = result[after_first..].find('}') {
-                let specs1_start = first_import + 8;
-                let specs1_end = after_first + brace_close1;
-                // After `}`, expect ` from "MODULE";`
-                let after_brace1 = specs1_end + 1; // skip `}`
-                if result[after_brace1..].starts_with(" from \"") {
-                    if let Some(quote_end1) = result[after_brace1 + 7..].find('"') {
-                        let module1_start = after_brace1 + 7;
-                        let module1_end = module1_start + quote_end1;
-                        let module1 = result[module1_start..module1_end].to_string();
-                        // After `from "MODULE";`, look for another import from the same module.
-                        let after_stmt1 = module1_end + 2; // skip closing `";`
-                        if after_stmt1 < result.len() {
-                            let rest = result[after_stmt1..].trim_start();
-                            let rest_offset = after_stmt1 + (result[after_stmt1..].len() - rest.len());
-                            if rest.starts_with(&format!("import {{")) {
-                                if let Some(brace_close2) = rest[8..].find('}') {
-                                    let specs2_start_in_rest = 8;
-                                    let specs2_end_in_rest = 8 + brace_close2;
-                                    let after_brace2 = specs2_end_in_rest + 1;
-                                    if rest[after_brace2..].starts_with(&format!(" from \"{module1}\";")) {
-                                        // Found two imports from same module! Merge them.
-                                        let specs1 = result[specs1_start..specs1_end].trim().to_string();
-                                        let specs2 = rest[specs2_start_in_rest..specs2_end_in_rest].trim().to_string();
-                                        let after_stmt2 = rest_offset + after_brace2 + 8 + module1.len() + 2;
-                                        // Sort combined specs alphabetically for determinism,
-                                        // but normalize: split by comma and space.
-                                        let mut all_specs: Vec<String> = specs1.split(',')
-                                            .chain(specs2.split(','))
-                                            .map(|s| s.trim().to_string())
-                                            .filter(|s| !s.is_empty())
-                                            .collect();
-                                        // Remove duplicates.
-                                        all_specs.dedup();
-                                        let merged_specs = all_specs.join(", ");
-                                        let merged_import = format!("import {{{merged_specs}}} from \"{module1}\";"
-                                        );
-                                        result = format!("{}{}{}", &result[..first_import], merged_import, &result[after_stmt2..]);
-                                        merged = true;
-                                    }
-                                }
-                            }
-                        }
+    // Scan for ALL imports from the same module (not just consecutive ones) and merge.
+    // We use a parse-and-reconstruct approach.
+
+    // Parse all named imports: collect (start, end, module, specs_str).
+    // We handle both `import {SPECS} from "M";` and `import * as X from "M";` (keep latter as-is).
+    struct ImportEntry {
+        start: usize,
+        end: usize,   // byte offset after the trailing ';'
+        module: String,
+        specs: Vec<String>, // empty means non-mergeable (side-effect or namespace import)
+    }
+
+    let s = input;
+    let bytes = s.as_bytes();
+    let mut imports: Vec<ImportEntry> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Look for 'import' keyword at a word boundary.
+        if bytes[i..].starts_with(b"import {") {
+            let start = i;
+            let specs_start = i + 8;
+            if let Some(close) = s[specs_start..].find('}') {
+                let specs_end = specs_start + close;
+                let after_brace = specs_end + 1;
+                if s[after_brace..].starts_with(" from \"") {
+                    if let Some(quote_end) = s[after_brace + 7..].find('"') {
+                        let module = s[after_brace + 7..after_brace + 7 + quote_end].to_string();
+                        let end = after_brace + 7 + quote_end + 2; // skip `";`
+                        let specs_str = s[specs_start..specs_end].to_string();
+                        let specs: Vec<String> = specs_str.split(',')
+                            .map(|sp| sp.trim().to_string())
+                            .filter(|sp| !sp.is_empty())
+                            .collect();
+                        imports.push(ImportEntry { start, end, module, specs });
+                        i = end;
+                        continue;
                     }
                 }
             }
         }
-        if !merged { break; }
+        i += 1;
     }
+
+    if imports.is_empty() {
+        return input.to_string();
+    }
+
+    // Group imports by module. For each module seen more than once, merge specs into first.
+    use std::collections::HashMap;
+    let mut module_first: HashMap<String, usize> = HashMap::new(); // module → index of first import
+    let mut to_remove: Vec<usize> = Vec::new(); // indices of duplicate imports to remove
+    let mut merged_specs: HashMap<String, Vec<String>> = HashMap::new();
+
+    for (idx, entry) in imports.iter().enumerate() {
+        if let Some(&first_idx) = module_first.get(&entry.module) {
+            // Duplicate: merge specs into first
+            let combined = merged_specs.entry(entry.module.clone()).or_insert_with(Vec::new);
+            for spec in &entry.specs {
+                if !combined.contains(spec) {
+                    combined.push(spec.clone());
+                }
+            }
+            to_remove.push(idx);
+        } else {
+            module_first.insert(entry.module.clone(), idx);
+            merged_specs.insert(entry.module.clone(), entry.specs.clone());
+        }
+    }
+
+    if to_remove.is_empty() {
+        return input.to_string();
+    }
+
+    // Reconstruct: iterate imports, for first-of-module emit merged, for duplicates skip.
+    let mut result = String::new();
+    let mut last_end = 0usize;
+    for (idx, entry) in imports.iter().enumerate() {
+        if to_remove.contains(&idx) {
+            // Remove this import: skip from last_end to entry.end, but first emit prefix up to start.
+            result.push_str(&s[last_end..entry.start]);
+            // Trim one space if followed by space (since we removed the import text).
+            last_end = entry.end;
+            if last_end < s.len() && s.as_bytes()[last_end] == b' ' {
+                last_end += 1;
+            }
+        } else if let Some(specs) = merged_specs.get(&entry.module) {
+            // First occurrence: emit with merged specs.
+            result.push_str(&s[last_end..entry.start]);
+            let specs_str = specs.join(", ");
+            result.push_str(&format!("import {{{specs_str}}} from \"{}\";", entry.module));
+            last_end = entry.end;
+        } else {
+            // No merging needed for this import.
+            last_end = last_end; // will be emitted in the final push_str
+        }
+    }
+    result.push_str(&s[last_end..]);
     result
 }
 
