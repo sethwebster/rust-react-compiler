@@ -201,6 +201,13 @@ fn normalize_js(js: &str) -> String {
     // const VARNAME = _TN;` → replace _TN with VARNAME and remove the binding.
     // One compiler uses temp names for scope outputs, the other preserves original names.
     let result = inline_scope_output_names(&result);
+    // Normalize scope output variable collisions: when inline_scope_output_names
+    // renames a scope output temp to VAR (because of `const VAR = _TN;`), any
+    // inner `_TN = inner_VAR` becomes `VAR = VAR` (self-assignment). Also, the
+    // inner variable `const VAR = EXPR` inside the scope block should become
+    // `VAR = EXPR` (assignment to the outer `let VAR;`). These arise when the
+    // source uses the same variable name inside and outside useMemo/useCallback.
+    let result = normalize_scope_output_collision(&result);
     // Remove unused destructured bindings: `const {a, b} = X` → `const {a} = X`
     // when `b` doesn't appear elsewhere in the output.
     let result = remove_unused_destructured_bindings(&result);
@@ -230,6 +237,11 @@ fn normalize_js(js: &str) -> String {
     // different scopes (e.g., `let z` in an if block + `let z` outside).
     // Our compiler preserves original names. Both refer to the same variable.
     let result = normalize_disambig_suffix(&result);
+    // Remove `const VAR = VAR;` self-binding declarations produced when the TS
+    // compiler emits `const x_0 = x; return x_0;` and normalize_disambig_suffix
+    // converts `x_0` → `x`, yielding the nonsensical `const x = x;`.
+    // Also inline the reference: `const x = x; return x;` → `return x;`.
+    let result = remove_self_binding_const(&result);
     // Normalize for-loop trailing comma expressions: `i = EXPR, i)` → `i = EXPR)`.
     // The TS compiler emits a redundant trailing comma expression in for-loop
     // updates (sequence expression for lowered compound assignments). Our codegen
@@ -307,8 +319,134 @@ fn normalize_empty_try(input: &str) -> String {
 /// If a binding name doesn't appear elsewhere in the text (as a word), remove it.
 /// E.g., `const {a, b} = _T0` where `b` is unused → `const {a} = _T0`.
 /// Only handles simple (non-nested) destructuring for performance.
+/// Remove unused bindings from array destructuring patterns.
+/// `const [_, ...rest] = EXPR` → `const [, ...rest] = EXPR` when `_` is unused.
+/// `[_, b] = EXPR` → `[, b] = EXPR` when `_` is unused.
+/// Also handles rest elements: `const [..._rest] = EXPR` → removed entirely if `_rest` is unused.
+fn remove_unused_array_destructured_bindings(input: &str) -> String {
+    let is_id = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
+    let mut result = input.to_string();
+
+    // Patterns to search: both `[` (assignment) and `const [` / `let [` (declarations)
+    // We look for `[ELEMENTS] = EXPR;` patterns.
+    let mut search_from = 0usize;
+    loop {
+        let bytes = result.as_bytes();
+        // Find next `[` that is preceded by `=`, `,`, `(`, `{`, `;`, space, or `const `/`let `
+        let pos = match result[search_from..].find('[') {
+            Some(p) => search_from + p,
+            None => break,
+        };
+        search_from = pos + 1;
+
+        // Check what precedes the `[`
+        let before_ok = if pos == 0 {
+            true
+        } else {
+            let prev = bytes[pos - 1];
+            matches!(prev, b' ' | b',' | b';' | b'(' | b'{' | b'\n')
+        };
+        if !before_ok { continue; }
+
+        // Find matching `]`
+        let mut depth = 1usize;
+        let mut j = pos + 1;
+        while j < bytes.len() && depth > 0 {
+            if bytes[j] == b'[' { depth += 1; }
+            if bytes[j] == b']' { depth -= 1; }
+            j += 1;
+        }
+        if depth != 0 { continue; }
+        let bracket_end = j - 1; // position of `]`
+
+        // Must be followed by ` = EXPR;`
+        if !result[bracket_end + 1..].starts_with(" = ") { continue; }
+        let after_eq = bracket_end + 1 + 3; // skip ` = `
+        let semi_offset = match result[after_eq..].find(';') {
+            Some(p) => p,
+            None => continue,
+        };
+        let semi_pos = after_eq + semi_offset;
+        let full_end = semi_pos + 1;
+
+        // Get elements string
+        let elements_str = result[pos + 1..bracket_end].to_string();
+
+        // Skip nested destructuring or complex patterns
+        if elements_str.contains('[') || elements_str.contains('{') { continue; }
+
+        let parts: Vec<&str> = elements_str.split(',').collect();
+        if parts.len() <= 1 { continue; }
+
+        // The context OUTSIDE this destructuring
+        let before_text = &result[..pos];
+        let after_text = &result[full_end..];
+
+        // Determine if each element binding is used elsewhere
+        let mut new_parts: Vec<String> = Vec::new();
+        let mut changed = false;
+        for part in &parts {
+            let b = part.trim();
+            if b.is_empty() {
+                new_parts.push(String::new()); // keep empty slot
+                continue;
+            }
+            if b.starts_with("...") {
+                // rest element: extract name
+                let rest_name = b[3..].trim();
+                if rest_name.is_empty() || has_word(before_text, rest_name) || has_word(after_text, rest_name) {
+                    new_parts.push(b.to_string());
+                } else {
+                    // Unused rest element — remove
+                    changed = true;
+                    // Can't really leave empty for rest, just drop it
+                    // (but we need to be careful not to leave trailing comma)
+                }
+                continue;
+            }
+            // Simple binding (possibly with default: `a = default`)
+            let local = if let Some(e) = b.find('=') { b[..e].trim() } else { b };
+            let local = local.trim();
+            // Check if it's used in any context OTHER than this destructuring
+            if !local.is_empty() && is_id(local.as_bytes()[0]) {
+                if has_word(before_text, local) || has_word(after_text, local) {
+                    new_parts.push(b.to_string());
+                } else {
+                    // Unused — replace with empty slot
+                    new_parts.push(String::new());
+                    changed = true;
+                }
+            } else {
+                new_parts.push(b.to_string());
+            }
+        }
+
+        if !changed { continue; }
+
+        // Rebuild the elements: trim trailing empty slots but keep internal ones
+        while new_parts.last().map(|s| s.is_empty()).unwrap_or(false) {
+            new_parts.pop();
+        }
+
+        // Build the new destructuring
+        let new_elements = new_parts.join(", ");
+        let prefix = &result[..pos];
+        let suffix = &result[bracket_end + 1..]; // includes ` = EXPR;...`
+        let new_result = format!("{}[{}]{}", prefix, new_elements, suffix);
+        let advance = pos + 1 + new_elements.len() + 1; // past the new `[...]`
+        result = new_result;
+        search_from = advance.min(result.len());
+    }
+    result
+}
+
 fn remove_unused_destructured_bindings(input: &str) -> String {
     let mut result = input.to_string();
+
+    // Handle array destructuring: `[a, b, ...rest] = EXPR` where some elements are unused.
+    // Unused elements are replaced with empty slots. Handles both `const [` and plain `[`.
+    result = remove_unused_array_destructured_bindings(&result);
+
     let patterns = ["const {", "let {"];
     for pat in &patterns {
         let mut search_from = 0;
@@ -1895,6 +2033,151 @@ fn inline_scope_output_names(input: &str) -> String {
     // Clean up: remove leading/trailing spaces from empty statements
     result = result.replace("  ", " ");
     result
+}
+
+/// After inline_scope_output_names renames a scope output temp _TN → VAR,
+/// any `_TN = inner_VAR` becomes `VAR = VAR` (a no-op self-assignment).
+/// Also, if the scope body contains `const VAR = EXPR;` (an inner variable
+/// with the same name as the outer `let VAR;`), we want to convert it to
+/// `VAR = EXPR;` (directly using the outer binding).
+///
+/// Pattern detected: in the same function/scope output:
+///   1. `let VAR;`  (outer declaration)
+///   2. `const VAR = EXPR;` (inner const shadowing outer, in some nested block)
+///   3. `VAR = VAR;` (self-assignment produced by inlining)
+///
+/// We remove the self-assignment (3) and convert const to assignment (2).
+fn normalize_scope_output_collision(input: &str) -> String {
+    use std::collections::HashSet;
+
+    // Find all `VAR = VAR;` patterns (self-assignment of simple identifier).
+    let is_id = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
+    let bytes = input.as_bytes();
+    let mut self_assigned: HashSet<String> = HashSet::new();
+
+    let mut i = 0;
+    while i < bytes.len() {
+        // Skip whitespace
+        if bytes[i] == b' ' || bytes[i] == b'\n' { i += 1; continue; }
+        // Try to match `IDENT = IDENT;`
+        if is_id(bytes[i]) {
+            // Must be at word boundary
+            let before_ok = i == 0 || !is_id(bytes[i - 1]);
+            if before_ok {
+                let id_start = i;
+                while i < bytes.len() && is_id(bytes[i]) { i += 1; }
+                let id = &input[id_start..i];
+                // Must be followed by ` = ` then same id then `;`
+                let rest = &input[i..];
+                let suffix = format!(" = {};", id);
+                if rest.starts_with(&suffix) {
+                    // Also check it's preceded by `;` or `{` or `}` (statement start)
+                    let prev_ok = id_start == 0 || matches!(bytes[id_start - 1], b';' | b'{' | b'}' | b' ');
+                    if prev_ok && !id.is_empty() && !id.starts_with("_T") {
+                        self_assigned.insert(id.to_string());
+                    }
+                }
+                continue;
+            }
+        }
+        i += 1;
+    }
+
+    if self_assigned.is_empty() {
+        return input.to_string();
+    }
+
+    let mut result = input.to_string();
+
+    for var in &self_assigned {
+        // Only process if `let VAR;` exists (confirming it's an outer declaration).
+        let let_pat = format!("let {};", var);
+        if !result.contains(&let_pat) {
+            continue;
+        }
+
+        // 1. Remove self-assignment `VAR = VAR;`
+        let self_assign_pat = format!("{} = {};", var, var);
+        result = result.replace(&self_assign_pat, "");
+
+        // 2. Replace `const VAR = ` with `VAR = ` (remove the `const ` keyword).
+        // This converts the inner const binding to an assignment to the outer let.
+        let const_pat = format!("const {} = ", var);
+        let assign_pat = format!("{} = ", var);
+        result = result.replace(&const_pat, &assign_pat);
+
+        // Also handle array destructuring: `const [_, ...VAR] = ` → `[_, ...VAR] = `
+        // This arises when the scope output is a rest element in a destructuring.
+        // We replace `const [` with `[` in any destructuring that contains `...VAR`.
+        let spread_var = format!("...{}", var);
+        let const_array_start = "const [";
+        let mut search_pos = 0;
+        while let Some(idx) = result[search_pos..].find(const_array_start) {
+            let abs_idx = search_pos + idx;
+            // Find the closing `]`
+            let bracket_start = abs_idx + "const [".len() - 1; // position of `[`
+            let content_start = bracket_start + 1;
+            if let Some(end) = result[content_start..].find("] =") {
+                let abs_end = content_start + end;
+                let content = &result[content_start..abs_end];
+                if content.contains(&spread_var) {
+                    // Remove `const ` from `const [` → `[`
+                    result = format!("{}{}", &result[..abs_idx], &result[abs_idx + "const ".len()..]);
+                    search_pos = abs_idx;
+                    continue;
+                }
+            }
+            search_pos = abs_idx + 1;
+        }
+
+        // 3. Clean up extra whitespace from removed self-assignment
+        result = result.replace("  ", " ");
+    }
+
+    result
+}
+
+/// Remove `const VAR = VAR;` self-binding declarations. These arise when the TS
+/// compiler emits `const x_0 = x;` and normalize_disambig_suffix converts `x_0`
+/// → `x`, yielding `const x = x;`. The declaration is semantically a no-op (x
+/// is already the same value). Any subsequent reference to the "new" x can
+/// use the outer x directly, so we just remove the declaration.
+fn remove_self_binding_const(input: &str) -> String {
+    let is_id = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
+    let bytes = input.as_bytes();
+    let mut to_remove: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i + 6 < bytes.len() {
+        if &bytes[i..i+6] == b"const " {
+            let var_start = i + 6;
+            let mut j = var_start;
+            while j < bytes.len() && is_id(bytes[j]) { j += 1; }
+            if j == var_start { i += 1; continue; }
+            let var = &input[var_start..j];
+            // Must be ` = VAR;`
+            let suffix = format!(" = {};", var);
+            if input[j..].starts_with(&suffix) {
+                // Check word boundaries
+                let before_ok = i == 0 || !is_id(bytes[i - 1]);
+                if before_ok {
+                    to_remove.push(format!("const {} = {};", var, var));
+                }
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+
+    if to_remove.is_empty() {
+        return input.to_string();
+    }
+
+    let mut result = input.to_string();
+    for pat in &to_remove {
+        result = result.replace(pat.as_str(), "");
+    }
+    result.replace("  ", " ")
 }
 
 /// Normalize arrow expression bodies: `=> {return EXPR;}` → `=> EXPR`.

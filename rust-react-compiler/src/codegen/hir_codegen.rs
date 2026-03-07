@@ -3814,11 +3814,7 @@ impl<'a> Codegen<'a> {
             InstructionValue::ComputedDelete { object, property, .. } => {
                 let obj = self.expr(object);
                 let prop = self.expr(property);
-                if let Some(key) = extract_string_literal(&prop) {
-                    if is_valid_identifier(&key) {
-                        return Some(format!("delete {obj}.{key};"));
-                    }
-                }
+                // Always emit bracket notation for computed delete (matches TS compiler output).
                 Some(format!("delete {obj}[{prop}];"))
             }
 
@@ -4577,6 +4573,33 @@ impl<'a> Codegen<'a> {
                     } else {
                         self.env.get_identifier(value.identifier).and_then(|i| i.scope)
                             .or_else(|| self.env.get_identifier(lvalue.place.identifier).and_then(|i| i.scope))
+                    }
+                }
+                // Mutations of scope-owned objects: assign to the object's scope.
+                // This ensures `delete x["b"]`, `x.foo = bar`, etc. are emitted
+                // inside the scope block that owns `x`, not outside it.
+                // The object may be a LoadLocal result; we trace through it to
+                // find the underlying variable's scope.
+                InstructionValue::PropertyDelete { object, .. }
+                | InstructionValue::ComputedDelete { object, .. }
+                | InstructionValue::PropertyStore { object, .. }
+                | InstructionValue::ComputedStore { object, .. } => {
+                    // First check the object identifier directly.
+                    let direct = self.env.get_identifier(object.identifier).and_then(|i| i.scope);
+                    if direct.is_some() {
+                        direct
+                    } else {
+                        // Trace through LoadLocal: find the instruction that produced `object`.
+                        if let Some(obj_instr) = self.instr_map.get(&object.identifier.0) {
+                            if let InstructionValue::LoadLocal { place, .. }
+                            | InstructionValue::LoadContext { place, .. } = &obj_instr.value {
+                                self.env.get_identifier(place.identifier).and_then(|i| i.scope)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
                     }
                 }
                 _ => None,

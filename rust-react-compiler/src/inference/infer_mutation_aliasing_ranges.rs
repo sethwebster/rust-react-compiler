@@ -748,6 +748,16 @@ pub fn infer_mutation_aliasing_ranges(
                         use_at(&mut named_mut_uses, val_source, iid);
                     }
                 }
+                // PropertyDelete / ComputedDelete: `delete x.b` or `delete x[key]`
+                // counts as a mutation of the object's source variable, extending its
+                // mutable range so the delete falls within the scope that owns `x`.
+                InstructionValue::PropertyDelete { object, .. }
+                | InstructionValue::ComputedDelete { object, .. } => {
+                    if let Some(&source_var) = aliases.get(&object.identifier) {
+                        use_at(&mut named_mut_uses, source_var, iid);
+                        use_at(&mut named_real_muts, source_var, iid);
+                    }
+                }
                 _ => {}
             }
         }
