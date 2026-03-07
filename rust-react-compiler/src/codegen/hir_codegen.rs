@@ -4882,6 +4882,12 @@ impl<'a> Codegen<'a> {
                 // even when they fall through to the range-based assignment (step 3).
                 InstructionValue::StoreLocal { value, .. } => outlined_fn_ids.contains(&value.identifier.0),
                 InstructionValue::StoreContext { value, .. } => outlined_fn_ids.contains(&value.identifier.0),
+                // For-of/for-in loop infrastructure instructions must never be placed
+                // inside a memoization scope block — they are structural parts of the
+                // loop control flow and are inlined into the loop header by the codegen.
+                InstructionValue::GetIterator { .. }
+                | InstructionValue::IteratorNext { .. }
+                | InstructionValue::NextPropertyOf { .. } => true,
                 _ => false,
             };
             if !is_excluded {
