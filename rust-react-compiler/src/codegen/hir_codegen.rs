@@ -1716,14 +1716,58 @@ impl<'a> Codegen<'a> {
                     let fall_bid = *fallthrough;
                     let label_opt = self.switch_fallthrough_labels.get(&fall_bid).cloned();
                     if let Some(ref label) = label_opt {
-                        let _ = writeln!(out, "{pad}{label}: {{");
+                        // Emit body to a temp buffer first to check if it's a single compound statement.
+                        // If so, emit `label: stmt` (no outer braces); otherwise `label: { ... }`.
+                        let mut temp_body = String::new();
                         let body_pad = indent + 1;
                         let mut vis2 = visited.clone();
                         self.emit_cfg_region(
-                            body_bid, Some(fall_bid), body_pad, out,
+                            body_bid, Some(fall_bid), body_pad, &mut temp_body,
                             &mut vis2, emitted_scopes, scope_index, instr_scope, inlined_ids, scope_instrs,
                         );
-                        let _ = writeln!(out, "{pad}}}");
+                        // Check if body is a single compound statement at body_pad indent.
+                        let inner_prefix = "  ".repeat(body_pad);
+                        let outer_prefix = "  ".repeat(indent);
+                        let top_level_stmts: Vec<&str> = temp_body.lines()
+                            .filter(|l| {
+                                if !l.starts_with(&inner_prefix) { return false; }
+                                if l.starts_with(&format!("{}  ", inner_prefix)) { return false; }
+                                let trimmed = l.trim();
+                                if trimmed.is_empty() { return false; }
+                                // Skip closing braces and continuation keywords (} else {, } catch, etc.)
+                                if trimmed == "}" || trimmed == "};" { return false; }
+                                if trimmed.starts_with("} else") { return false; }
+                                if trimmed.starts_with("} catch") { return false; }
+                                if trimmed.starts_with("} finally") { return false; }
+                                if trimmed.starts_with("} while") { return false; }
+                                true
+                            })
+                            .collect();
+                        let is_single_compound = top_level_stmts.len() == 1 && {
+                            let first = top_level_stmts[0].trim_start();
+                            first.starts_with("if ") || first.starts_with("if(")
+                                || first.starts_with("while ") || first.starts_with("while(")
+                                || first.starts_with("switch ") || first.starts_with("switch(")
+                                || first.starts_with("for ") || first.starts_with("for(")
+                                || first.starts_with("bb")  // nested labeled block
+                        };
+                        if is_single_compound {
+                            // Dedent body by 2 spaces and prepend label to first line.
+                            let mut first_line = true;
+                            for line in temp_body.lines() {
+                                let dedented = if line.starts_with("  ") { &line[2..] } else { line };
+                                if first_line && !dedented.trim().is_empty() {
+                                    let _ = writeln!(out, "{outer_prefix}{label}: {}", dedented.trim_start());
+                                    first_line = false;
+                                } else if !first_line {
+                                    let _ = writeln!(out, "{dedented}");
+                                }
+                            }
+                        } else {
+                            let _ = writeln!(out, "{pad}{label}: {{");
+                            out.push_str(&temp_body);
+                            let _ = writeln!(out, "{pad}}}");
+                        }
                     } else {
                         let mut vis2 = visited.clone();
                         self.emit_cfg_region(
