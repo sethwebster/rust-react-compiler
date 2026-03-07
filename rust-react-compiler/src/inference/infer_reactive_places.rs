@@ -31,6 +31,34 @@ pub fn infer_reactive_places(hir: &mut HIRFunction, env: &Environment) {
     // (hook return values change each render), but the reference itself is stable
     // and should NOT be treated as a reactive dep.
     let mut local_hook_refs: HashSet<IdentifierId> = HashSet::new();
+
+    // Pre-scan: collect React namespace ids (LoadGlobal { name: "React" }) so we can
+    // detect `React.useState()` style MethodCalls and treat them as hook calls.
+    // Also build hook_method_ids: property_id → hook_name for PropertyLoad on React namespace.
+    let mut react_ns_ids: HashSet<IdentifierId> = HashSet::new();
+    let mut hook_method_ids: HashMap<IdentifierId, String> = HashMap::new();
+
+    // First pass: collect React namespace identifiers.
+    for (_, block) in &hir.body.blocks {
+        for instr in &block.instructions {
+            if let InstructionValue::LoadGlobal { binding: NonLocalBinding::Global { name }, .. } = &instr.value {
+                if name == "React" {
+                    react_ns_ids.insert(instr.lvalue.identifier);
+                }
+            }
+        }
+    }
+    // Second pass: collect PropertyLoad results that are hook names on React namespace.
+    for (_, block) in &hir.body.blocks {
+        for instr in &block.instructions {
+            if let InstructionValue::PropertyLoad { object, property, .. } = &instr.value {
+                if react_ns_ids.contains(&object.identifier) && is_hook_name(property) {
+                    hook_method_ids.insert(instr.lvalue.identifier, property.clone());
+                }
+            }
+        }
+    }
+
     for (_, block) in &hir.body.blocks {
         for instr in &block.instructions {
             if is_stable_hook_load(&instr.value) {
@@ -52,6 +80,12 @@ pub fn infer_reactive_places(hir: &mut HIRFunction, env: &Environment) {
             }
         }
     }
+    // Register stable hook methods (useRef, useEffect, etc.) via React namespace.
+    for (id, name) in &hook_method_ids {
+        if is_stable_hook(name) {
+            stable_hook_refs.insert(*id);
+        }
+    }
 
     // Pre-scan: identify stable dispatcher identifiers from hooks that return
     // [value, dispatch] pairs (useState, useReducer, useActionState).
@@ -69,6 +103,14 @@ pub fn infer_reactive_places(hir: &mut HIRFunction, env: &Environment) {
                     // by finding the LoadGlobal instruction for this callee identifier.
                     if is_dispatch_hook_ref(callee.identifier, &hir.body.blocks) {
                         dispatch_hook_results.insert(instr.lvalue.identifier);
+                    }
+                }
+                // Also detect React.useState() style MethodCall (namespace import).
+                if let InstructionValue::MethodCall { property, .. } = &instr.value {
+                    if let Some(name) = hook_method_ids.get(&property.identifier) {
+                        if is_dispatch_hook(name) {
+                            dispatch_hook_results.insert(instr.lvalue.identifier);
+                        }
                     }
                 }
             }
@@ -367,9 +409,16 @@ pub fn infer_reactive_places(hir: &mut HIRFunction, env: &Environment) {
                         continue;
                     }
                 }
-                if let InstructionValue::MethodCall { receiver, property, .. } = &instr.value {
-                    // Method calls on stable hook refs are also stable
-                    // (e.g., ref.method() — hooks don't have reactive methods)
+                if let InstructionValue::MethodCall { property, .. } = &instr.value {
+                    // Detect React.useXxx() method calls (namespace import style).
+                    // Stable hooks (useRef, useEffect, etc.) → result is not reactive.
+                    // Non-stable hooks (useState, useContext, etc.) → result IS reactive.
+                    if let Some(name) = hook_method_ids.get(&property.identifier) {
+                        if !is_stable_hook(name) && !stable_dispatchers.contains(&instr.lvalue.identifier) {
+                            reactive.insert(instr.lvalue.identifier);
+                        }
+                        continue; // skip normal operand propagation for hook calls
+                    }
                 }
 
                 // Never mark stable dispatchers (setState, dispatch) as reactive.
