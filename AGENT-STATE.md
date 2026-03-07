@@ -50,7 +50,7 @@ Update the following before stopping:
 
 Session progress (output_correct/300): 155 (no change yet — fix is incomplete).
 
-**In progress (uncommitted)**: InlineJs may_allocate fix in `infer_reactive_scope_variables.rs`.
+**In progress (uncommitted)**: +88247c9 fix: mark InlineJs optional calls as may_allocate in scope inference
 
 **Next step**: In `propagate_scope_dependencies_hir.rs`, add InlineJs source-text name scanning to populate scope deps (like `infer_reactive_places.rs` lines 432-440). Without it the scope has no deps → useless/pruned.
 
