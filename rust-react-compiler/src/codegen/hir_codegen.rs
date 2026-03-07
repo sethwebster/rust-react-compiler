@@ -1340,6 +1340,32 @@ impl<'a> Codegen<'a> {
                     let test_bid = *test;
                     let fall_bid = *fallthrough;
 
+                    // Detect unconditional break: `do { [stmts...]; break; } while (cond)`.
+                    // If the loop body's first block breaks directly to fallthrough,
+                    // the loop condition never executes — emit the body without any
+                    // loop wrapper (regardless of whether a scope is deferred).
+                    let loop_body_always_breaks = self.hir.body.blocks.get(&loop_bid)
+                        .map(|b| matches!(&b.terminal,
+                            Terminal::Goto { block: dest, variant: GotoVariant::Break, .. }
+                            if *dest == fall_bid
+                        ))
+                        .unwrap_or(false);
+
+                    if loop_body_always_breaks {
+                        // Emit body instructions without the do-while wrapper.
+                        let body_pad = indent;
+                        let mut vis2 = visited.clone();
+                        vis2.insert(test_bid);
+                        vis2.insert(fall_bid);
+                        self.emit_cfg_region(
+                            loop_bid, Some(fall_bid), body_pad, out,
+                            &mut vis2, emitted_scopes, scope_index, instr_scope, inlined_ids, scope_instrs,
+                        );
+                        if Some(fall_bid) == stop_at { return; }
+                        current = fall_bid;
+                        continue;
+                    }
+
                     // Check if loop body contains unvisited scope instructions (pre-detected).
                     if let Some((sid, _, _, _, false)) = deferred_loop_scope {
                         // Collect pre-loop scope instructions.
