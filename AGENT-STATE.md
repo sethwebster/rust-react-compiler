@@ -57,7 +57,7 @@ Recent commits (this session, newest first):
 - 61e8cd8: trace through internal ComputedLoad in resolve_dep_path
 - c82cd42: normalizations for try-return, case merge, dedup-let (407/1048, 401/1244)
 
-**In progress (uncommitted)**: none — clean tree
+**In progress (uncommitted)**: +1924424 feat: emit Destructure post-scope when scope output is a Destructure
 
 **Next priorities** (by impact):
 1. Scope splitting differences (most of 119 subset mismatches) — we merge scopes that should be split
