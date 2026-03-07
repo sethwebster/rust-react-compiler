@@ -2550,6 +2550,80 @@ fn is_hook_name(name: &str) -> bool {
     }
 }
 
+/// Collect all locally-defined binding names from params and body statements.
+/// Used to exclude local variables from the hook-as-value check.
+fn collect_local_names<'a>(
+    params: &'a [oxc_ast::ast::FormalParameter<'a>],
+    stmts: &'a [oxc_ast::ast::Statement<'a>],
+) -> std::collections::HashSet<String> {
+    use oxc_ast::ast::BindingPatternKind;
+    let mut names = std::collections::HashSet::new();
+    // Collect from parameters
+    fn collect_from_pattern(pat: &oxc_ast::ast::BindingPattern, names: &mut std::collections::HashSet<String>) {
+        match &pat.kind {
+            BindingPatternKind::BindingIdentifier(id) => { names.insert(id.name.to_string()); }
+            BindingPatternKind::ObjectPattern(o) => {
+                for prop in &o.properties {
+                    collect_from_pattern(&prop.value, names);
+                }
+                if let Some(rest) = &o.rest {
+                    collect_from_pattern(&rest.argument, names);
+                }
+            }
+            BindingPatternKind::ArrayPattern(a) => {
+                for elem in a.elements.iter().flatten() {
+                    collect_from_pattern(elem, names);
+                }
+                if let Some(rest) = &a.rest {
+                    collect_from_pattern(&rest.argument, names);
+                }
+            }
+            BindingPatternKind::AssignmentPattern(a) => {
+                collect_from_pattern(&a.left, names);
+            }
+        }
+    }
+    for param in params {
+        collect_from_pattern(&param.pattern, &mut names);
+    }
+    // Collect from variable declarations in body
+    fn collect_from_stmts(stmts: &[oxc_ast::ast::Statement], names: &mut std::collections::HashSet<String>) {
+        use oxc_ast::ast::Statement;
+        for stmt in stmts {
+            match stmt {
+                Statement::VariableDeclaration(v) => {
+                    for d in &v.declarations {
+                        collect_from_pattern_inner(&d.id, names);
+                    }
+                }
+                Statement::BlockStatement(b) => collect_from_stmts(&b.body, names),
+                Statement::IfStatement(i) => {
+                    collect_from_stmts(std::slice::from_ref(&i.consequent), names);
+                    if let Some(alt) = &i.alternate { collect_from_stmts(std::slice::from_ref(alt), names); }
+                }
+                _ => {}
+            }
+        }
+    }
+    fn collect_from_pattern_inner(pat: &oxc_ast::ast::BindingPattern, names: &mut std::collections::HashSet<String>) {
+        use oxc_ast::ast::BindingPatternKind;
+        match &pat.kind {
+            BindingPatternKind::BindingIdentifier(id) => { names.insert(id.name.to_string()); }
+            BindingPatternKind::ObjectPattern(o) => {
+                for prop in &o.properties { collect_from_pattern_inner(&prop.value, names); }
+                if let Some(rest) = &o.rest { collect_from_pattern_inner(&rest.argument, names); }
+            }
+            BindingPatternKind::ArrayPattern(a) => {
+                for elem in a.elements.iter().flatten() { collect_from_pattern_inner(elem, names); }
+                if let Some(rest) = &a.rest { collect_from_pattern_inner(&rest.argument, names); }
+            }
+            BindingPatternKind::AssignmentPattern(a) => { collect_from_pattern_inner(&a.left, names); }
+        }
+    }
+    collect_from_stmts(stmts, &mut names);
+    names
+}
+
 /// Validate that hook identifiers are not referenced as values (must be called).
 /// Scans all top-level functions in the program.
 fn validate_no_hook_as_value(program: &oxc_ast::ast::Program) -> Result<()> {
@@ -2557,8 +2631,9 @@ fn validate_no_hook_as_value(program: &oxc_ast::ast::Program) -> Result<()> {
         match stmt {
             oxc_ast::ast::Statement::FunctionDeclaration(f) => {
                 if let Some(body) = &f.body {
+                    let locals = collect_local_names(&f.params.items, &body.statements);
                     for s in &body.statements {
-                        check_stmt_hook_value(s)?;
+                        check_stmt_hook_value(s, &locals)?;
                     }
                 }
             }
@@ -2566,14 +2641,16 @@ fn validate_no_hook_as_value(program: &oxc_ast::ast::Program) -> Result<()> {
                 match &d.declaration {
                     ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
                         if let Some(body) = &f.body {
+                            let locals = collect_local_names(&f.params.items, &body.statements);
                             for s in &body.statements {
-                                check_stmt_hook_value(s)?;
+                                check_stmt_hook_value(s, &locals)?;
                             }
                         }
                     }
                     ExportDefaultDeclarationKind::ArrowFunctionExpression(a) => {
+                        let locals = collect_local_names(&a.params.items, &a.body.statements);
                         for s in &a.body.statements {
-                            check_stmt_hook_value(s)?;
+                            check_stmt_hook_value(s, &locals)?;
                         }
                     }
                     _ => {}
@@ -2582,8 +2659,9 @@ fn validate_no_hook_as_value(program: &oxc_ast::ast::Program) -> Result<()> {
             oxc_ast::ast::Statement::ExportNamedDeclaration(d) => {
                 if let Some(Declaration::FunctionDeclaration(f)) = &d.declaration {
                     if let Some(body) = &f.body {
+                        let locals = collect_local_names(&f.params.items, &body.statements);
                         for s in &body.statements {
-                            check_stmt_hook_value(s)?;
+                            check_stmt_hook_value(s, &locals)?;
                         }
                     }
                 }
@@ -2593,14 +2671,16 @@ fn validate_no_hook_as_value(program: &oxc_ast::ast::Program) -> Result<()> {
                     if let Some(init) = &decl.init {
                         match init {
                             Expression::ArrowFunctionExpression(a) => {
+                                let locals = collect_local_names(&a.params.items, &a.body.statements);
                                 for s in &a.body.statements {
-                                    check_stmt_hook_value(s)?;
+                                    check_stmt_hook_value(s, &locals)?;
                                 }
                             }
                             Expression::FunctionExpression(f) => {
                                 if let Some(body) = &f.body {
+                                    let locals = collect_local_names(&f.params.items, &body.statements);
                                     for s in &body.statements {
-                                        check_stmt_hook_value(s)?;
+                                        check_stmt_hook_value(s, &locals)?;
                                     }
                                 }
                             }
@@ -2615,32 +2695,32 @@ fn validate_no_hook_as_value(program: &oxc_ast::ast::Program) -> Result<()> {
     Ok(())
 }
 
-fn check_stmt_hook_value(stmt: &oxc_ast::ast::Statement) -> Result<()> {
+fn check_stmt_hook_value(stmt: &oxc_ast::ast::Statement, locals: &std::collections::HashSet<String>) -> Result<()> {
     use oxc_ast::ast::Statement;
     match stmt {
         Statement::VariableDeclaration(v) => {
             for d in &v.declarations {
                 if let Some(init) = &d.init {
-                    check_expr_hook_value(init, false)?;
+                    check_expr_hook_value(init, false, locals)?;
                 }
             }
         }
-        Statement::ExpressionStatement(e) => check_expr_hook_value(&e.expression, false)?,
+        Statement::ExpressionStatement(e) => check_expr_hook_value(&e.expression, false, locals)?,
         Statement::ReturnStatement(r) => {
             if let Some(arg) = &r.argument {
-                check_expr_hook_value(arg, false)?;
+                check_expr_hook_value(arg, false, locals)?;
             }
         }
         Statement::IfStatement(i) => {
-            check_expr_hook_value(&i.test, false)?;
-            check_stmt_hook_value(&i.consequent)?;
+            check_expr_hook_value(&i.test, false, locals)?;
+            check_stmt_hook_value(&i.consequent, locals)?;
             if let Some(alt) = &i.alternate {
-                check_stmt_hook_value(alt)?;
+                check_stmt_hook_value(alt, locals)?;
             }
         }
         Statement::BlockStatement(b) => {
             for s in &b.body {
-                check_stmt_hook_value(s)?;
+                check_stmt_hook_value(s, locals)?;
             }
         }
         _ => {}
@@ -2648,27 +2728,32 @@ fn check_stmt_hook_value(stmt: &oxc_ast::ast::Statement) -> Result<()> {
     Ok(())
 }
 
-fn check_expr_hook_value(expr: &Expression, is_callee: bool) -> Result<()> {
+fn check_expr_hook_value(expr: &Expression, is_callee: bool, locals: &std::collections::HashSet<String>) -> Result<()> {
     const MSG: &str = "Hooks may not be referenced as normal values, they must be called. See https://react.dev/reference/rules/react-calls-components-and-hooks#never-pass-around-hooks-as-regular-values";
     match expr {
         Expression::Identifier(id) => {
-            if !is_callee && is_hook_name(id.name.as_str()) {
+            if !is_callee && is_hook_name(id.name.as_str()) && !locals.contains(id.name.as_str()) {
                 return Err(CompilerError::invalid_react(MSG));
             }
         }
         Expression::StaticMemberExpression(s) => {
             let prop = s.property.name.as_str();
-            if !is_callee && is_hook_name(prop) {
+            // `obj.useHook` is invalid unless `obj` is a local variable.
+            let obj_is_local = if let Expression::Identifier(obj_id) = &s.object {
+                locals.contains(obj_id.name.as_str())
+            } else {
+                false
+            };
+            if !is_callee && is_hook_name(prop) && !obj_is_local {
                 return Err(CompilerError::invalid_react(MSG));
             }
-            // Don't recurse into the object — that's fine as a value
         }
         Expression::CallExpression(call) => {
             // Callee is being called, so it's ok; recurse with is_callee=true for callee
-            check_expr_hook_value(&call.callee, true)?;
+            check_expr_hook_value(&call.callee, true, locals)?;
             for arg in &call.arguments {
                 if let Some(e) = arg.as_expression() {
-                    check_expr_hook_value(e, false)?;
+                    check_expr_hook_value(e, false, locals)?;
                 }
             }
         }
@@ -2677,7 +2762,7 @@ fn check_expr_hook_value(expr: &Expression, is_callee: bool) -> Result<()> {
                 if let oxc_ast::ast::JSXAttributeItem::Attribute(a) = attr {
                     if let Some(oxc_ast::ast::JSXAttributeValue::ExpressionContainer(ec)) = &a.value {
                         if let Some(inner) = ec.expression.as_expression() {
-                            check_expr_hook_value(inner, false)?;
+                            check_expr_hook_value(inner, false, locals)?;
                         }
                     }
                 }
@@ -2685,26 +2770,26 @@ fn check_expr_hook_value(expr: &Expression, is_callee: bool) -> Result<()> {
             for child in &j.children {
                 if let oxc_ast::ast::JSXChild::ExpressionContainer(ec) = child {
                     if let Some(inner) = ec.expression.as_expression() {
-                        check_expr_hook_value(inner, false)?;
+                        check_expr_hook_value(inner, false, locals)?;
                     }
                 }
             }
         }
         Expression::LogicalExpression(l) => {
-            check_expr_hook_value(&l.left, false)?;
-            check_expr_hook_value(&l.right, false)?;
+            check_expr_hook_value(&l.left, false, locals)?;
+            check_expr_hook_value(&l.right, false, locals)?;
         }
         Expression::ConditionalExpression(c) => {
-            check_expr_hook_value(&c.test, false)?;
-            check_expr_hook_value(&c.consequent, false)?;
-            check_expr_hook_value(&c.alternate, false)?;
+            check_expr_hook_value(&c.test, false, locals)?;
+            check_expr_hook_value(&c.consequent, false, locals)?;
+            check_expr_hook_value(&c.alternate, false, locals)?;
         }
         Expression::AssignmentExpression(a) => {
-            check_expr_hook_value(&a.right, false)?;
+            check_expr_hook_value(&a.right, false, locals)?;
         }
         Expression::SequenceExpression(s) => {
             for e in &s.expressions {
-                check_expr_hook_value(e, false)?;
+                check_expr_hook_value(e, false, locals)?;
             }
         }
         // Don't recurse into nested arrow/function expressions (different scope)
