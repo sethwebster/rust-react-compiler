@@ -34,7 +34,7 @@ Update the following before stopping:
 
 | Metric | Value |
 |--------|-------|
-| Compile rate | 82.5% (1417/1717 all fixtures) |
+| Compile rate | 82.6% (1419/1717 all fixtures) |
 | Correct rate | 33.0% (566/1717 all fixtures) |
 | Output correct (subset) | ~155/300 (first 300 alphabetically) |
 | Uncommitted changes | none — committed |
