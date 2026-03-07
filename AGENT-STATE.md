@@ -44,13 +44,27 @@ Update the following before stopping:
 
 ## Current Task
 
-**Active work**: InlineJs optional-call memoization — part 1 done (may_allocate marks `?.(` as allocating), part 2 needed (dep propagation in propagate_scope_dependencies_hir.rs).
+**Active work**: Fixture runner now recursive (1717 total). Latest: InlineJs dep propagation committed. Compile 82.5% (1417/1717), Correct 32.6% (560/1717).
 
-Session progress (output_correct/300): 155 (no change yet — fix is incomplete).
+Session progress (output_correct/300): 142 → 144 → 146 → 150 → 151 → 153 → 155 → 560/1717 (recursive scan).
 
-**In progress (uncommitted)**: +35078ac feat: recursive fixture scan (1244→1717) + InlineJs dep propagation
+**In progress (uncommitted)**: none — clean tree
 
-**Next step**: In `propagate_scope_dependencies_hir.rs`, add InlineJs source-text name scanning to populate scope deps (like `infer_reactive_places.rs` lines 432-440). Without it the scope has no deps → useless/pruned.
+Recent commits (newest first):
+- cd3b0c3: chore: update AGENT-STATE.md
+- 35078ac: recursive fixture scan (1244→1717) + InlineJs dep propagation
+- aeb1c75: chore: update AGENT-STATE.md
+- 88247c9: mark InlineJs optional calls as may_allocate in scope inference
+- 4df7c8e: chore: update AGENT-STATE.md
+- 4d0014f: chore: update AGENT-STATE.md — 37.2% (463/1244), 155/300 subset
+- 1924424: emit Destructure post-scope when scope output is a Destructure
+- 03a0819: exclude GetIterator/IteratorNext from scope range assignment (+26 correct)
+- a4d66ba: prevent exponential UTF-8 corruption in normalize_js (tests only)
+- 760b012: fix default-param memoization via TernaryExpression scope propagation (+2, 153/1244)
+- 2aa14ce: exclude scope A output bindings from gap lvalue check (+1, 151/1244)
+- 153352b: add mutation propagation in infer_reactive_places (+4, 150/300)
+- 2e53f18: merge c-as-_c import into existing react/compiler-runtime import (+1, 146/300)
+- 07c2bb7: eliminate dead do-while loops with unconditional break (+2, 144/300)
 
 **Next priorities** (by impact):
 1. InlineJs dep propagation (complete the optional-call memoization fix)
