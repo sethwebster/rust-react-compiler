@@ -2802,6 +2802,29 @@ fn show_diffs() {
     let _ = result;
 }
 
+/// Recursively collect all .js/.jsx/.ts/.tsx fixture paths under `dir`, sorted.
+fn collect_fixture_paths(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    collect_fixture_paths_inner(dir, &mut paths);
+    paths.sort();
+    paths
+}
+
+fn collect_fixture_paths_inner(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_fixture_paths_inner(&path, out);
+        } else if matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("js" | "jsx" | "ts" | "tsx")
+        ) {
+            out.push(path);
+        }
+    }
+}
+
 fn show_diffs_impl() {
     let dir = PathBuf::from(FIXTURE_DIR);
     let env_fixtures = std::env::var("SHOW_FIXTURES").unwrap_or_else(|_| "ALL_MISMATCHES".to_string());
@@ -2812,10 +2835,9 @@ fn show_diffs_impl() {
     // If ALL_MISMATCHES, iterate all fixtures and show first N diffs
     let all_mode = fixtures.len() == 1 && fixtures[0] == "ALL_MISMATCHES";
     let all_paths: Vec<String> = if all_mode {
-        std::fs::read_dir(&dir).unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_str().unwrap().to_string())
-            .filter(|n| matches!(n.rsplit('.').next(), Some("js" | "jsx" | "ts" | "tsx")))
+        collect_fixture_paths(&dir)
+            .into_iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
             .collect()
     } else {
         fixtures.iter().map(|s| s.to_string()).collect()
@@ -2915,16 +2937,7 @@ fn run_all_fixtures_impl_subset(limit: usize) {
     let mut error_unexpected = 0usize;
     let mut output_mismatches: Vec<String> = Vec::new();
 
-    let entries = std::fs::read_dir(&dir).expect("fixture dir exists");
-    let mut paths: Vec<_> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| matches!(
-            p.extension().and_then(|e| e.to_str()),
-            Some("js" | "jsx" | "ts" | "tsx")
-        ))
-        .collect();
-    paths.sort();
+    let paths = collect_fixture_paths(&dir);
 
     for path in paths.iter().take(limit) {
         total += 1;
@@ -2992,16 +3005,7 @@ fn run_all_fixtures_impl() {
     let mut output_mismatches: Vec<String> = Vec::new();
     let mut output_correct_names: Vec<String> = Vec::new();
 
-    let entries = std::fs::read_dir(&dir).expect("fixture dir exists");
-    let mut paths: Vec<_> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| matches!(
-            p.extension().and_then(|e| e.to_str()),
-            Some("js" | "jsx" | "ts" | "tsx")
-        ))
-        .collect();
-    paths.sort();
+    let paths = collect_fixture_paths(&dir);
 
     for path in &paths {
         total += 1;

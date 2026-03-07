@@ -34,13 +34,11 @@ Update the following before stopping:
 
 | Metric | Value |
 |--------|-------|
-| Compile rate | 91.3% of tested 1244 top-level |
-| Correct rate | 37.2% (463/1244 top-level) |
-| Output correct (subset) | 155/300 (51.7%) |
-| Error (expected) | 25 |
-| Error (unexpected) | 1 |
-| Uncommitted changes | InlineJs may_allocate fix (infer_reactive_scope_variables.rs) |
-| Fixture denominator | **1244** top-level tested |
+| Compile rate | 82.5% (1417/1717 all fixtures) |
+| Correct rate | 32.6% (560/1717 all fixtures) |
+| Output correct (subset) | ~155/300 (first 300 alphabetically) |
+| Uncommitted changes | none — committed |
+| Fixture denominator | **1717** (recursive scan of all subdirs) |
 
 ---
 
@@ -234,7 +232,7 @@ Key file changes:
 - **Fixtures**: `react/compiler/packages/babel-plugin-react-compiler/src/__tests__/fixtures/compiler/`
 - **`react/` is NOT part of this repo** — it is a local reference checkout only (for reading source/fixtures). Never `git add` or commit anything under `react/`.
 - **inlined_exprs propagation**: After scope emission assigns tN names, must propagate through inlined_exprs to update stale $tN references. Done at both emit_scope_block_inner sites.
-- **Fixture total is 1717, not 1244**: The fixture dir has 18 subdirectories (`fault-tolerance/`, `propagate-scope-deps-hir-fork/`, `reduce-reactive-deps/`, `exhaustive-deps/`, `rules-of-hooks/`, etc.) containing 473 additional fixtures. `run_all_fixtures_impl` uses flat `read_dir` (non-recursive) so only counts the 1244 top-level files. The 1717 figure is what the TS compiler actually tests against.
+- **Fixture total is 1717**: The fixture dir has 18 subdirectories (`fault-tolerance/`, `propagate-scope-deps-hir-fork/`, `reduce-reactive-deps/`, `exhaustive-deps/`, `rules-of-hooks/`, etc.). `collect_fixture_paths` recursively collects all 1717 fixtures. This matches what the TS compiler tests against.
 
 ---
 
@@ -278,3 +276,4 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-06 | 61.0 | 25.3 | — | 18 | 28 | ComputedLoad dep tracing, for-of destructuring, IIFE/binding norms (+22) |
 | 2026-03-07 | 61.0 | 25.3+ | — | 18 | 28 | React namespace hooks, logical phi, labeled blocks, const inlining (142/300 output correct) |
 | 2026-03-07 | 91.3 | 37.2 | — | 18 | 28 | Destructure post-scope fix, chained logical phi fix (155/300 output correct, 463/1244) |
+| 2026-03-07 | 82.5 | 32.6 | — | 18 | 28 | Switched to recursive fixture scan (1244→1717), InlineJs dep propagation fix (560/1717) |

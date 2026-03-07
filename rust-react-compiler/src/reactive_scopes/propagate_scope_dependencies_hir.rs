@@ -8,6 +8,21 @@ use crate::hir::hir::{
 use crate::hir::hir::Param;
 use crate::hir::visitors::{each_dep_operand, each_instruction_value_operand, each_terminal_operand};
 
+fn contains_as_word(s: &str, pattern: &str) -> bool {
+    if pattern.is_empty() { return false; }
+    let is_id = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let mut start = 0;
+    while let Some(rel_pos) = s[start..].find(pattern) {
+        let pos = start + rel_pos;
+        let before_ok = pos == 0 || !is_id(s[..pos].chars().next_back().unwrap_or('\0'));
+        let end = pos + pattern.len();
+        let after_ok = end >= s.len() || !is_id(s[end..].chars().next().unwrap_or('\0'));
+        if before_ok && after_ok { return true; }
+        start = pos + 1;
+    }
+    false
+}
+
 fn is_hook_name(name: &str) -> bool {
     name.starts_with("use") && name[3..].chars().next().map_or(false, |c| c.is_uppercase())
 }
@@ -566,6 +581,43 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
         }
     }
 
+    // Build name_to_id: variable name → list of (IdentifierId, reactive flag) for all named
+    // identifiers in this function. Used for InlineJs source-text dep scanning.
+    let mut name_to_id: HashMap<String, Vec<IdentifierId>> = HashMap::new();
+    for (_, block) in &hir.body.blocks {
+        for instr in &block.instructions {
+            if let Some(id_info) = env.identifiers.get(&instr.lvalue.identifier) {
+                if let Some(name) = &id_info.name {
+                    name_to_id.entry(name.value().to_string())
+                        .or_default()
+                        .push(instr.lvalue.identifier);
+                }
+            }
+        }
+    }
+    for param in &hir.params {
+        match param {
+            Param::Place(p) => {
+                if let Some(id_info) = env.identifiers.get(&p.identifier) {
+                    if let Some(name) = &id_info.name {
+                        name_to_id.entry(name.value().to_string())
+                            .or_default()
+                            .push(p.identifier);
+                    }
+                }
+            }
+            Param::Spread(s) => {
+                if let Some(id_info) = env.identifiers.get(&s.place.identifier) {
+                    if let Some(name) = &id_info.name {
+                        name_to_id.entry(name.value().to_string())
+                            .or_default()
+                            .push(s.place.identifier);
+                    }
+                }
+            }
+        }
+    }
+
     for scope_id in scope_ids {
         let (range_start, range_end) = {
             let scope = env.scopes.get(&scope_id).unwrap();
@@ -728,6 +780,42 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
                         }
                     }
                     continue; // Don't fall through to each_dep_operand for FunctionExpression.
+                }
+
+                // InlineJs: used for optional chains (no tracked operands). Scan source text
+                // for named variable references and add reactive ones as deps.
+                if let InstructionValue::InlineJs { source, .. } = &instr.value {
+                    for (name, ids) in &name_to_id {
+                        if !contains_as_word(source, name) { continue; }
+                        for &id in ids {
+                            if !reactive_ids.contains(&id) { continue; }
+                            let Some((base_id, path)) = resolve_dep_path(id, &def_at, &instr_map, &store_local_value, &phi_operands, range_start) else {
+                                continue;
+                            };
+                            let path_key: Vec<String> = path.iter().map(|e| e.property.clone()).collect();
+                            let has_ancestor = !path_key.is_empty() && {
+                                let mut found = false;
+                                for prefix_len in 0..path_key.len() {
+                                    let prefix = path_key[..prefix_len].to_vec();
+                                    if seen.contains(&(base_id.0, prefix)) { found = true; break; }
+                                }
+                                found
+                            };
+                            let key = (base_id.0, path_key);
+                            if !has_ancestor && seen.insert(key) {
+                                dep_list.push(ReactiveScopeDependency {
+                                    place: Place {
+                                        identifier: base_id,
+                                        reactive: true,
+                                        loc: instr.lvalue.loc.clone(),
+                                        effect: Effect::Unknown,
+                                    },
+                                    path,
+                                });
+                            }
+                        }
+                    }
+                    continue; // Don't fall through to each_dep_operand for InlineJs.
                 }
 
                 for place in each_dep_operand(&instr.value) {
