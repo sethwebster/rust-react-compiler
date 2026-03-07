@@ -193,6 +193,28 @@ pub fn run_with_env(hir: &mut HIRFunction, env: &mut Environment) {
                         false
                     } else {
                         // Check gap instructions in [a_end, b_start).
+                        // Pre-collect scope A's own declaration identifiers (from the
+                        // declarations map) and also the SSA temps defined by instructions
+                        // inside scope A's range. Both sets represent scope A's outputs:
+                        // they remain accessible outside scope B after merging (codegen
+                        // emits `let x; if (changed) { x = ...; }`) so don't need checking.
+                        let a_decl_ids: HashSet<IdentifierId> =
+                            env.scopes[&cur.scope_id].declarations.keys().copied().collect();
+                        // SSA temps produced by instructions inside scope A's range.
+                        // Gap StoreLocals that extract these temps are scope A output
+                        // extractions (e.g. `const x = t0` where t0 was built in scope A).
+                        let a_range_lvalue_ids: HashSet<IdentifierId> = {
+                            let mut ids = HashSet::new();
+                            for (_, block) in &hir.body.blocks {
+                                for instr in &block.instructions {
+                                    let iid = instr.id.0;
+                                    if iid >= a_start && iid < a_end {
+                                        ids.insert(instr.lvalue.identifier);
+                                    }
+                                }
+                            }
+                            ids
+                        };
                         let mut gap_safe = true;
                         if a_end < b_start {
                             'gap: for (_, block) in &hir.body.blocks {
@@ -208,11 +230,24 @@ pub fn run_with_env(hir: &mut HIRFunction, env: &mut Environment) {
                                         }
                                         if safe {
                                             // Accumulate gap lvalues (SSA temp + binding targets).
-                                            cur.lvalues.insert(instr.lvalue.identifier);
-                                            if let InstructionValue::StoreLocal { lvalue, .. } =
+                                            // Skip SSA temps that are scope A's own declarations.
+                                            if !a_decl_ids.contains(&instr.lvalue.identifier) {
+                                                cur.lvalues.insert(instr.lvalue.identifier);
+                                            }
+                                            if let InstructionValue::StoreLocal { lvalue, value, .. } =
                                                 &instr.value
                                             {
-                                                cur.lvalues.insert(lvalue.place.identifier);
+                                                // Skip binding targets that are scope A's own
+                                                // declarations — they are scope outputs and remain
+                                                // accessible outside scope B after merging.
+                                                // Also skip bindings whose stored value (SSA temp)
+                                                // was produced inside scope A's range — these are
+                                                // scope A output extractions (e.g. `const x = t0`
+                                                // where t0 was built inside scope A).
+                                                let value_from_a = a_range_lvalue_ids.contains(&value.identifier);
+                                                if !a_decl_ids.contains(&lvalue.place.identifier) && !value_from_a {
+                                                    cur.lvalues.insert(lvalue.place.identifier);
+                                                }
                                             }
                                         } else {
                                             gap_safe = false;
