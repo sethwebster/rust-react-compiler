@@ -48,7 +48,7 @@ Update the following before stopping:
 
 Session progress (output_correct/300): 155 (no change yet — fix is incomplete).
 
-**In progress (uncommitted)**: +88247c9 fix: mark InlineJs optional calls as may_allocate in scope inference
+**In progress (uncommitted)**: +35078ac feat: recursive fixture scan (1244→1717) + InlineJs dep propagation
 
 **Next step**: In `propagate_scope_dependencies_hir.rs`, add InlineJs source-text name scanning to populate scope deps (like `infer_reactive_places.rs` lines 432-440). Without it the scope has no deps → useless/pruned.
 
