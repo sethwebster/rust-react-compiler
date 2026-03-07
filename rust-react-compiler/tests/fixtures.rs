@@ -3091,3 +3091,41 @@ fn run_all_fixtures_impl() {
 }
 
 
+
+#[test]
+#[ignore]
+fn dump_raw_fixture() {
+    let name = std::env::var("DUMP_FIXTURE").unwrap_or_default();
+    if name.is_empty() { return; }
+    let dir = PathBuf::from(FIXTURE_DIR);
+    let path = dir.join(&name);
+    match run_fixture(&path) {
+        Ok(js) => eprintln!("RAW:\n{}", js),
+        Err(e) => eprintln!("ERROR: {}", e),
+    }
+}
+
+#[test]
+#[ignore]
+fn debug_normalization() {
+    let fixture = std::env::var("DEBUG_FIXTURE").unwrap_or_default();
+    if fixture.is_empty() { return; }
+    let dir = PathBuf::from(FIXTURE_DIR);
+    let path = dir.join(&fixture);
+    let expect_path = expect_md_path(&path);
+    
+    if let Ok(md) = std::fs::read_to_string(&expect_path) {
+        if let Some(expected) = parse_expected_code(&md) {
+            let ne = normalize_js(&expected);
+            eprintln!("RAW EXPECTED (first 500 chars):\n{}", &expected[..expected.len().min(500)]);
+            eprintln!("\nNORMALIZED EXPECTED (first 500 chars):\n{}", &ne[..ne.len().min(500)]);
+            eprintln!("\nNORMALIZED EXPECTED LEN: {}", ne.len());
+        }
+    }
+    if let Ok(actual) = run_fixture(&path) {
+        let na = normalize_js(&actual);
+        eprintln!("\nRAW ACTUAL (first 500 chars):\n{}", &actual[..actual.len().min(500)]);
+        eprintln!("\nNORMALIZED ACTUAL (first 500 chars):\n{}", &na[..na.len().min(500)]);
+        eprintln!("\nNORMALIZED ACTUAL LEN: {}", na.len());
+    }
+}

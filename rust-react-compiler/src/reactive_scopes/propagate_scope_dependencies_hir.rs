@@ -779,14 +779,19 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
                     let key = (base_id.0, path_key);
                     if !has_ancestor && seen.insert(key) {
                         let base_place = if base_id == place.identifier {
-                            place.clone()
+                            let mut p = place.clone();
+                            // Ensure the reactive flag is correct: the base may be in
+                            // reactive_ids even if the operand place was not marked reactive
+                            // (e.g., scope outputs whose lvalue is reactive but operand is not).
+                            if is_reactive { p.reactive = true; }
+                            p
                         } else {
                             Place {
                                 identifier: base_id,
-                                // Preserve reactive flag: non-reactive always-invalidating deps
-                                // must remain reactive=false so prune_non_reactive_dependencies
-                                // can remove them after scope merging.
-                                reactive: place.reactive,
+                                // Use is_reactive to properly mark deps that are reactive via
+                                // reactive_ids even if the operand place itself was not marked
+                                // reactive (e.g., scope outputs loaded via LoadLocal).
+                                reactive: is_reactive,
                                 loc: place.loc.clone(),
                                 effect: Effect::Unknown,
                             }

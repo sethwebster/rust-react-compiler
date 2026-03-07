@@ -460,6 +460,30 @@ pub fn infer_reactive_places(hir: &mut HIRFunction, env: &Environment) {
                         }
                     }
                 }
+
+                // Mutation propagation: MethodCall with reactive args marks receiver reactive.
+                // e.g., `x.push(props.value)` → x becomes reactive (mutated with reactive data).
+                if let InstructionValue::MethodCall { receiver, args, .. } = &instr.value {
+                    let any_arg_reactive = args.iter().any(|a| match a {
+                        crate::hir::hir::CallArg::Place(p) => reactive.contains(&p.identifier),
+                        crate::hir::hir::CallArg::Spread(s) => reactive.contains(&s.place.identifier),
+                    });
+                    if any_arg_reactive && !stable_dispatchers.contains(&receiver.identifier) {
+                        reactive.insert(receiver.identifier);
+                    }
+                }
+
+                // LoadLocal/LoadContext reverse propagation: if the result is reactive
+                // (e.g., it was passed to a mutating method), mark the source as reactive.
+                // This propagates mutation-induced reactivity back to named variables.
+                // e.g., $load_x reactive (from x.push(reactive_val)) → x becomes reactive.
+                if let InstructionValue::LoadLocal { place, .. }
+                | InstructionValue::LoadContext { place, .. } = &instr.value
+                {
+                    if reactive.contains(&instr.lvalue.identifier) {
+                        reactive.insert(place.identifier);
+                    }
+                }
             }
         }
 
