@@ -673,9 +673,7 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
                 // used on each captured variable inside the function body.
                 // e.g. `() => foo.current` → dep is `foo.current`, not just `foo`.
                 // Only applies to arrow functions; regular function expressions don't narrow.
-                if let InstructionValue::FunctionExpression { lowered_func, fn_type, .. } = &instr.value {
-                    use crate::hir::hir::FunctionExpressionType;
-                    let is_arrow = *fn_type == FunctionExpressionType::Arrow;
+                if let InstructionValue::FunctionExpression { lowered_func, .. } = &instr.value {
                     let fn_source = &lowered_func.func.original_source;
                     for ctx_place in &lowered_func.func.context {
                         let Some((base_id, base_path)) =
@@ -689,9 +687,9 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
                             .and_then(|id| id.name.as_ref())
                             .map(|n| n.value().to_string())
                             .unwrap_or_default();
-                        // Try to narrow the dep to a more specific member path
-                        // (only for arrow functions).
-                        let narrowed = if is_arrow && !cap_name.is_empty() {
+                        // Try to narrow the dep to a more specific member path.
+                        // Applies to both arrow functions and regular function expressions.
+                        let narrowed = if !cap_name.is_empty() {
                             narrow_dep_path(fn_source, &cap_name)
                         } else {
                             vec![]

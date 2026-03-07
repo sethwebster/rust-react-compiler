@@ -99,7 +99,10 @@ fn source_contains_identifier(source: &str, name: &str) -> bool {
         if &source_bytes[i..i + n] == name_bytes {
             let before_ok = i == 0 || !is_id_char(source_bytes[i - 1]);
             let after_ok = i + n == slen || !is_id_char(source_bytes[i + n]);
-            if before_ok && after_ok {
+            // Also check that the identifier is not a property access (preceded by '.').
+            // e.g. in `z.a`, the `a` is a property name, not a variable reference.
+            let not_property = i == 0 || source_bytes[i - 1] != b'.';
+            if before_ok && after_ok && not_property {
                 return true;
             }
         }
@@ -108,11 +111,53 @@ fn source_contains_identifier(source: &str, name: &str) -> bool {
     false
 }
 
+/// Collect parameter names of inner arrow functions and function expressions within `source`.
+/// These names shadow outer bindings and must NOT be treated as captures.
+/// Handles: `name =>`, `(name, ...) =>`, `function(name) {...}`, `function name(p) {...}`.
+fn collect_inner_params(source: &str) -> std::collections::HashSet<String> {
+    let mut params = std::collections::HashSet::new();
+    let is_id_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+    let is_id_start = |b: u8| b.is_ascii_alphabetic() || b == b'_' || b == b'$';
+    let bytes = source.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        // Pattern 1: `IDENT =>` — single-param arrow without parens.
+        // Find an identifier followed by optional whitespace and `=>`.
+        if is_id_start(bytes[i]) {
+            // Check word boundary before
+            let at_boundary = i == 0 || !is_id_char(bytes[i - 1]);
+            if at_boundary {
+                let id_start = i;
+                while i < len && is_id_char(bytes[i]) { i += 1; }
+                let id = &source[id_start..i];
+                // Skip whitespace
+                let mut j = i;
+                while j < len && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\n') { j += 1; }
+                if j + 1 < len && bytes[j] == b'=' && bytes[j + 1] == b'>' {
+                    // Only if not `!=` or `>=`
+                    let before_eq = if j > 0 { bytes[j - 1] } else { b' ' };
+                    if before_eq != b'!' && before_eq != b'>' && before_eq != b'<' {
+                        params.insert(id.to_string());
+                    }
+                }
+                continue;
+            }
+        }
+        i += 1;
+    }
+    params
+}
+
 /// Collect all outer-scope variables that appear (by name) in `fn_source`.
 /// `excluded_params` — names of the function's own parameters (they shadow
 /// outer bindings and must NOT be treated as captures).
 /// Returns Places referencing the outer HIR identifiers.
 fn collect_captures(ctx: &LoweringContext, fn_source: &str, excluded_params: &std::collections::HashSet<String>) -> Vec<Place> {
+    // Also exclude params of inner arrows within the source (they shadow outer bindings).
+    let inner_params = collect_inner_params(fn_source);
+
     let mut seen = std::collections::HashSet::new();
     let mut result = Vec::new();
     for (&_sym_id, &ident_id) in &ctx.symbol_map {
@@ -124,8 +169,8 @@ fn collect_captures(ctx: &LoweringContext, fn_source: &str, excluded_params: &st
                 Some(n) => n.value().to_string(),
                 None => continue,
             };
-            // Skip names that are parameters of this function — they shadow outer vars.
-            if excluded_params.contains(&name) {
+            // Skip names that are parameters of this function or inner functions.
+            if excluded_params.contains(&name) || inner_params.contains(&name) {
                 continue;
             }
             if source_contains_identifier(fn_source, &name) {
