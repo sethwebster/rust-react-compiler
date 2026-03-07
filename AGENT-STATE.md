@@ -44,9 +44,9 @@ Update the following before stopping:
 
 ## Current Task
 
-**Active work**: Fixture runner now recursive (1717 total). Latest: InlineJs dep propagation committed. Compile 82.5% (1417/1717), Correct 32.6% (560/1717).
+**Active work**: Ternary phi node resolution. Compile 82.5% (1417/1717), Correct 33.0% (566/1717).
 
-Session progress (output_correct/300): 142 → 144 → 146 → 150 → 151 → 153 → 155 → 560/1717 (recursive scan).
+Session progress: 560 → 566/1717 (+6 from ternary phi fix).
 
 **In progress (uncommitted)**: none — clean tree
 
@@ -291,3 +291,4 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-07 | 61.0 | 25.3+ | — | 18 | 28 | React namespace hooks, logical phi, labeled blocks, const inlining (142/300 output correct) |
 | 2026-03-07 | 91.3 | 37.2 | — | 18 | 28 | Destructure post-scope fix, chained logical phi fix (155/300 output correct, 463/1244) |
 | 2026-03-07 | 82.5 | 32.6 | — | 18 | 28 | Switched to recursive fixture scan (1244→1717), InlineJs dep propagation fix (560/1717) |
+| 2026-03-07 | 82.5 | 33.0 | — | 18 | 28 | Ternary phi node resolution (+6, 566/1717) |
