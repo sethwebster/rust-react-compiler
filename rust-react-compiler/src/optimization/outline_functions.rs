@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 
 use crate::hir::environment::Environment;
-use crate::hir::hir::{FunctionExpressionType, HIRFunction, InstructionValue, NonLocalBinding};
+use crate::hir::hir::{FunctionExpressionType, HIRFunction, InstructionKind, InstructionValue, NonLocalBinding, PrimitiveValue};
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -103,6 +103,38 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
         }
     }
 
+    // Build a map of local name → primitive value for const locals assigned from primitives.
+    // This allows outlining functions that capture `const x = 42;` by inlining the literal.
+    let mut const_name_to_primitive: std::collections::HashMap<String, PrimitiveValue> = std::collections::HashMap::new();
+    {
+        // Build ident_id → primitive value from Primitive instructions.
+        let mut id_to_prim: std::collections::HashMap<u32, PrimitiveValue> = std::collections::HashMap::new();
+        for (_, block) in &hir.body.blocks {
+            for instr in &block.instructions {
+                if let InstructionValue::Primitive { value, .. } = &instr.value {
+                    id_to_prim.insert(instr.lvalue.identifier.0, value.clone());
+                }
+            }
+        }
+        // Find StoreLocal(const, local_name, value) where value → primitive.
+        for (_, block) in &hir.body.blocks {
+            for instr in &block.instructions {
+                if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
+                    if matches!(lvalue.kind, InstructionKind::Const | InstructionKind::HoistedConst) {
+                        if let Some(prim) = id_to_prim.get(&value.identifier.0) {
+                            if let Some(local_name) = env.get_identifier(lvalue.place.identifier)
+                                .and_then(|i| i.name.as_ref())
+                                .map(|n| n.value().to_string())
+                            {
+                                const_name_to_primitive.insert(local_name, prim.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let mut temp_counter = 0usize;
 
     // If @enableNameAnonymousFunctions is set, build a map from FunctionExpression
@@ -170,6 +202,7 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
                         outer_local_names.contains(name.as_str())
                             && !module_names.contains(name.as_str())
                             && !const_local_to_global.contains_key(name.as_str())
+                            && !const_name_to_primitive.contains_key(name.as_str())
                     } else {
                         false
                     }
@@ -215,6 +248,13 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
                 for fv in &free_vars {
                     if let Some(global_name) = const_local_to_global.get(fv.as_str()) {
                         renamed_body = rename_word(&renamed_body, fv, global_name);
+                    }
+                }
+                // Replace const-from-primitive captures with their literal values.
+                for fv in &free_vars {
+                    if let Some(prim) = const_name_to_primitive.get(fv.as_str()) {
+                        let literal = primitive_to_literal(prim);
+                        renamed_body = rename_word(&renamed_body, fv, &literal);
                     }
                 }
 
@@ -553,6 +593,23 @@ fn rename_catch_params(text: &str) -> String {
         }
     }
     result
+}
+
+/// Convert a PrimitiveValue to its JavaScript literal string representation.
+fn primitive_to_literal(prim: &PrimitiveValue) -> String {
+    match prim {
+        PrimitiveValue::Number(n) => {
+            if n.fract() == 0.0 && n.abs() < 1e15 {
+                format!("{}", *n as i64)
+            } else {
+                format!("{}", n)
+            }
+        }
+        PrimitiveValue::Boolean(b) => if *b { "true".to_string() } else { "false".to_string() },
+        PrimitiveValue::String(s) => format!("\"{}\"", s),
+        PrimitiveValue::Null => "null".to_string(),
+        PrimitiveValue::Undefined => "undefined".to_string(),
+    }
 }
 
 fn is_js_keyword(tok: &str) -> bool {
