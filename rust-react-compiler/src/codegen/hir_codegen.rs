@@ -2847,6 +2847,66 @@ impl<'a> Codegen<'a> {
                 }
             }
 
+            // Ternary phi resolution: Terminal::Branch { logical_op: None } creates
+            // ternary expressions `test ? consequent : alternate`. The phi result at the
+            // fallthrough block should be emitted as `test ? consq_val : alt_val`.
+            for bid in &block_ids {
+                let Some(block) = self.hir.body.blocks.get(bid) else { continue };
+                let Terminal::Branch {
+                    test,
+                    consequent,
+                    alternate,
+                    fallthrough,
+                    logical_op: None,
+                    ..
+                } = &block.terminal else { continue };
+
+                let test_expr = self.expr_for_phi_operand(test);
+                let consq_bid = *consequent;
+                let alt_bid = *alternate;
+                let fallthrough_bid = *fallthrough;
+                let branch_bid = *bid;
+
+                let Some(fall_block) = self.hir.body.blocks.get(&fallthrough_bid) else { continue };
+
+                for phi in &fall_block.phis {
+                    if self.inlined_exprs.contains_key(&phi.place.identifier.0)
+                        || new_entries.iter().any(|(id, _)| *id == phi.place.identifier.0)
+                    {
+                        continue;
+                    }
+
+                    // Only handle 2-operand phis (one from each arm).
+                    if phi.operands.len() != 2 { continue; }
+
+                    // Get the operand from each arm. The phi must have exactly one
+                    // operand from consequent side and one from alternate side.
+                    // The consequent/alternate blocks may have been processed (goto
+                    // chains), so we look for any operand NOT from branch_bid itself.
+                    let consq_op = phi.operands.get(&consq_bid)
+                        .or_else(|| phi.operands.iter()
+                            .filter(|(&k, _)| k != branch_bid && k != alt_bid && k != fallthrough_bid)
+                            .map(|(_, v)| v).next());
+                    let alt_op = phi.operands.get(&alt_bid)
+                        .or_else(|| phi.operands.iter()
+                            .filter(|(&k, _)| k != branch_bid && k != consq_bid && k != fallthrough_bid)
+                            .map(|(_, v)| v).next());
+
+                    let (Some(consq_place), Some(alt_place)) = (consq_op, alt_op) else { continue };
+
+                    let consq_expr = self.expr_for_phi_operand(consq_place);
+                    let alt_expr = self.expr_for_phi_operand(alt_place);
+
+                    // Only resolve if operands are fully resolved (no raw $tN).
+                    if consq_expr.contains("$t") || alt_expr.contains("$t") { continue; }
+
+                    let combined = format!("{test_expr} ? {consq_expr} : {alt_expr}");
+                    logical_phi_ids.insert(phi.place.identifier.0);
+                    new_entries.push((phi.place.identifier.0, combined));
+                    added_this_round += 1;
+                }
+            }
+
             // Apply collected entries.
             for (id, expr) in new_entries.drain(..) {
                 self.inlined_exprs.insert(id, expr);
