@@ -48,7 +48,7 @@ Update the following before stopping:
 
 Session progress: 560 → 566/1717. Recent fix: allow hook-named local vars as values.
 
-**In progress (uncommitted)**: hir_codegen.rs + propagate_scope_dependencies_hir.rs (uncommitted changes from other agent)
+**In progress (uncommitted)**: +957800e chore: fix history table — remove bad 91.3% row, add current stats 566
 
 Recent commits (newest first):
 - cd3b0c3: chore: update AGENT-STATE.md
