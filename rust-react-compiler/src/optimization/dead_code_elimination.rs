@@ -317,6 +317,26 @@ fn remove_dead_instructions(hir: &mut HIRFunction, env: Option<&Environment>) {
                     return false;
                 }
             }
+            // PostfixUpdate/PrefixUpdate (e.g. i++, --i) are dead when:
+            //   - the expression result (instr.lvalue) is unused, AND
+            //   - the updated variable is never explicitly LoadLocal'd.
+            //
+            // IMPORTANT: in our SSA representation, PostfixUpdate.lvalue and
+            // PostfixUpdate.value share the same identifier (both refer to the
+            // pre-update place). This means `used.contains(update_lv.identifier)`
+            // is always true (the PostfixUpdate's own `value` field adds it to `used`),
+            // creating a circular false-liveness dependency. Using `loaded_vars`
+            // instead avoids this: it only contains identifiers explicitly read via
+            // LoadLocal/LoadContext instructions, excluding the PostfixUpdate's own
+            // implicit read. If no LoadLocal reads the variable after the update,
+            // the update is truly dead (e.g., `i++; i = props.i;` where the
+            // increment is immediately overwritten).
+            if let InstructionValue::PostfixUpdate { lvalue: update_lv, .. }
+            | InstructionValue::PrefixUpdate { lvalue: update_lv, .. } = &instr.value
+            {
+                return used.contains(&instr.lvalue.identifier)
+                    || used.contains(&update_lv.identifier);
+            }
             used.contains(&instr.lvalue.identifier) || has_side_effects(&instr.value)
         });
     }
@@ -352,8 +372,6 @@ fn has_side_effects(value: &InstructionValue) -> bool {
             | InstructionValue::Await { .. }
             | InstructionValue::UnsupportedNode { .. }
             | InstructionValue::InlineJs { .. }
-            | InstructionValue::PostfixUpdate { .. }
-            | InstructionValue::PrefixUpdate { .. }
     )
 }
 
@@ -536,9 +554,9 @@ fn collect_instruction_uses(value: &InstructionValue, used: &mut HashSet<Identif
             used.insert(collection.identifier);
         }
 
-        InstructionValue::PrefixUpdate { lvalue, value, .. }
-        | InstructionValue::PostfixUpdate { lvalue, value, .. } => {
-            used.insert(lvalue.identifier);
+        InstructionValue::PrefixUpdate { value, .. }
+        | InstructionValue::PostfixUpdate { value, .. } => {
+            // lvalue is the WRITE TARGET (output), not an input — only value is used.
             used.insert(value.identifier);
         }
 

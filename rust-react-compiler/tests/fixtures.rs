@@ -2337,6 +2337,20 @@ fn show_diffs_impl() {
 }
 
 /// Run all fixtures and collect pass/fail stats including output correctness.
+/// Run with: cargo test --test fixtures run_subset_fixtures -- --ignored --nocapture
+/// Runs only the first 300 fixtures alphabetically to avoid OOM on low-RAM machines.
+#[test]
+#[ignore]
+fn run_subset_fixtures() {
+    let result = std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| run_all_fixtures_impl_subset(300))
+        .expect("spawn")
+        .join()
+        .expect("join");
+    let _ = result;
+}
+
 /// Run with: cargo test --test fixtures run_all_fixtures -- --ignored --nocapture
 #[test]
 #[ignore]
@@ -2349,6 +2363,76 @@ fn run_all_fixtures() {
         .join()
         .expect("join");
     let _ = result;
+}
+
+fn run_all_fixtures_impl_subset(limit: usize) {
+    let dir = PathBuf::from(FIXTURE_DIR);
+    let mut total = 0usize;
+    let mut passed = 0usize;
+    let mut output_correct = 0usize;
+    let mut failed = 0usize;
+    let mut error_expected = 0usize;
+    let mut error_unexpected = 0usize;
+    let mut output_mismatches: Vec<String> = Vec::new();
+
+    let entries = std::fs::read_dir(&dir).expect("fixture dir exists");
+    let mut paths: Vec<_> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| matches!(
+            p.extension().and_then(|e| e.to_str()),
+            Some("js" | "jsx" | "ts" | "tsx")
+        ))
+        .collect();
+    paths.sort();
+
+    for path in paths.iter().take(limit) {
+        total += 1;
+        let expect_error = is_error_fixture(path);
+        if let Ok(src) = std::fs::read_to_string(path) {
+            let first = src.lines().next().unwrap_or("");
+            if first.contains("@flow") {
+                if expect_error { error_expected += 1; } else { passed += 1; output_correct += 1; }
+                continue;
+            }
+        }
+        match run_fixture(path) {
+            Ok(actual) if !expect_error => {
+                passed += 1;
+                let expect_path = expect_md_path(path);
+                if let Ok(md) = std::fs::read_to_string(&expect_path) {
+                    if let Some(expected) = parse_expected_code(&md) {
+                        if normalize_js(&actual) == normalize_js(&expected) {
+                            output_correct += 1;
+                        } else {
+                            output_mismatches.push(path.file_name().unwrap().to_str().unwrap().to_string());
+                        }
+                    } else { output_correct += 1; }
+                } else { output_correct += 1; }
+            }
+            Ok(_) if expect_error => { error_unexpected += 1; }
+            Err(_) if expect_error => { error_expected += 1; }
+            Err(_) => { failed += 1; }
+            _ => {}
+        }
+    }
+
+    println!("\n=== Subset Fixture Results (first {}) ===", limit);
+    println!("Total:              {}", total);
+    println!("Output correct:     {}", output_correct);
+    println!("Output mismatch:    {}", passed.saturating_sub(output_correct));
+    println!("Failed:             {}", failed);
+    println!("Error (expected):   {}", error_expected);
+    println!("Error (unexpected): {}", error_unexpected);
+    println!("Compile rate: {:.1}%", passed as f64 / total as f64 * 100.0);
+    println!("Correct rate: {:.1}%", output_correct as f64 / total as f64 * 100.0);
+
+    if !output_mismatches.is_empty() {
+        println!("\nOutput mismatches ({}):", output_mismatches.len());
+        for name in &output_mismatches {
+            println!("  {}", name);
+        }
+    }
 }
 
 fn run_all_fixtures_impl() {

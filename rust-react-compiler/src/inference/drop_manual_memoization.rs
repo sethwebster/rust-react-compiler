@@ -25,6 +25,8 @@ pub fn drop_manual_memoization(hir: &mut HIRFunction) {
     // Phase 1: Scan all blocks to find identifiers that are `useMemo`/`useCallback`.
     // These come from LoadGlobal or from a property load on React (React.useMemo).
     let mut memo_ids: HashMap<IdentifierId, ManualMemoKind> = HashMap::new();
+    // Track identifiers from `import * as React` or similar React namespace imports.
+    let mut react_namespace_ids: std::collections::HashSet<IdentifierId> = std::collections::HashSet::new();
 
     // Track identifiers loaded via LoadGlobal with a known memo binding.
     for (_, block) in &hir.body.blocks {
@@ -36,16 +38,40 @@ pub fn drop_manual_memoization(hir: &mut HIRFunction) {
                     {
                         Some(name.as_str())
                     }
+                    NonLocalBinding::ImportNamespace { name, module }
+                        if module == "react" || module == "React" =>
+                    {
+                        // `import * as React from 'react'` → track the namespace id
+                        react_namespace_ids.insert(instr.lvalue.identifier);
+                        Some(name.as_str())
+                    }
                     NonLocalBinding::ImportDefault { name, .. } => {
                         // `import useMemo from 'react'` — unlikely but handle
                         Some(name.as_str())
                     }
-                    NonLocalBinding::Global { name } => Some(name.as_str()),
+                    NonLocalBinding::Global { name } => {
+                        // `import * as React from 'react'` lowers to Global { name: "React" }
+                        // because lower_identifier always emits Global for import bindings.
+                        // Track it as a React namespace so we can detect `React.useCallback`.
+                        if name == "React" {
+                            react_namespace_ids.insert(instr.lvalue.identifier);
+                        }
+                        Some(name.as_str())
+                    }
                     NonLocalBinding::ModuleLocal { name } => Some(name.as_str()),
                     _ => None,
                 };
                 if let Some(n) = name {
                     if let Some(kind) = is_memo_name(n) {
+                        memo_ids.insert(instr.lvalue.identifier, kind);
+                    }
+                }
+            }
+            // Detect `React.useMemo` / `React.useCallback` from namespace imports:
+            // PropertyLoad where object is a React namespace and property is useMemo/useCallback.
+            if let InstructionValue::PropertyLoad { object, property, .. } = &instr.value {
+                if react_namespace_ids.contains(&object.identifier) {
+                    if let Some(kind) = is_memo_name(property) {
                         memo_ids.insert(instr.lvalue.identifier, kind);
                     }
                 }

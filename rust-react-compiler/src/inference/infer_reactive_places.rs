@@ -25,11 +25,30 @@ pub fn infer_reactive_places(hir: &mut HIRFunction, env: &Environment) {
     // When these are used as a CallExpression callee, the call result is NOT reactive
     // even if the arguments are reactive (stable hooks always return the same object).
     let mut stable_hook_refs: HashSet<IdentifierId> = HashSet::new();
+    // Pre-scan: collect identifiers that hold LOCAL hook function references (loaded
+    // via LoadLocal, e.g., `function useFoo() {...}` defined in the same file).
+    // When these are used as a CallExpression callee, the call RESULT is reactive
+    // (hook return values change each render), but the reference itself is stable
+    // and should NOT be treated as a reactive dep.
+    let mut local_hook_refs: HashSet<IdentifierId> = HashSet::new();
     for (_, block) in &hir.body.blocks {
         for instr in &block.instructions {
             if is_stable_hook_load(&instr.value) {
                 stable_hook_refs.insert(instr.lvalue.identifier);
-                // Also track the stored var if it's immediately StoreLocal'd
+            }
+            if let InstructionValue::LoadLocal { place, .. } = &instr.value {
+                let name_opt = env.get_identifier(place.identifier)
+                    .and_then(|id| id.name.as_ref())
+                    .map(|n| n.value().to_string());
+                if let Some(ref name) = name_opt {
+                    if is_stable_hook(name) {
+                        stable_hook_refs.insert(instr.lvalue.identifier);
+                    } else if is_hook_name(name) {
+                        // Local custom hook: call result will be reactive, but the
+                        // function reference itself is stable (module-level declaration).
+                        local_hook_refs.insert(instr.lvalue.identifier);
+                    }
+                }
             }
         }
     }
@@ -338,6 +357,14 @@ pub fn infer_reactive_places(hir: &mut HIRFunction, env: &Environment) {
                 if let InstructionValue::CallExpression { callee, .. } = &instr.value {
                     if stable_hook_refs.contains(&callee.identifier) {
                         continue; // result is stable — skip reactivity propagation
+                    }
+                    // Local custom hook calls: mark the call result as reactive, but do
+                    // NOT mark the callee reference itself as reactive. This prevents the
+                    // hook function reference from appearing as a scope dep while still
+                    // correctly treating the hook's return value as reactive.
+                    if local_hook_refs.contains(&callee.identifier) {
+                        reactive.insert(instr.lvalue.identifier);
+                        continue;
                     }
                 }
                 if let InstructionValue::MethodCall { receiver, property, .. } = &instr.value {
