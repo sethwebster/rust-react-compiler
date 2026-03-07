@@ -44,11 +44,11 @@ Update the following before stopping:
 
 ## Current Task
 
-**Active work**: Ternary phi node resolution. Compile 82.5% (1417/1717), Correct 33.0% (566/1717).
+**Active work**: Codegen improvements. Compile 82.6% (1419/1717), Correct 33.0% (566/1717).
 
-Session progress: 560 → 566/1717 (+6 from ternary phi fix).
+Session progress: 560 → 566/1717. Recent fix: allow hook-named local vars as values.
 
-**In progress (uncommitted)**: none — clean tree
+**In progress (uncommitted)**: hir_codegen.rs + propagate_scope_dependencies_hir.rs (uncommitted changes from other agent)
 
 Recent commits (newest first):
 - cd3b0c3: chore: update AGENT-STATE.md
@@ -289,6 +289,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-05 | 61.0 | 24.1 | — | 18 | 28 | TSX parsing, type annotation stripping, as-const norm (+5) |
 | 2026-03-06 | 61.0 | 25.3 | — | 18 | 28 | ComputedLoad dep tracing, for-of destructuring, IIFE/binding norms (+22) |
 | 2026-03-07 | 61.0 | 25.3+ | — | 18 | 28 | React namespace hooks, logical phi, labeled blocks, const inlining (142/300 output correct) |
-| 2026-03-07 | 91.3 | 37.2 | — | 18 | 28 | Destructure post-scope fix, chained logical phi fix (155/300 output correct, 463/1244) |
+| 2026-03-07 | 82.5 | 26.9 | — | 18 | 28 | Destructure post-scope fix, chained logical phi fix (463/1717 rebased) |
 | 2026-03-07 | 82.5 | 32.6 | — | 18 | 28 | Switched to recursive fixture scan (1244→1717), InlineJs dep propagation fix (560/1717) |
 | 2026-03-07 | 82.5 | 33.0 | — | 18 | 28 | Ternary phi node resolution (+6, 566/1717) |
+| 2026-03-07 | 82.6 | 33.0 | — | 18 | 28 | Allow hook-named local vars as values (566/1717, compile 1419/1717) |
