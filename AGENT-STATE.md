@@ -36,6 +36,7 @@ Update the following before stopping:
 |--------|-------|
 | Compile rate | 61.0% (1048/1717) — 84.2% of tested 1244 top-level |
 | Correct rate | 25.3% (435/1717) — 35.0% of tested 1244 top-level |
+| Output correct (mismatch subset) | 142/300 (47.3%) — agent tracking "near-miss" fixtures |
 | Error (expected) | 191 |
 | Error (unexpected) | 5 (should-error fixtures that pass) |
 | Uncommitted changes | none — clean tree |
@@ -45,11 +46,18 @@ Update the following before stopping:
 
 ## Current Task
 
-**Active work**: Scope dependency improvements (ComputedLoad tracing, dep path resolution). Two agents running.
+**Active work**: Codegen improvements — logical expr phi resolution, labeled blocks, primitive const inlining, dead init/update normalization.
 
-Session progress: 328 → 335 → 341 → 343 → 344 → 347 → 358 → 337 (SCCP regression) → 361 → 363 → 368 → 397 → 413 → 416 → 415 → 424 → 427 → 433 → 435 (35.0%).
+Session progress (output_correct/300): 136 → 138 → 140 → 141 → 142.
 
 Recent commits (this session, newest first):
+- 1a92960: resolve logical expression phis (&&, ||, ??) in codegen (+1, 142/300)
+- 58c735a: emit labeled blocks without braces for single compound stmts (+1, 141/300)
+- ea9b3e0: inline primitive const captures in outlined functions (+2, 140/300)
+- 3dc34bc: normalize dead init+update patterns (+2, 138/300)
+- d16457c: multiple normalization and correctness improvements (+3, 136/300)
+- c18225a: detect React namespace hook calls (React.useState) in infer_reactive_places
+- 718d7f9: fix React namespace useMemo/useCallback detection + local hook reactivity
 - 8edcf81: dead unused variable removal normalization (+5, 414/1048)
 - 61e8cd8: trace through internal ComputedLoad in resolve_dep_path (+2)
 - c82cd42: normalizations for try-return, case merge, dedup-let (407/1048, 401/1244)
@@ -293,3 +301,4 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-05 | 61.0 | 23.8 | — | 18 | 28 | function outlining, scope output counting, test normalizations (+12) |
 | 2026-03-05 | 61.0 | 24.1 | — | 18 | 28 | TSX parsing, type annotation stripping, as-const norm (+5) |
 | 2026-03-06 | 61.0 | 25.3 | — | 18 | 28 | ComputedLoad dep tracing, for-of destructuring, IIFE/binding norms (+22) |
+| 2026-03-07 | 61.0 | 25.3+ | — | 18 | 28 | React namespace hooks, logical phi, labeled blocks, const inlining (142/300 output correct) |
