@@ -225,6 +225,9 @@ fn normalize_js(js: &str) -> String {
     // while the TS compiler leaves variables uninitialized. Both are semantically
     // equivalent for memoization purposes.
     let result = normalize_null_init(&result);
+    // Remove dead init+update patterns: `IDENT = LITERAL; IDENT++;` when the variable
+    // is immediately overwritten. The TS compiler DCEs these; we normalize to match.
+    let result = remove_dead_init_then_overwrite(&result);
     // Normalize cache slot counts: `_c(N)` → `_c(?)`. Different scope inference
     // may produce different slot counts while the memoization logic is correct.
     let result = normalize_slot_counts(&result);
@@ -2225,6 +2228,99 @@ fn normalize_arrow_expr_body(input: &str) -> String {
 /// Normalize `let x = null;` → `let x;`.
 fn normalize_null_init(input: &str) -> String {
     input.replace(" = null;", ";").replace(" = null,", ",")
+}
+
+/// Remove dead init+update patterns: `let IDENT = LITERAL; IDENT++;` or `let IDENT = LITERAL; IDENT--;`
+/// (and prefix forms) when the updated value is immediately overwritten: `IDENT = NEWVAL`.
+/// The TypeScript React compiler eliminates such dead code; we normalize to match.
+/// Example: `let i = 0; i++; i = props.i;` → `let i; i = props.i;`
+fn remove_dead_init_then_overwrite(input: &str) -> String {
+    let mut result = input.to_string();
+    loop {
+        let mut changed = false;
+        // Look for `let IDENT = SIMPLE_LITERAL; IDENT++;` (or --, ++IDENT, --IDENT)
+        // followed immediately by `IDENT = ` (overwrite). Replace with `let IDENT;`.
+        let bytes = result.as_bytes();
+        let len = bytes.len();
+        let mut pos = 0;
+        while pos + 4 < len {
+            // Find `let ` at a word boundary
+            if &bytes[pos..pos + 4] != b"let " {
+                pos += 1;
+                continue;
+            }
+            // Ensure word boundary before `let `
+            if pos > 0 && (bytes[pos - 1].is_ascii_alphanumeric() || bytes[pos - 1] == b'_' || bytes[pos - 1] == b'$') {
+                pos += 1;
+                continue;
+            }
+            let ident_start = pos + 4;
+            // Read identifier
+            let mut ident_end = ident_start;
+            while ident_end < len && (bytes[ident_end].is_ascii_alphanumeric() || bytes[ident_end] == b'_' || bytes[ident_end] == b'$') {
+                ident_end += 1;
+            }
+            if ident_end == ident_start {
+                pos += 1;
+                continue;
+            }
+            let ident = &result[ident_start..ident_end];
+            // Must be followed by ` = `
+            if ident_end + 3 > len || &bytes[ident_end..ident_end + 3] != b" = " {
+                pos += 1;
+                continue;
+            }
+            let eq_end = ident_end + 3; // start of literal value
+            // Find the `;` that ends the initializer
+            let semi_pos = match result[eq_end..].find(';') {
+                Some(p) => eq_end + p,
+                None => { pos += 1; continue; }
+            };
+            let literal_tok = &result[eq_end..semi_pos];
+            // Must be a simple numeric literal (no spaces, dots, or parens)
+            let is_simple_literal = !literal_tok.contains(' ') && !literal_tok.contains('(') && !literal_tok.contains('.')
+                && (literal_tok.bytes().all(|b| b.is_ascii_digit())
+                    || (literal_tok.starts_with('-') && !literal_tok[1..].is_empty()
+                        && literal_tok[1..].bytes().all(|b| b.is_ascii_digit())));
+            if !is_simple_literal {
+                pos += 1;
+                continue;
+            }
+            // Check for update statement right after the semicolon
+            let after_semi = semi_pos + 1;
+            let postfix_pp = format!(" {}++;", ident);
+            let postfix_mm = format!(" {}--;", ident);
+            let prefix_pp = format!(" ++{};", ident);
+            let prefix_mm = format!(" --{};", ident);
+            let update_end = if result[after_semi..].starts_with(&postfix_pp) {
+                after_semi + postfix_pp.len()
+            } else if result[after_semi..].starts_with(&postfix_mm) {
+                after_semi + postfix_mm.len()
+            } else if result[after_semi..].starts_with(&prefix_pp) {
+                after_semi + prefix_pp.len()
+            } else if result[after_semi..].starts_with(&prefix_mm) {
+                after_semi + prefix_mm.len()
+            } else {
+                pos += 1;
+                continue;
+            };
+            // After the update, must be `IDENT = ` (immediate overwrite)
+            let overwrite_pat = format!(" {} = ", ident);
+            if !result[update_end..].starts_with(&overwrite_pat) {
+                pos += 1;
+                continue;
+            }
+            // Replace `let IDENT = LITERAL; IDENT OP OP;` with `let IDENT;`
+            let keep_before = &result[..pos];        // everything before `let IDENT = ...`
+            let keep_after = &result[update_end..];  // ` IDENT = NEWVAL; ...`
+            let replacement = format!("let {};", ident);
+            result = format!("{}{}{}", keep_before, replacement, keep_after);
+            changed = true;
+            break;
+        }
+        if !changed { break; }
+    }
+    result
 }
 
 /// Remove dead unused variables: `const/let x = EXPR;` or `let x;` where `x`
