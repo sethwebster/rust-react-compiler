@@ -17,6 +17,22 @@ fn parse_expected_code(md: &str) -> Option<String> {
     Some(md[after_fence..after_fence + end].to_string())
 }
 
+/// Copy one UTF-8 character from `bytes[i..]` into `result`, returning bytes consumed.
+/// This is the safe alternative to `result.push(bytes[i] as char); i += 1;`
+/// which corrupts multi-byte UTF-8 sequences by treating each byte as a separate char.
+#[inline]
+fn push_utf8_char(result: &mut String, bytes: &[u8], i: usize) -> usize {
+    let b = bytes[i];
+    let n = if b < 0x80 { 1 }
+            else if b < 0xE0 { 2 }
+            else if b < 0xF0 { 3 }
+            else { 4 };
+    let end = (i + n).min(bytes.len());
+    // bytes came from a valid Rust &str so this slice is always valid UTF-8
+    result.push_str(std::str::from_utf8(&bytes[i..end]).unwrap_or("\u{FFFD}"));
+    end - i
+}
+
 /// Normalize JS for comparison: collapse whitespace, ignore comments and trailing commas.
 fn normalize_js(js: &str) -> String {
     // Strip single-line (//) and multi-line (/* */) comments before tokenizing.
@@ -41,21 +57,21 @@ fn normalize_js(js: &str) -> String {
         }
         if in_single_quote {
             if c == b'\'' && prev != b'\\' { in_single_quote = false; }
-            stripped.push(c as char);
+            let adv = push_utf8_char(&mut stripped, bytes, i);
             prev = c;
-            i += 1;
+            i += adv;
             continue;
         }
         if in_double_quote {
             if c == b'"' && prev != b'\\' { in_double_quote = false; }
-            stripped.push(c as char);
+            let adv = push_utf8_char(&mut stripped, bytes, i);
             prev = c;
-            i += 1;
+            i += adv;
             continue;
         }
         // Not in string or block comment
-        if c == b'\'' { in_single_quote = true; stripped.push(c as char); prev = c; i += 1; continue; }
-        if c == b'"' { in_double_quote = true; stripped.push(c as char); prev = c; i += 1; continue; }
+        if c == b'\'' { in_single_quote = true; stripped.push('\''); prev = c; i += 1; continue; }
+        if c == b'"' { in_double_quote = true; stripped.push('"'); prev = c; i += 1; continue; }
         if c == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
             // Line comment: skip to end of line
             while i < bytes.len() && bytes[i] != b'\n' { i += 1; }
@@ -66,9 +82,9 @@ fn normalize_js(js: &str) -> String {
             i += 2;
             continue;
         }
-        stripped.push(c as char);
+        let adv = push_utf8_char(&mut stripped, bytes, i);
         prev = c;
-        i += 1;
+        i += adv;
     }
 
     // Tokenize and normalize whitespace.
@@ -583,8 +599,7 @@ fn normalize_component_keyword(input: &str) -> String {
                 continue;
             }
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        i += push_utf8_char(&mut out, bytes, i);
     }
     out
 }
@@ -638,8 +653,7 @@ fn normalize_jsx_string_attrs(input: &str) -> String {
                 continue;
             }
         }
-        result.push(bytes[i] as char);
-        i += 1;
+        i += push_utf8_char(&mut result, bytes, i);
     }
     result
 }
@@ -668,8 +682,7 @@ fn normalize_member_access_spaces(input: &str) -> String {
                 continue;
             }
         }
-        result.push(bytes[i] as char);
-        i += 1;
+        i += push_utf8_char(&mut result, bytes, i);
     }
     result
 }
@@ -838,8 +851,7 @@ fn normalize_paren_jsx(input: &str) -> String {
             i = j;
             continue;
         }
-        result.push(bytes[i] as char);
-        i += 1;
+        i += push_utf8_char(&mut result, bytes, i);
     }
     result
 }
@@ -867,8 +879,7 @@ fn normalize_jsx_self_closing(input: &str) -> String {
                 }
             }
         }
-        result.push(bytes[i] as char);
-        i += 1;
+        i += push_utf8_char(&mut result, bytes, i);
     }
     result
 }
@@ -907,8 +918,7 @@ fn normalize_jsx_text_children(input: &str) -> String {
                 }
             }
         }
-        result.push(bytes[i] as char);
-        i += 1;
+        i += push_utf8_char(&mut result, bytes, i);
     }
     result
 }
@@ -1067,8 +1077,7 @@ fn normalize_import_specifier_order(input: &str) -> String {
                 continue;
             }
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        i += push_utf8_char(&mut out, bytes, i);
     }
     // Only replace if something changed (to avoid reallocation when no imports)
     if out.len() == result.len() && out == result { result } else { out }
@@ -1131,8 +1140,7 @@ fn normalize_integer_floats(input: &str) -> String {
                 result.push_str(&input[start..i]);
             }
         } else {
-            result.push(bytes[i] as char);
-            i += 1;
+            i += push_utf8_char(&mut result, bytes, i);
         }
     }
     result
@@ -1222,8 +1230,7 @@ fn normalize_temp_names(input: &str) -> String {
                 }
             }
         }
-        result.push(bytes[i] as char);
-        i += 1;
+        i += push_utf8_char(&mut result, bytes, i);
     }
     result
 }
@@ -1271,8 +1278,7 @@ fn normalize_compound_assignment(input: &str) -> String {
                     }
                 }
             }
-            out.push(bytes[i] as char);
-            i += 1;
+            i += push_utf8_char(&mut out, bytes, i);
         }
         result = out;
     }
@@ -1302,8 +1308,7 @@ fn normalize_disambig_suffix(input: &str) -> String {
                 continue;
             }
         }
-        result.push(bytes[i] as char);
-        i += 1;
+        i += push_utf8_char(&mut result, bytes, i);
     }
     result
 }
@@ -1344,8 +1349,7 @@ fn normalize_for_update_comma(input: &str) -> String {
                 }
             }
         }
-        result.push(bytes[i] as char);
-        i += 1;
+        i += push_utf8_char(&mut result, bytes, i);
     }
     result
 }
@@ -1471,8 +1475,7 @@ fn sort_consecutive_bare_lets(input: &str) -> String {
                 }
             }
         }
-        result.push(bytes[i] as char);
-        i += 1;
+        i += push_utf8_char(&mut result, bytes, i);
     }
     result
 }
@@ -1616,8 +1619,7 @@ fn normalize_let_return_const(input: &str) -> String {
                 }
             }
         }
-        result.push(bytes[i] as char);
-        i += 1;
+        i += push_utf8_char(&mut result, bytes, i);
     }
     result
 }
@@ -1825,8 +1827,7 @@ fn normalize_multi_return_iife(input: &str) -> String {
                 j += 7;
                 continue;
             }
-            new_body.push(b[j] as char);
-            j += 1;
+            j += push_utf8_char(&mut new_body, b, j);
         }
         // Check if body ends with a break (last return was converted).
         // If not, add implicit `VAR = undefined;` at end.
@@ -2048,8 +2049,7 @@ fn dedup_let_declarations(input: &str) -> String {
                 }
             }
             _ => {
-                result.push(bytes[i] as char);
-                i += 1;
+                i += push_utf8_char(&mut result, bytes, i);
             }
         }
     }
@@ -2087,8 +2087,7 @@ fn normalize_optional_chain_parens(input: &str) -> String {
                 continue;
             }
         }
-        result.push(bytes[i] as char);
-        i += 1;
+        i += push_utf8_char(&mut result, bytes, i);
     }
     result
 }
@@ -2198,8 +2197,7 @@ fn inline_scope_output_names(input: &str) -> String {
                     continue;
                 }
             }
-            new_result.push(rbytes[ri] as char);
-            ri += 1;
+            ri += push_utf8_char(&mut new_result, rbytes, ri);
         }
         result = new_result;
     }
@@ -2533,8 +2531,7 @@ fn remove_dead_unused_vars(input: &str) -> String {
         } else if i + 4 <= len && &bytes[i..i + 4] == b"let " {
             kw_len = 4;
         } else {
-            result.push(bytes[i] as char);
-            i += 1;
+            i += push_utf8_char(&mut result, bytes, i);
             continue;
         }
 
@@ -2542,8 +2539,7 @@ fn remove_dead_unused_vars(input: &str) -> String {
         let at_boundary =
             i == 0 || matches!(bytes[i.saturating_sub(1)], b'{' | b';' | b' ' | b'}');
         if !at_boundary {
-            result.push(bytes[i] as char);
-            i += 1;
+            i += push_utf8_char(&mut result, bytes, i);
             continue;
         }
 
@@ -2556,8 +2552,7 @@ fn remove_dead_unused_vars(input: &str) -> String {
             j += 1;
         }
         if j == id_start {
-            result.push(bytes[i] as char);
-            i += 1;
+            i += push_utf8_char(&mut result, bytes, i);
             continue;
         }
         let var_name = &input[id_start..j];
@@ -2570,8 +2565,7 @@ fn remove_dead_unused_vars(input: &str) -> String {
                 i = skip_to;
                 continue;
             }
-            result.push(bytes[i] as char);
-            i += 1;
+            i += push_utf8_char(&mut result, bytes, i);
             continue;
         }
 
@@ -2598,8 +2592,7 @@ fn remove_dead_unused_vars(input: &str) -> String {
             }
         }
 
-        result.push(bytes[i] as char);
-        i += 1;
+        i += push_utf8_char(&mut result, bytes, i);
     }
     result
 }
@@ -2625,8 +2618,7 @@ fn normalize_slot_counts(input: &str) -> String {
                 }
             }
         }
-        result.push(bytes[i] as char);
-        i += 1;
+        i += push_utf8_char(&mut result, bytes, i);
     }
     result
 }
@@ -2716,8 +2708,7 @@ fn normalize_scope_output_names(input: &str) -> String {
                     continue;
                 }
             }
-            out.push(rb[pos] as char);
-            pos += 1;
+            pos += push_utf8_char(&mut out, rb, pos);
         }
         result = out;
     }
