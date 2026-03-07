@@ -87,9 +87,12 @@ fn instruction_memo_level(value: &InstructionValue) -> MemoLevel {
         // through the synthetic dep added during node building.
         InstructionValue::InlineJs { .. } => MemoLevel::Conditional,
 
+        // TernaryExpression: Conditional — its branches may return allocating values
+        // (e.g., `cond ? [-1, 1] : param`), so backward traversal must propagate through it.
+        InstructionValue::TernaryExpression { .. } => MemoLevel::Conditional,
+
         // Never: barrier to backward propagation (no rvalues = empty deps).
         InstructionValue::BinaryExpression { .. }
-        | InstructionValue::TernaryExpression { .. }
         | InstructionValue::UnaryExpression { .. }
         | InstructionValue::Primitive { .. }
         | InstructionValue::TemplateLiteral { .. }

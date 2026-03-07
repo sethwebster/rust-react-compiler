@@ -124,6 +124,12 @@ fn find_disjoint_mutable_values(
     // Build maps: identifier → may_allocate and identifier → reactive.
     // Used to filter StoreLocal value operands: only link values that allocate or are reactive.
     let mut ident_allocates: HashSet<IdentifierId> = HashSet::new();
+    // Track identifiers that DIRECTLY allocate (via may_allocate, not propagated).
+    // Used to distinguish ArrayExpression/ObjectExpression from TernaryExpression results.
+    let mut ident_direct_allocates: HashSet<IdentifierId> = HashSet::new();
+    // Track TernaryExpression result identifiers specifically.
+    // Used to limit "propagated allocates join" in StoreLocal to only ternary-carried arrays.
+    let mut ident_is_ternary: HashSet<IdentifierId> = HashSet::new();
     let mut ident_reactive: HashSet<IdentifierId> = HashSet::new();
     for (_, block) in &hir.body.blocks {
         for instr in &block.instructions {
@@ -150,9 +156,60 @@ fn find_disjoint_mutable_values(
             }
             if may_allocate(&instr.value, &global_names) {
                 ident_allocates.insert(instr.lvalue.identifier);
+                ident_direct_allocates.insert(instr.lvalue.identifier);
+            }
+            if matches!(&instr.value, InstructionValue::TernaryExpression { .. }) {
+                ident_is_ternary.insert(instr.lvalue.identifier);
             }
             if instr.lvalue.reactive {
                 ident_reactive.insert(instr.lvalue.identifier);
+            }
+        }
+    }
+
+    // Propagate ident_allocates through LoadLocal/LoadContext chains and phi nodes.
+    // When `t = LoadLocal(arr)` and `arr` allocates, `t` should also be
+    // considered allocating. This matters for default parameter patterns where
+    // `arr = [-1, 1]` (allocates) → `t = LoadLocal(arr)` → `StoreLocal(x, t)`.
+    // Similarly, if a phi node `x = phi(arr, _T0)` where `arr` allocates,
+    // then `x` should be considered allocating.
+    {
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for (_, block) in &hir.body.blocks {
+                for instr in &block.instructions {
+                    if ident_allocates.contains(&instr.lvalue.identifier) {
+                        continue;
+                    }
+                    let propagates = match &instr.value {
+                        // LoadLocal/LoadContext: propagate from source
+                        InstructionValue::LoadLocal { place, .. }
+                        | InstructionValue::LoadContext { place, .. } => {
+                            ident_allocates.contains(&place.identifier)
+                        }
+                        // TernaryExpression: propagates if either branch allocates
+                        InstructionValue::TernaryExpression { consequent, alternate, .. } => {
+                            ident_allocates.contains(&consequent.identifier)
+                                || ident_allocates.contains(&alternate.identifier)
+                        }
+                        _ => false,
+                    };
+                    if propagates {
+                        ident_allocates.insert(instr.lvalue.identifier);
+                        changed = true;
+                    }
+                }
+                for phi in &block.phis {
+                    if !ident_allocates.contains(&phi.place.identifier) {
+                        let any_alloc = phi.operands.values()
+                            .any(|op| ident_allocates.contains(&op.identifier));
+                        if any_alloc {
+                            ident_allocates.insert(phi.place.identifier);
+                            changed = true;
+                        }
+                    }
+                }
             }
         }
     }
@@ -170,7 +227,11 @@ fn find_disjoint_mutable_values(
                 .unwrap_or(block.terminal.id());
             let mutated_after = phi_range.start.0 + 1 != phi_range.end.0
                 && phi_range.end > block_start;
-            if mutated_after {
+            // Also union when a phi operand allocates (e.g., default param with array literal).
+            // This ensures phi results that carry allocating values get memoized scopes.
+            let any_operand_allocates = phi.operands.values()
+                .any(|op| ident_allocates.contains(&op.identifier));
+            if mutated_after || any_operand_allocates {
                 let mut operands = vec![phi.place.identifier];
                 let phi_decl = env
                     .get_identifier(phi.place.identifier)
@@ -201,7 +262,6 @@ fn find_disjoint_mutable_values(
             let lvalue_mutable = lvalue_range.end.0 > lvalue_range.start.0 + 1;
 
             let mut operands: Vec<IdentifierId> = Vec::new();
-            let may_alloc = may_allocate(&instr.value, &global_names);
             // Transparent instructions (LoadLocal, LoadContext, PropertyLoad, LoadGlobal) are
             // pure reads. Their SSA results should NOT get their own disjoint-set node just
             // because of liveness range. They're handled by their match arms below if mutable.
@@ -213,6 +273,12 @@ fn find_disjoint_mutable_values(
                     | InstructionValue::ComputedLoad { .. }
                     | InstructionValue::LoadGlobal { .. }
             );
+            // Also check propagated ident_allocates for non-transparent instructions:
+            // TernaryExpression results that carry an allocating value should be treated
+            // as may_alloc=true. Exclude transparent reads (LoadLocal, etc.) which must
+            // not be added to the disjoint set via this path.
+            let may_alloc = may_allocate(&instr.value, &global_names)
+                || (!is_transparent_read && ident_allocates.contains(&lvalue_id));
             // Hook calls (useState, useEffect, useMemo, useCallback, etc.) must run
             // unconditionally on every render (React's rules of hooks). Their lvalues
             // must NOT be added to the disjoint set (no memoized scope created directly).
@@ -257,15 +323,26 @@ fn find_disjoint_mutable_values(
                         // only as scope dependencies, not scope outputs.
                         let val_allocates = ident_allocates.contains(&value.identifier);
                         if val_allocates {
-                            let store_range = env.get_identifier(pid)
-                                .map(|i| i.mutable_range.clone()).unwrap_or_else(MutableRange::zero);
-                            if store_range.end.0 > store_range.start.0 + 1 {
+                            let val_is_ternary = ident_is_ternary.contains(&value.identifier);
+                            if val_is_ternary && !ident_direct_allocates.contains(&value.identifier) {
+                                // Value is a TernaryExpression result that carries an allocating
+                                // branch (e.g., `cond ? [-1,1] : param`): always join dest with value.
+                                // This handles default param patterns.
                                 operands.push(pid);
-                            }
-                            let val_range = env.get_identifier(value.identifier)
-                                .map(|i| i.mutable_range.clone()).unwrap_or_else(MutableRange::zero);
-                            if is_mutable_at(instr.id, &val_range) && val_range.start.0 > 0 {
                                 operands.push(value.identifier);
+                            } else {
+                                // Value directly allocates (ArrayExpression, FunctionExpression, etc.)
+                                // or is a non-ternary propagated value: use original mutable_range checks.
+                                let store_range = env.get_identifier(pid)
+                                    .map(|i| i.mutable_range.clone()).unwrap_or_else(MutableRange::zero);
+                                if store_range.end.0 > store_range.start.0 + 1 {
+                                    operands.push(pid);
+                                }
+                                let val_range = env.get_identifier(value.identifier)
+                                    .map(|i| i.mutable_range.clone()).unwrap_or_else(MutableRange::zero);
+                                if is_mutable_at(instr.id, &val_range) && val_range.start.0 > 0 {
+                                    operands.push(value.identifier);
+                                }
                             }
                         }
                     }
@@ -454,6 +531,17 @@ fn find_disjoint_mutable_values(
                 | InstructionValue::PropertyStore { .. }
                 | InstructionValue::ComputedStore { .. } => {
                     // No operand unioning for property reads/writes.
+                }
+                // TernaryExpression: join the result with any allocating branches.
+                // This handles default parameter patterns like `x = cond ? [arr] : param`
+                // where the ternary result should be memoized along with the array literal.
+                InstructionValue::TernaryExpression { consequent, alternate, .. } => {
+                    for branch_id in [consequent.identifier, alternate.identifier] {
+                        if ident_allocates.contains(&branch_id) {
+                            // Join the branch's value with the ternary result
+                            operands.push(branch_id);
+                        }
+                    }
                 }
                 _ => {
                     for op in each_instruction_value_operand(&instr.value) {
