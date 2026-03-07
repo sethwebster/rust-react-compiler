@@ -646,9 +646,13 @@ fn may_allocate(value: &InstructionValue, global_names: &HashMap<IdentifierId, S
         | InstructionValue::StoreGlobal { .. }
         | InstructionValue::RegExpLiteral { .. }
         | InstructionValue::UnsupportedNode { .. }
-        | InstructionValue::InlineJs { .. }
         | InstructionValue::PropertyStore { .. }
         | InstructionValue::ComputedStore { .. } => false,
+
+        // InlineJs: used for optional chains. Optional CALLS (containing `?.(`) may allocate
+        // arbitrary values and need memoized scopes. Optional PROPERTY ACCESS (just `?.property`)
+        // is equivalent to a conditional PropertyLoad — no allocation, no scope needed.
+        InstructionValue::InlineJs { source, .. } => source.contains("?.("),
 
         InstructionValue::ObjectExpression { .. }
         | InstructionValue::ArrayExpression { .. }

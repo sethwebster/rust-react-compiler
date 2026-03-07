@@ -39,32 +39,28 @@ Update the following before stopping:
 | Output correct (subset) | 155/300 (51.7%) |
 | Error (expected) | 25 |
 | Error (unexpected) | 1 |
-| Uncommitted changes | none — clean tree |
+| Uncommitted changes | InlineJs may_allocate fix (infer_reactive_scope_variables.rs) |
 | Fixture denominator | **1244** top-level tested |
 
 ---
 
 ## Current Task
 
-**Active work**: Codegen correctness — Destructure post-scope emission, logical phi resolution chain fixes.
+**Active work**: InlineJs optional-call memoization — part 1 done (may_allocate marks `?.(` as allocating), part 2 needed (dep propagation in propagate_scope_dependencies_hir.rs).
 
-Session progress (output_correct/300): 153 → 155.
+Session progress (output_correct/300): 155 (no change yet — fix is incomplete).
 
-Recent commits (this session, newest first):
-- 1924424: emit Destructure post-scope when scope output is a Destructure (+2, 155/300, 463/1244)
-- 4d6b36f: update AGENT-STATE.md — 35.0%+ (435+/1244)
-- 8edcf81: dead unused variable removal normalization (+5 fixtures, 414/1048)
-- 61e8cd8: trace through internal ComputedLoad in resolve_dep_path
-- c82cd42: normalizations for try-return, case merge, dedup-let (407/1048, 401/1244)
+**In progress (uncommitted)**: InlineJs may_allocate fix in `infer_reactive_scope_variables.rs`.
 
-**In progress (uncommitted)**: +1924424 feat: emit Destructure post-scope when scope output is a Destructure
+**Next step**: In `propagate_scope_dependencies_hir.rs`, add InlineJs source-text name scanning to populate scope deps (like `infer_reactive_places.rs` lines 432-440). Without it the scope has no deps → useless/pruned.
 
 **Next priorities** (by impact):
-1. Scope splitting differences (most of 119 subset mismatches) — we merge scopes that should be split
-2. Function outlining differences (_temp vs named functions, ~10 fixtures)
-3. Remaining $tN leaks (various fixtures)
-4. Scope dep tracing (we over-include deps — `$t12` as dep instead of named var)
-5. Parameter naming (`_T0` instead of source param name for destructured params)
+1. InlineJs dep propagation (complete the optional-call memoization fix)
+2. Scope splitting differences (most of 119 subset mismatches) — we merge scopes that should be split
+3. Function outlining differences (_temp vs named functions, ~10 fixtures)
+4. Remaining $tN leaks (various fixtures)
+5. Scope dep tracing (we over-include deps — `$t12` as dep instead of named var)
+6. Parameter naming (`_T0` instead of source param name for destructured params)
 
 ---
 
