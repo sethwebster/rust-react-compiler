@@ -1249,30 +1249,51 @@ impl<'a> Codegen<'a> {
 
                 Terminal::If { test, consequent, alternate, fallthrough, .. } => {
                     let test_expr = self.expr(test);
-                    let _ = writeln!(out, "{pad}if ({test_expr}) {{");
                     let body_pad = indent + 1;
+
+                    // Buffer if-body. Detect memoization-emptied if-blocks
+                    // (block has instructions but they all got emitted as scope blocks
+                    // outside the if) vs genuinely empty ones (no instructions in HIR).
+                    let consequent_has_instrs = self.cfg_region_has_instructions(*consequent, *fallthrough);
+                    let mut if_buf = String::new();
                     let mut vis2 = visited.clone();
                     self.emit_cfg_region(
-                        *consequent, Some(*fallthrough), body_pad, out,
+                        *consequent, Some(*fallthrough), body_pad, &mut if_buf,
                         &mut vis2, emitted_scopes, scope_index, instr_scope, inlined_ids, scope_instrs,
                     );
-                    // Merge visited from consequent walk (but not alternate).
-                    // Only mark consequent visited so alternate isn't skipped.
+                    // If the consequent region had instructions in the HIR but the
+                    // emitted if-body is empty, those instructions were all memoization
+                    // scope instructions (already emitted before this terminal).
+                    let if_memoization_emptied = if_buf.trim().is_empty() && consequent_has_instrs;
+
                     let emit_else = *alternate != *fallthrough;
+                    let mut else_buf = String::new();
                     if emit_else {
                         // Emit else body to temp buffer; skip if empty.
-                        let mut else_buf = String::new();
                         let mut vis3 = visited.clone();
                         self.emit_cfg_region(
                             *alternate, Some(*fallthrough), body_pad, &mut else_buf,
                             &mut vis3, emitted_scopes, scope_index, instr_scope, inlined_ids, scope_instrs,
                         );
-                        if !else_buf.trim().is_empty() {
+                    }
+
+                    let if_non_empty = !if_buf.trim().is_empty();
+                    let else_non_empty = !else_buf.trim().is_empty();
+
+                    // Suppress the entire if statement only when the if-body was
+                    // emptied by memoization AND the else-body is also empty.
+                    // Genuinely empty if-bodies (no instructions in the CFG block)
+                    // are preserved (they exist in the source).
+                    if if_non_empty || else_non_empty || !if_memoization_emptied {
+                        let _ = writeln!(out, "{pad}if ({test_expr}) {{");
+                        out.push_str(&if_buf);
+                        if else_non_empty {
                             let _ = writeln!(out, "{pad}}} else {{");
                             out.push_str(&else_buf);
                         }
+                        let _ = writeln!(out, "{pad}}}");
                     }
-                    let _ = writeln!(out, "{pad}}}");
+
                     // Continue at fallthrough.
                     if Some(*fallthrough) == stop_at {
                         return;
@@ -2094,50 +2115,104 @@ impl<'a> Codegen<'a> {
             let _ = writeln!(out, "{}", line);
         }
 
-        // Build body lines (after hoisting so inlined_exprs is updated).
+        // --- CFG-based scope body emission ---
+        // Build the set of instructions and blocks belonging to this scope.
+        let scope_instr_set: std::collections::HashSet<InstructionId> =
+            instrs.iter().map(|i| i.id).collect();
+        let skip_instr_set: std::collections::HashSet<InstructionId> =
+            skip_set.iter().filter_map(|&i| instrs.get(i).map(|instr| instr.id)).collect();
+        let intra_instr_ids: std::collections::HashSet<InstructionId> =
+            intra_set.iter().filter_map(|&i| instrs.get(i).map(|instr| instr.id)).collect();
+
+        // Find the set of blocks containing scope instructions.
+        let scope_block_set: std::collections::HashSet<BlockId> = instrs.iter()
+            .filter_map(|i| self.instr_to_block.get(&i.id).copied())
+            .collect();
+
+        // Find the scope's start block: the scope block with no predecessors from other scope blocks.
+        let start_block = if scope_block_set.len() > 1 {
+            let mut has_scope_pred: std::collections::HashSet<BlockId> = std::collections::HashSet::new();
+            for &bid in &scope_block_set {
+                if let Some(block) = self.hir.body.blocks.get(&bid) {
+                    for succ in block.terminal.successors() {
+                        if scope_block_set.contains(&succ) {
+                            has_scope_pred.insert(succ);
+                        }
+                    }
+                }
+            }
+            scope_block_set.iter()
+                .find(|&&bid| !has_scope_pred.contains(&bid))
+                .copied()
+        } else {
+            scope_block_set.iter().next().copied()
+        };
+
+        // If we have multiple scope blocks (scope spans if/else), use CFG-based emission.
+        // Otherwise fall back to flat emission (single block, no control flow structure needed).
+        let body_str_opt: Option<String> = if scope_block_set.len() > 1 {
+            if let Some(start_bid) = start_block {
+                let mut body_str = String::new();
+                let mut vis = std::collections::HashSet::new();
+                self.emit_scope_body_cfg_walk(
+                    start_bid, &scope_block_set, &scope_instr_set, &intra_instr_ids,
+                    &skip_instr_set, inlined_ids, &all_out_names, scope_id,
+                    indent + 1, &mut vis, &mut body_str,
+                );
+                Some(body_str)
+            } else {
+                None  // couldn't find start block, fall back to flat
+            }
+        } else {
+            None  // single block scope, flat emission is correct
+        };
+
+        // Build body lines (flat fallback for single-block scopes).
         // Instructions after the last scope-output store should be emitted AFTER
         // the scope output assignment, not before. Split into before/after groups.
         let max_skip_idx = skip_set.iter().copied().max().unwrap_or(0);
         let mut body_lines: Vec<String> = Vec::new();
         let mut post_scope_lines: Vec<String> = Vec::new();
-        for (i, instr) in instrs.iter().enumerate() {
-            if skip_set.contains(&i) { continue; }
-            if inlined_ids.contains(&instr.lvalue.identifier.0) && !intra_set.contains(&i) {
-                continue;
-            }
-            let target_list = if i > max_skip_idx && !skip_set.is_empty() {
-                &mut post_scope_lines
-            } else {
-                &mut body_lines
-            };
-            if intra_set.contains(&i) {
-                if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
-                    let var_name = self.env
-                        .get_identifier(lvalue.place.identifier)
-                        .and_then(|id| id.name.as_ref())
-                        .map(|_| self.ident_name(lvalue.place.identifier));
-                    if let Some(n) = var_name {
-                        let val_expr = self.expr(value);
-                        // Skip self-assignments (e.g. `const _temp = _temp` from outlined fns).
-                        if n == val_expr {
+        if body_str_opt.is_none() {
+            for (i, instr) in instrs.iter().enumerate() {
+                if skip_set.contains(&i) { continue; }
+                if inlined_ids.contains(&instr.lvalue.identifier.0) && !intra_set.contains(&i) {
+                    continue;
+                }
+                let target_list = if i > max_skip_idx && !skip_set.is_empty() {
+                    &mut post_scope_lines
+                } else {
+                    &mut body_lines
+                };
+                if intra_set.contains(&i) {
+                    if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
+                        let var_name = self.env
+                            .get_identifier(lvalue.place.identifier)
+                            .and_then(|id| id.name.as_ref())
+                            .map(|_| self.ident_name(lvalue.place.identifier));
+                        if let Some(n) = var_name {
+                            let val_expr = self.expr(value);
+                            // Skip self-assignments (e.g. `const _temp = _temp` from outlined fns).
+                            if n == val_expr {
+                                continue;
+                            }
+                            let stmt = if all_out_names.contains(&n) {
+                                format!("{n} = {val_expr};")
+                            } else {
+                                match lvalue.kind {
+                                    InstructionKind::Reassign => format!("{n} = {val_expr};"),
+                                    InstructionKind::Const | InstructionKind::HoistedConst | InstructionKind::Function | InstructionKind::HoistedFunction => format!("const {n} = {val_expr};"),
+                                    _ => format!("let {n} = {val_expr};"),
+                                }
+                            };
+                            target_list.push(stmt);
                             continue;
                         }
-                        let stmt = if all_out_names.contains(&n) {
-                            format!("{n} = {val_expr};")
-                        } else {
-                            match lvalue.kind {
-                                InstructionKind::Reassign => format!("{n} = {val_expr};"),
-                                InstructionKind::Const | InstructionKind::HoistedConst | InstructionKind::Function | InstructionKind::HoistedFunction => format!("const {n} = {val_expr};"),
-                                _ => format!("let {n} = {val_expr};"),
-                            }
-                        };
-                        target_list.push(stmt);
-                        continue;
                     }
                 }
-            }
-            if let Some(s) = self.emit_stmt(instr, Some(*scope_id), &all_out_names) {
-                target_list.push(s);
+                if let Some(s) = self.emit_stmt(instr, Some(*scope_id), &all_out_names) {
+                    target_list.push(s);
+                }
             }
         }
 
@@ -2158,9 +2233,13 @@ impl<'a> Codegen<'a> {
                 .collect();
             let condition = cond_parts.join(" || ");
             let _ = writeln!(out, "{pad}if ({condition}) {{");
-            for line in &body_lines {
-                let reindented = reindent_multiline(line, &body_pad);
-                let _ = writeln!(out, "{body_pad}{reindented}");
+            if let Some(ref body_str) = body_str_opt {
+                out.push_str(body_str);
+            } else {
+                for line in &body_lines {
+                    let reindented = reindent_multiline(line, &body_pad);
+                    let _ = writeln!(out, "{body_pad}{reindented}");
+                }
             }
             for (output, cache_var) in analysis.outputs.iter().zip(&output_cache_vars) {
                 if !output.is_named_var {
@@ -2187,18 +2266,24 @@ impl<'a> Codegen<'a> {
                     }
                 }
             }
-            for line in &post_scope_lines {
-                let reindented = reindent_multiline(line, &pad);
-                let _ = writeln!(out, "{pad}{reindented}");
+            if body_str_opt.is_none() {
+                for line in &post_scope_lines {
+                    let reindented = reindent_multiline(line, &pad);
+                    let _ = writeln!(out, "{pad}{reindented}");
+                }
             }
         } else {
             for cache_var in &output_cache_vars {
                 let _ = writeln!(out, "{pad}let {cache_var};");
             }
             let _ = writeln!(out, "{pad}if ($[{sentinel_slot}] === Symbol.for(\"react.memo_cache_sentinel\")) {{");
-            for line in &body_lines {
-                let reindented = reindent_multiline(line, &body_pad);
-                let _ = writeln!(out, "{body_pad}{reindented}");
+            if let Some(ref body_str) = body_str_opt {
+                out.push_str(body_str);
+            } else {
+                for line in &body_lines {
+                    let reindented = reindent_multiline(line, &body_pad);
+                    let _ = writeln!(out, "{body_pad}{reindented}");
+                }
             }
             for (output, cache_var) in analysis.outputs.iter().zip(&output_cache_vars) {
                 if !output.is_named_var {
@@ -2224,9 +2309,11 @@ impl<'a> Codegen<'a> {
                     }
                 }
             }
-            for line in &post_scope_lines {
-                let reindented = reindent_multiline(line, &pad);
-                let _ = writeln!(out, "{pad}{reindented}");
+            if body_str_opt.is_none() {
+                for line in &post_scope_lines {
+                    let reindented = reindent_multiline(line, &pad);
+                    let _ = writeln!(out, "{pad}{reindented}");
+                }
             }
         }
 
@@ -2276,6 +2363,161 @@ impl<'a> Codegen<'a> {
     // -----------------------------------------------------------------------
     // Loop-wrapped scope helpers
     // -----------------------------------------------------------------------
+
+    /// Walk the scope body using the CFG structure, emitting scope instructions
+    /// with proper control flow (if/else, etc.) instead of flat emission.
+    /// Only processes blocks in `scope_block_set` (blocks containing scope instructions).
+    #[allow(clippy::too_many_arguments)]
+    fn emit_scope_body_cfg_walk(
+        &self,
+        current: BlockId,
+        scope_block_set: &std::collections::HashSet<BlockId>,
+        scope_instr_set: &std::collections::HashSet<InstructionId>,
+        intra_instr_ids: &std::collections::HashSet<InstructionId>,
+        skip_instr_set: &std::collections::HashSet<InstructionId>,
+        inlined_ids: &std::collections::HashSet<u32>,
+        all_out_names: &[String],
+        scope_id: &ScopeId,
+        indent: usize,
+        visited: &mut std::collections::HashSet<BlockId>,
+        out: &mut String,
+    ) {
+        // Only process blocks that contain scope instructions.
+        if !scope_block_set.contains(&current) { return; }
+        if !visited.insert(current) { return; }
+
+        let pad = "  ".repeat(indent);
+
+        let Some(block) = self.hir.body.blocks.get(&current).cloned() else { return; };
+
+        // Emit scope instructions in this block.
+        for instr in &block.instructions {
+            if !scope_instr_set.contains(&instr.id) { continue; }
+            if skip_instr_set.contains(&instr.id) { continue; }
+            let lv_id = instr.lvalue.identifier.0;
+            // Skip inlined-only temporaries unless they're intra-scope StoreLocals.
+            if inlined_ids.contains(&lv_id) && !intra_instr_ids.contains(&instr.id) { continue; }
+            if let Some(s) = self.emit_stmt(instr, Some(*scope_id), all_out_names) {
+                for line in s.lines() {
+                    let _ = writeln!(out, "{pad}{}", line);
+                }
+            }
+        }
+
+        // Handle the block's terminal to preserve control flow structure.
+        match &block.terminal.clone() {
+            Terminal::If { test, consequent, alternate, fallthrough, .. } => {
+                let body_indent = indent + 1;
+                let body_pad = "  ".repeat(indent);  // same as pad
+
+                let consq_has = scope_block_set.contains(consequent);
+                let alt_has = *alternate != *fallthrough && scope_block_set.contains(alternate);
+
+                if consq_has || alt_has {
+                    let test_expr = self.expr(test);
+
+                    let mut if_body = String::new();
+                    if consq_has {
+                        let mut vis2 = visited.clone();
+                        self.emit_scope_body_cfg_walk(
+                            *consequent, scope_block_set, scope_instr_set, intra_instr_ids,
+                            skip_instr_set, inlined_ids, all_out_names, scope_id,
+                            body_indent, &mut vis2, &mut if_body,
+                        );
+                    }
+
+                    let mut else_body = String::new();
+                    if alt_has {
+                        let mut vis3 = visited.clone();
+                        self.emit_scope_body_cfg_walk(
+                            *alternate, scope_block_set, scope_instr_set, intra_instr_ids,
+                            skip_instr_set, inlined_ids, all_out_names, scope_id,
+                            body_indent, &mut vis3, &mut else_body,
+                        );
+                    }
+
+                    if !if_body.is_empty() || !else_body.is_empty() {
+                        let _ = writeln!(out, "{body_pad}if ({test_expr}) {{");
+                        out.push_str(&if_body);
+                        if !else_body.is_empty() {
+                            let _ = writeln!(out, "{body_pad}}} else {{");
+                            out.push_str(&else_body);
+                        }
+                        let _ = writeln!(out, "{body_pad}}}");
+                    }
+                }
+
+                // Continue at fallthrough.
+                self.emit_scope_body_cfg_walk(
+                    *fallthrough, scope_block_set, scope_instr_set, intra_instr_ids,
+                    skip_instr_set, inlined_ids, all_out_names, scope_id,
+                    indent, visited, out,
+                );
+            }
+            Terminal::Goto { block: next, .. } => {
+                self.emit_scope_body_cfg_walk(
+                    *next, scope_block_set, scope_instr_set, intra_instr_ids,
+                    skip_instr_set, inlined_ids, all_out_names, scope_id,
+                    indent, visited, out,
+                );
+            }
+            Terminal::DoWhile { loop_, fallthrough, .. }
+            | Terminal::While { loop_, fallthrough, .. } => {
+                // Walk the loop body (it's always executed at least once for do-while,
+                // and may have scope instructions). Use a separate visited set for the
+                // loop body to avoid marking the fallthrough as visited prematurely.
+                let mut loop_vis = visited.clone();
+                self.emit_scope_body_cfg_walk(
+                    *loop_, scope_block_set, scope_instr_set, intra_instr_ids,
+                    skip_instr_set, inlined_ids, all_out_names, scope_id,
+                    indent, &mut loop_vis, out,
+                );
+                // Continue at fallthrough.
+                self.emit_scope_body_cfg_walk(
+                    *fallthrough, scope_block_set, scope_instr_set, intra_instr_ids,
+                    skip_instr_set, inlined_ids, all_out_names, scope_id,
+                    indent, visited, out,
+                );
+            }
+            Terminal::ForOf { loop_, fallthrough, .. }
+            | Terminal::ForIn { loop_, fallthrough, .. } => {
+                let mut loop_vis = visited.clone();
+                self.emit_scope_body_cfg_walk(
+                    *loop_, scope_block_set, scope_instr_set, intra_instr_ids,
+                    skip_instr_set, inlined_ids, all_out_names, scope_id,
+                    indent, &mut loop_vis, out,
+                );
+                self.emit_scope_body_cfg_walk(
+                    *fallthrough, scope_block_set, scope_instr_set, intra_instr_ids,
+                    skip_instr_set, inlined_ids, all_out_names, scope_id,
+                    indent, visited, out,
+                );
+            }
+            // For other terminals (Return, Throw, etc.), stop walking.
+            _ => {}
+        }
+    }
+
+    /// Returns true if any block reachable from `start` (stopping before `stop`)
+    /// has at least one instruction. Used to distinguish genuinely empty if-bodies
+    /// (no instructions in the HIR) from memoization-emptied ones.
+    fn cfg_region_has_instructions(&self, start: BlockId, stop: BlockId) -> bool {
+        let mut visited = std::collections::HashSet::new();
+        let mut queue = vec![start];
+        while let Some(bid) = queue.pop() {
+            if bid == stop { continue; }
+            if !visited.insert(bid) { continue; }
+            if let Some(block) = self.hir.body.blocks.get(&bid) {
+                if !block.instructions.is_empty() {
+                    return true;
+                }
+                for succ in block.terminal.successors() {
+                    queue.push(succ);
+                }
+            }
+        }
+        false
+    }
 
     /// Check if the loop body block (or its successors up to stop_at) contains
     /// instructions belonging to an unvisited scope. Returns the ScopeId if found.
@@ -2950,8 +3192,13 @@ impl<'a> Codegen<'a> {
     }
 
     /// Replace occurrences of `$tN` in `expr` with their resolved strings from `map`,
-    /// wrapping the resolved expression in parens when it contains binary logical operators
-    /// (to preserve precedence in the surrounding context).
+    /// wrapping the resolved expression in parens only when operator precedence requires it.
+    ///
+    /// Parens are needed when the resolved expression's operators have lower precedence
+    /// than the surrounding context:
+    /// - `||` or `??` inside `&&` context needs parens
+    /// - `??` inside `||` context needs parens
+    /// - `&&` inside `&&`, `||`, or `??` context does NOT need parens (higher prec or same)
     fn substitute_temp_refs_in_str(expr: &str, map: &HashMap<u32, String>) -> String {
         let mut result = String::with_capacity(expr.len());
         let bytes = expr.as_bytes();
@@ -2967,11 +3214,22 @@ impl<'a> Codegen<'a> {
                     let id_str = &expr[digit_start..j];
                     if let Ok(id) = id_str.parse::<u32>() {
                         if let Some(resolved) = map.get(&id) {
-                            // Wrap in parens if the resolved expression contains logical
-                            // binary operators to preserve operator precedence.
-                            let needs_parens = resolved.contains(" && ")
-                                || resolved.contains(" || ")
-                                || resolved.contains(" ?? ");
+                            let inner_has_or = resolved.contains(" || ");
+                            let inner_has_and = resolved.contains(" && ");
+                            let inner_has_nc = resolved.contains(" ?? ");
+                            let after = &expr[j..];
+                            // Determine outer operator from context (before and after $tN)
+                            let outer_is_and = result.ends_with(" && ") || after.starts_with(" && ");
+                            let outer_is_or  = result.ends_with(" || ") || after.starts_with(" || ");
+                            let outer_is_nc  = result.ends_with(" ?? ") || after.starts_with(" ?? ");
+                            // Need parens when inner operator has lower precedence than outer:
+                            // - || or ?? inside && context
+                            // - ?? inside || context
+                            // - && or || inside ?? context (can't mix with ??)
+                            let needs_parens =
+                                (outer_is_and && (inner_has_or || inner_has_nc))
+                                || (outer_is_or && inner_has_nc)
+                                || (outer_is_nc && (inner_has_and || inner_has_or));
                             if needs_parens {
                                 result.push('(');
                                 result.push_str(resolved);
