@@ -38,12 +38,20 @@ pub fn infer_reactive_places(hir: &mut HIRFunction, env: &Environment) {
     let mut react_ns_ids: HashSet<IdentifierId> = HashSet::new();
     let mut hook_method_ids: HashMap<IdentifierId, String> = HashMap::new();
 
-    // First pass: collect React namespace identifiers.
+    // Collect all LoadGlobal result identifiers — globals are never reactive.
+    // This prevents built-ins like `Array`, `Math`, `Object`, etc. from being
+    // incorrectly marked reactive via MethodCall mutation propagation.
+    let mut global_ids: HashSet<IdentifierId> = HashSet::new();
+
+    // First pass: collect React namespace identifiers and all global ids.
     for (_, block) in &hir.body.blocks {
         for instr in &block.instructions {
-            if let InstructionValue::LoadGlobal { binding: NonLocalBinding::Global { name }, .. } = &instr.value {
-                if name == "React" {
-                    react_ns_ids.insert(instr.lvalue.identifier);
+            if let InstructionValue::LoadGlobal { .. } = &instr.value {
+                global_ids.insert(instr.lvalue.identifier);
+                if let InstructionValue::LoadGlobal { binding: NonLocalBinding::Global { name }, .. } = &instr.value {
+                    if name == "React" {
+                        react_ns_ids.insert(instr.lvalue.identifier);
+                    }
                 }
             }
         }
@@ -463,12 +471,16 @@ pub fn infer_reactive_places(hir: &mut HIRFunction, env: &Environment) {
 
                 // Mutation propagation: MethodCall with reactive args marks receiver reactive.
                 // e.g., `x.push(props.value)` → x becomes reactive (mutated with reactive data).
+                // But skip globals (Array, Math, Object, etc.) — they are never reactive.
                 if let InstructionValue::MethodCall { receiver, args, .. } = &instr.value {
                     let any_arg_reactive = args.iter().any(|a| match a {
                         crate::hir::hir::CallArg::Place(p) => reactive.contains(&p.identifier),
                         crate::hir::hir::CallArg::Spread(s) => reactive.contains(&s.place.identifier),
                     });
-                    if any_arg_reactive && !stable_dispatchers.contains(&receiver.identifier) {
+                    if any_arg_reactive
+                        && !stable_dispatchers.contains(&receiver.identifier)
+                        && !global_ids.contains(&receiver.identifier)
+                    {
                         reactive.insert(receiver.identifier);
                     }
                 }
