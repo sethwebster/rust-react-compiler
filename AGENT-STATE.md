@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.6% (1419/1717 all fixtures) |
-| Correct rate | 33.7% (578/1717 all fixtures) |
+| Correct rate | 33.8% (581/1717 all fixtures) |
 | Output correct (subset) | ~155/300 (first 300 alphabetically) |
 | Uncommitted changes | none — committed |
 | Fixture denominator | **1717** (recursive scan of all subdirs) |
