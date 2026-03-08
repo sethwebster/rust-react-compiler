@@ -521,7 +521,6 @@ fn always_invalidating_instruction(value: &InstructionValue) -> bool {
             | InstructionValue::JsxFragment { .. }
             | InstructionValue::NewExpression { .. }
             | InstructionValue::TaggedTemplateExpression { .. }
-            | InstructionValue::MethodCall { .. }
     )
 }
 

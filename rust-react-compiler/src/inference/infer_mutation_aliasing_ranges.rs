@@ -432,9 +432,11 @@ pub fn infer_mutation_aliasing_ranges(
             defs.entry(lv).or_insert(iid);
 
             match &instr.value {
-                InstructionValue::DeclareLocal { lvalue, .. } => {
-                    let var_id = lvalue.place.identifier;
-                    named_defs.entry(var_id).or_insert(iid);
+                InstructionValue::DeclareLocal { .. } => {
+                    // Do NOT set named_defs for DeclareLocal: `let z;` just declares
+                    // an uninitialized variable. The mutable_range should start at the
+                    // first actual write (StoreLocal), not the declaration. This matches
+                    // TS behavior where scope ranges cover the write, not the declaration.
                 }
                 InstructionValue::DeclareContext { lvalue, .. } => {
                     let var_id = lvalue.place.identifier;
