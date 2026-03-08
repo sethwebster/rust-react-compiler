@@ -229,7 +229,7 @@ function parseState(content: string) {
   const s = extractSection(content, "Metrics.*?")
   const n = (rx: RegExp) => parseFloat(content.match(rx)?.[1] ?? "0") || 0
   const i = (rx: RegExp) => parseInt(content.match(rx)?.[1] ?? "0") || 0
-  const totalMatch = s.match(/\((\d+)\/(\d+)\)/)
+  const totalMatch = s.match(/\((\d+)\/(\d+)[^)]*\)/)
   const metrics = {
     compileRate:      n(/Compile rate[^\d]*(\d+\.?\d*)%/),
     correctRate:      n(/Correct rate[^\d]*(\d+\.?\d*)%/),

@@ -29,8 +29,8 @@ update_and_push() {
   cd "$REPO_DIR"
 
   # Update metrics table
-  sed -i "s/| Compile rate |.*/| Compile rate | ${compile_pct}% ${compile_frac} all fixtures |/" AGENT-STATE.md
-  sed -i "s/| Correct rate |.*/| Correct rate | ${correct_pct}% ${correct_frac} all fixtures |/" AGENT-STATE.md
+  sed -i "s/| Compile rate |.*/| Compile rate | ${compile_pct}% ${compile_frac} |/" AGENT-STATE.md
+  sed -i "s/| Correct rate |.*/| Correct rate | ${correct_pct}% ${correct_frac} |/" AGENT-STATE.md
 
   log "Metrics: compile=${compile_pct}% ${compile_frac}, correct=${correct_pct}% ${correct_frac}"
 
