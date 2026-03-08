@@ -48,7 +48,7 @@ Update the following before stopping:
 
 Session progress: 560 → 566/1717. Recent fix: allow hook-named local vars as values.
 
-**In progress (uncommitted)**: +b976c95 fix: run inline_scope_output_names before compact_temp_names (+2 correct
+**In progress (uncommitted)**: +671a142 fix: scope output naming and IIFE const prefix (+1 correct)
 
 Recent commits (newest first):
 - cd3b0c3: chore: update AGENT-STATE.md
