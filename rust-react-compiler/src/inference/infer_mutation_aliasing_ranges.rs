@@ -382,6 +382,15 @@ pub fn infer_mutation_aliasing_ranges(
     // When f0 is later called, extend all context vars' mutable ranges to the call iid.
     let mut closure_var_contexts: HashMap<IdentifierId, Vec<IdentifierId>> = HashMap::new();
 
+    // Iterator element tracking: IteratorNext SSA temp id → collection identifier id.
+    // For `for (const x of items)`, records that the IteratorNext result temp aliases
+    // an element of `items`. When x is mutated (e.g., `x.a = ...`), items' range extends.
+    let mut iter_next_results: HashMap<IdentifierId, IdentifierId> = HashMap::new();
+    // named variable id → collection identifier id.
+    // If `x` is the for-of loop var assigned from IteratorNext(collection: items),
+    // element_of[x.id] = items.id. Mutations to x also extend items' mutable range.
+    let mut element_of: HashMap<IdentifierId, IdentifierId> = HashMap::new();
+
     // Pure-read lvalue set: SSA temps produced by instructions that only READ
     // data (PropertyLoad, BinaryExpression, etc.) and never mutate anything.
     // These temps should NOT have their mutable_range extended to last-use in the
@@ -445,6 +454,22 @@ pub fn infer_mutation_aliasing_ranges(
                         if let Some(ctx_ids) = closure_context_map.get(&value.identifier) {
                             closure_var_contexts.insert(var_id, ctx_ids.clone());
                         }
+                        // If the stored value is from IteratorNext, record that this
+                        // named variable holds an element of the iterated collection.
+                        // When the named variable is later mutated (e.g., x.a = ...),
+                        // the collection's mutable range must also extend.
+                        // Resolve through aliases: IteratorNext.collection may be a temp
+                        // (e.g., t_items from LoadLocal { place: items }) — we need the
+                        // underlying named variable identifier.
+                        if let Some(&raw_coll_id) = iter_next_results.get(&value.identifier) {
+                            let coll_named_id = aliases.get(&raw_coll_id).copied().unwrap_or(raw_coll_id);
+                            // Record for both the original named variable id and the SSA
+                            // lvalue id (instr.lvalue.identifier). Subsequent LoadLocal
+                            // instructions reference the SSA id, so we need element_of
+                            // keyed by BOTH to ensure Phase 2 finds it via aliases lookup.
+                            element_of.insert(var_id, coll_named_id);
+                            element_of.insert(lv, coll_named_id);
+                        }
                     }
                     // A store is a mutation of the named variable.
                     use_at(&mut named_mut_uses, var_id, iid);
@@ -489,6 +514,13 @@ pub fn infer_mutation_aliasing_ranges(
                         aliases.insert(lv, source);
                     }
                     use_at(&mut last_uses, object.identifier, iid);
+                }
+                // IteratorNext: the result holds an element of the collection.
+                // Record this so that when the result is stored into a named variable
+                // (via StoreLocal) and that variable is later mutated, the collection's
+                // mutable range is also extended.
+                InstructionValue::IteratorNext { collection, .. } => {
+                    iter_next_results.insert(lv, collection.identifier);
                 }
                 // LoadGlobal: record the global name for hook detection in Phase 2.
                 InstructionValue::LoadGlobal { binding, .. } => {
@@ -731,6 +763,13 @@ pub fn infer_mutation_aliasing_ranges(
                     if let Some(&source_var) = aliases.get(&object.identifier) {
                         use_at(&mut named_mut_uses, source_var, iid);
                         use_at(&mut named_real_muts, source_var, iid);
+                        // If source_var is a for-of loop variable (element of a collection),
+                        // also extend the collection's mutable range. Mutating an element
+                        // of `items` (through the loop variable) is a mutation of `items`.
+                        if let Some(&coll_id) = element_of.get(&source_var) {
+                            use_at(&mut named_mut_uses, coll_id, iid);
+                            use_at(&mut named_real_muts, coll_id, iid);
+                        }
                     }
                     // Also: the stored value (if it's an alias of a named var) is captured here.
                     // Extend its mutable range to this store.
@@ -743,6 +782,11 @@ pub fn infer_mutation_aliasing_ranges(
                     if let Some(&source_var) = aliases.get(&object.identifier) {
                         use_at(&mut named_mut_uses, source_var, iid);
                         use_at(&mut named_real_muts, source_var, iid);
+                        // Same for-of element tracking as PropertyStore.
+                        if let Some(&coll_id) = element_of.get(&source_var) {
+                            use_at(&mut named_mut_uses, coll_id, iid);
+                            use_at(&mut named_real_muts, coll_id, iid);
+                        }
                     }
                     if let Some(&val_source) = aliases.get(&value.identifier) {
                         use_at(&mut named_mut_uses, val_source, iid);
