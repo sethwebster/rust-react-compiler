@@ -405,6 +405,78 @@ fn resolve_dep_path_debug(
     resolve_dep_path_inner(place_id, def_at, instr_map, store_local_value, phi_operands, range_start, 0, &mut visited)
 }
 
+/// Recursively collect all reactive deps reachable from a complex expression.
+///
+/// Unlike `resolve_dep_path` which only handles transparent chains (PropertyLoad,
+/// LoadLocal, etc.) and returns a single dep, this function traces through ALL
+/// instruction operands — including non-transparent ones like BinaryExpression —
+/// and pushes every reactive (base_id, path) pair it finds into `out`.
+///
+/// Used for terminal operands (e.g., the test of an If) where the immediate value
+/// may be a comparison or logical expression wrapping reactive property reads.
+#[allow(clippy::too_many_arguments)]
+fn collect_all_reactive_deps(
+    place_id: IdentifierId,
+    def_at: &HashMap<IdentifierId, InstructionId>,
+    instr_map: &HashMap<IdentifierId, &Instruction>,
+    store_local_value: &HashMap<IdentifierId, IdentifierId>,
+    phi_operands: &HashMap<IdentifierId, Vec<IdentifierId>>,
+    reactive_ids: &HashSet<IdentifierId>,
+    range_start: InstructionId,
+    depth: u32,
+    visited: &mut HashSet<IdentifierId>,
+    out: &mut Vec<(IdentifierId, Vec<DependencyPathEntry>)>,
+) {
+    if depth > 64 { return; }
+    if !visited.insert(place_id) { return; }
+
+    // First try the standard resolve (handles PropertyLoad/LoadLocal chains, phi nodes, etc.).
+    // Use a FRESH visited set (not cloned from `visited`) so resolve_dep_path_inner's internal
+    // cycle detection doesn't fire on `place_id` — we already inserted it above.
+    let mut rv = HashSet::new();
+    if let Some((base_id, path)) = resolve_dep_path_inner(
+        place_id, def_at, instr_map, store_local_value, phi_operands, range_start, 0, &mut rv,
+    ) {
+        if reactive_ids.contains(&base_id) {
+            out.push((base_id, path));
+        }
+        // Resolved (possibly to a non-reactive base) — do not recurse into operands,
+        // since this is a transparent chain and the operands are already subsumed.
+        return;
+    }
+
+    // resolve_dep_path returned None — the value is a "combining" instruction
+    // (BinaryExpression, UnaryExpression, CallExpression, etc.) whose operands may
+    // each individually be reactive deps. Trace through all operands.
+    if let Some(instr) = instr_map.get(&place_id) {
+        let operands: Vec<IdentifierId> = each_instruction_value_operand(&instr.value)
+            .into_iter()
+            .map(|p| p.identifier)
+            .collect();
+        for op_id in operands {
+            collect_all_reactive_deps(
+                op_id, def_at, instr_map, store_local_value, phi_operands, reactive_ids,
+                range_start, depth + 1, visited, out,
+            );
+        }
+    } else if let Some(&val_id) = store_local_value.get(&place_id) {
+        collect_all_reactive_deps(
+            val_id, def_at, instr_map, store_local_value, phi_operands, reactive_ids,
+            range_start, depth + 1, visited, out,
+        );
+    } else if let Some(ops) = phi_operands.get(&place_id) {
+        let ops: Vec<IdentifierId> = ops.clone();
+        for op_id in ops {
+            if op_id != place_id {
+                collect_all_reactive_deps(
+                    op_id, def_at, instr_map, store_local_value, phi_operands, reactive_ids,
+                    range_start, depth + 1, visited, out,
+                );
+            }
+        }
+    }
+}
+
 /// Returns true for "transparent" instructions whose operands are subsumed by
 /// the result when that result is used elsewhere.
 ///
@@ -563,6 +635,14 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
             if instr.lvalue.reactive {
                 reactive_ids.insert(instr.lvalue.identifier);
             }
+            // StoreLocal binding targets inherit reactivity from the stored value.
+            // e.g. `const data = useFragment()` — data's binding id is reactive if
+            // the SSA temp (instr.lvalue) holding the hook result is reactive.
+            if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
+                if instr.lvalue.reactive || reactive_ids.contains(&value.identifier) {
+                    reactive_ids.insert(lvalue.place.identifier);
+                }
+            }
         }
         // Phi results: if any operand is reactive, the phi is reactive.
         for phi in &block.phis {
@@ -581,7 +661,7 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
         }
     }
 
-    // Build name_to_id: variable name → list of (IdentifierId, reactive flag) for all named
+    // Build name_to_id: variable name → list of IdentifierIds for all named
     // identifiers in this function. Used for InlineJs source-text dep scanning.
     let mut name_to_id: HashMap<String, Vec<IdentifierId>> = HashMap::new();
     for (_, block) in &hir.body.blocks {
@@ -591,6 +671,18 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
                     name_to_id.entry(name.value().to_string())
                         .or_default()
                         .push(instr.lvalue.identifier);
+                }
+            }
+            // Also include StoreLocal binding targets (e.g. `const data = useFragment()`
+            // where `data`'s binding id is in lvalue.place, not instr.lvalue).
+            if let InstructionValue::StoreLocal { lvalue, .. } = &instr.value {
+                let bind_id = lvalue.place.identifier;
+                if let Some(id_info) = env.identifiers.get(&bind_id) {
+                    if let Some(name) = &id_info.name {
+                        name_to_id.entry(name.value().to_string())
+                            .or_default()
+                            .push(bind_id);
+                    }
                 }
             }
         }
@@ -895,6 +987,11 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
         // If-conditions inside the scope body are control deps that affect which value the
         // scope produces, so they ARE real deps (not just external control flow guards).
         // The range filter below ensures we only capture deps from within the scope body.
+        //
+        // We use collect_all_reactive_deps (not resolve_dep_path) because the terminal
+        // operand may be a complex expression (e.g., BinaryExpression `a.length === 1`)
+        // that wraps multiple reactive property reads. collect_all_reactive_deps traces
+        // through all operands recursively to find all reactive bases.
         for (_, block) in &hir.body.blocks {
             let term_id = block.terminal.id();
             if std::env::var("RC_DEBUG").is_ok() {
@@ -904,40 +1001,36 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
                 continue;
             }
             for place in each_terminal_operand(&block.terminal) {
-                if std::env::var("RC_DEBUG").is_ok() {
-                    let resolved = resolve_dep_path(place.identifier, &def_at, &instr_map, &store_local_value, &phi_operands, range_start);
-                    eprintln!("[prop_dep] terminal operand id={} reactive={} resolved={:?}",
-                        place.identifier.0, reactive_ids.contains(&place.identifier),
-                        resolved.as_ref().map(|(id, p)| (id.0, p.len())));
-                }
-                let Some((base_id, path)) = resolve_dep_path(place.identifier, &def_at, &instr_map, &store_local_value, &phi_operands, range_start) else {
-                    continue;
-                };
-                if !reactive_ids.contains(&base_id) {
-                    continue;
-                }
-                let path_key: Vec<String> = path.iter().map(|e| e.property.clone()).collect();
-                let has_ancestor = !path_key.is_empty() && {
-                    let mut found = false;
-                    for prefix_len in 0..path_key.len() {
-                        let prefix = path_key[..prefix_len].to_vec();
-                        if seen.contains(&(base_id.0, prefix)) { found = true; break; }
-                    }
-                    found
-                };
-                let key = (base_id.0, path_key);
-                if !has_ancestor && seen.insert(key) {
-                    let base_place = if base_id == place.identifier {
-                        place.clone()
-                    } else {
-                        Place {
-                            identifier: base_id,
-                            reactive: true,
-                            loc: place.loc.clone(),
-                            effect: Effect::Unknown,
+                let mut term_visited = HashSet::new();
+                let mut term_deps: Vec<(IdentifierId, Vec<DependencyPathEntry>)> = Vec::new();
+                collect_all_reactive_deps(
+                    place.identifier, &def_at, &instr_map, &store_local_value, &phi_operands,
+                    &reactive_ids, range_start, 0, &mut term_visited, &mut term_deps,
+                );
+                for (base_id, path) in term_deps {
+                    let path_key: Vec<String> = path.iter().map(|e| e.property.clone()).collect();
+                    let has_ancestor = !path_key.is_empty() && {
+                        let mut found = false;
+                        for prefix_len in 0..path_key.len() {
+                            let prefix = path_key[..prefix_len].to_vec();
+                            if seen.contains(&(base_id.0, prefix)) { found = true; break; }
                         }
+                        found
                     };
-                    dep_list.push(ReactiveScopeDependency { place: base_place, path });
+                    let key = (base_id.0, path_key);
+                    if !has_ancestor && seen.insert(key) {
+                        let base_place = if base_id == place.identifier {
+                            place.clone()
+                        } else {
+                            Place {
+                                identifier: base_id,
+                                reactive: true,
+                                loc: place.loc.clone(),
+                                effect: Effect::Unknown,
+                            }
+                        };
+                        dep_list.push(ReactiveScopeDependency { place: base_place, path });
+                    }
                 }
             }
         }
