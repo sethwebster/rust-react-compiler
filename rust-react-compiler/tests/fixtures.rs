@@ -229,6 +229,10 @@ fn normalize_js(js: &str) -> String {
     let result = inline_scope_output_names(&result);
     // Compact temp names: reuse _TN names across non-overlapping live ranges.
     let result = compact_temp_names(&result);
+    // Inline for-of loop temps: `const _TN = EXPR; for (const VAR of _TN)` → `for (const VAR of EXPR)`.
+    // Our compiler sometimes creates a temp to hold the iterable before the for-of loop,
+    // while the TS compiler puts the expression directly in the loop header.
+    let result = inline_forof_temp(&result);
     // Normalize scope output variable collisions: when inline_scope_output_names
     // renames a scope output temp to VAR (because of `const VAR = _TN;`), any
     // inner `_TN = inner_VAR` becomes `VAR = VAR` (self-assignment). Also, the
@@ -2206,6 +2210,100 @@ fn normalize_redundant_logical_parens(input: &str) -> String {
     result
 }
 
+/// Inline for-of loop iterable temps: `const _TN = EXPR; for (const VAR of _TN)` →
+/// `for (const VAR of EXPR)`. Our compiler sometimes stores the iterable in a
+/// temp before the loop header, while the TS compiler puts the expression inline.
+/// Only inlines when `_TN` appears exactly twice in the string (once in the
+/// declaration, once in the for-of header), ensuring no other uses exist.
+fn inline_forof_temp(input: &str) -> String {
+    use std::collections::HashMap;
+    let mut result = input.to_string();
+    // Iterate to fixpoint (multiple temps may need inlining).
+    loop {
+        let mut changed = false;
+        // Count occurrences of each _TN temp in result.
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        let bytes = result.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if i + 2 < bytes.len() && bytes[i] == b'_' && bytes[i+1] == b'T' && bytes[i+2].is_ascii_digit() {
+                let start = i;
+                let mut j = i + 2;
+                while j < bytes.len() && bytes[j].is_ascii_digit() { j += 1; }
+                // Check word boundaries
+                let before_ok = i == 0 || (!bytes[i-1].is_ascii_alphanumeric() && bytes[i-1] != b'_' && bytes[i-1] != b'$');
+                let after_ok = j >= bytes.len() || (!bytes[j].is_ascii_alphanumeric() && bytes[j] != b'_');
+                if before_ok && after_ok {
+                    let temp = &result[start..j];
+                    *counts.entry(temp.to_string()).or_insert(0) += 1;
+                }
+                i = j;
+            } else {
+                i += 1;
+            }
+        }
+        // Find temps that appear exactly 2 times (decl + for-of use).
+        for (temp, count) in &counts {
+            if *count != 2 { continue; }
+            // Look for: `const _TN = EXPR; for (const|let VAR of _TN)`
+            let decl_prefix = format!("const {} = ", temp);
+            if let Some(decl_pos) = result.find(&decl_prefix) {
+                // Find the end of EXPR (terminated by `;`)
+                let expr_start = decl_pos + decl_prefix.len();
+                if let Some(semi_off) = result[expr_start..].find(';') {
+                    let expr = &result[expr_start..expr_start + semi_off];
+                    let after_semi = expr_start + semi_off + 1;
+                    // After the semicolon, skip optional space
+                    let rest = &result[after_semi..];
+                    let trimmed = rest.trim_start_matches(' ');
+                    let skip = rest.len() - trimmed.len();
+                    // Check if the next thing is `for (const VAR of _TN)` or `for (let VAR of _TN)`
+                    let for_const = format!("for (const ");
+                    let for_let = format!("for (let ");
+                    let (for_kw_len, for_kw) = if trimmed.starts_with(&for_const) {
+                        (for_const.len(), "const")
+                    } else if trimmed.starts_with(&for_let) {
+                        (for_let.len(), "let")
+                    } else {
+                        continue;
+                    };
+                    // Read VAR name
+                    let var_start = for_kw_len;
+                    let var_bytes = trimmed.as_bytes();
+                    let mut k = var_start;
+                    while k < var_bytes.len() && (var_bytes[k].is_ascii_alphanumeric() || var_bytes[k] == b'_' || var_bytes[k] == b'$') {
+                        k += 1;
+                    }
+                    if k == var_start { continue; }
+                    // Check ` of _TN)` — must be followed by closing paren of for header
+                    let expected_of = format!(" of {})", temp);
+                    let after_var = &trimmed[k..];
+                    if !after_var.starts_with(&expected_of) { continue; }
+                    // after_temp_in_for points to the character after `)`
+                    let after_temp_in_for = k + expected_of.len();
+                    // Build replacement: `for (KW VAR of EXPR)SUFFIX`
+                    let inline_expr = expr.trim();
+                    let var_name = &trimmed[var_start..k];
+                    // The suffix is everything after the closing `)` of the for-of header
+                    let final_result = format!(
+                        "{}for ({} {} of {}){}",
+                        &result[..decl_pos],
+                        for_kw,
+                        var_name,
+                        inline_expr,
+                        &result[after_semi + skip + after_temp_in_for..]
+                    );
+                    result = final_result;
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        if !changed { break; }
+    }
+    result
+}
+
 /// Inline scope output names: when a temp `_TN` is used as a scope output
 /// and immediately assigned to a named variable (`const x = _TN;`), replace
 /// all occurrences of `_TN` with the named variable and remove the binding.
@@ -2583,6 +2681,19 @@ fn remove_dead_init_then_overwrite(input: &str) -> String {
             } else if result[after_semi..].starts_with(&prefix_mm) {
                 after_semi + prefix_mm.len()
             } else {
+                // No update operator — check for IMMEDIATE overwrite: `let IDENT = LITERAL; IDENT = `
+                // without any read of IDENT between the init and the overwrite.
+                let immediate_overwrite = format!(" {} = ", ident);
+                if result[after_semi..].starts_with(&immediate_overwrite) {
+                    // Verify IDENT doesn't appear between after_semi and the overwrite start.
+                    // Since we checked starts_with, the overwrite IS at after_semi, so no gap.
+                    let keep_before = &result[..pos];
+                    let keep_after = &result[after_semi..]; // ` IDENT = NEWVAL; ...`
+                    let replacement = format!("let {};", ident);
+                    result = format!("{}{}{}", keep_before, replacement, keep_after);
+                    changed = true;
+                    break;
+                }
                 pos += 1;
                 continue;
             };
