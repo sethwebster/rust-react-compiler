@@ -829,13 +829,16 @@ pub fn run_with_environment(
     promote_used_temporaries(hir, env);
     extract_scope_declarations_from_destructuring(hir);
     stabilize_block_ids(hir);
-    rename_variables(hir, env);
     prune_hoisted_contexts(hir);
     prune_unused_scopes(hir, env);
     prune_unused_labels(hir);
 
     // --- Phase: Reactive function construction ---
-    build_reactive_function(hir);
+    build_reactive_function(hir, env);
+
+    // Rename promoted temp variables ($t0 → t0, etc.) in tree definition order.
+    // Must run after build_reactive_function so the reactive_block is available.
+    rename_variables(hir, env);
 
     if env.has_errors() {
         return Err(env.aggregate_errors());

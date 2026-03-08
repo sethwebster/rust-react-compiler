@@ -1312,6 +1312,9 @@ pub struct HIRFunction {
     pub is_named_export: bool,
     /// True if the function was declared with `export default function` or `export default () =>`.
     pub is_default_export: bool,
+    /// The reactive function tree built by build_reactive_function.
+    /// None until that pass runs; Some after.
+    pub reactive_block: Option<ReactiveBlock>,
 }
 
 // ---------------------------------------------------------------------------

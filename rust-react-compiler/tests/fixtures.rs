@@ -108,9 +108,13 @@ fn normalize_js(js: &str) -> String {
         }
         result.push_str(effective);
     }
-    // Normalize bracket/brace/paren spacing: collapse "[ " → "[", " ]" → "]",
-    // "( " → "(", " )" → ")", "{ " → "{", " }" → "}". This handles differences
-    // between `[2, 3, 4]` and `[ 2, 3, 4 ]`, `{a}` and `{ a }`, etc.
+    result
+}
+
+// ---- Normalization helpers below are retained for reference but no longer
+// ---- called by normalize_js (whitespace/comment only per mandate).
+#[allow(dead_code)]
+fn _old_normalize_extra_bracket(result: String) -> String {
     let result = result.replace("[ ", "[").replace(" ]", "]");
     let result = result.replace("( ", "(").replace(" )", ")");
     let result = result.replace("{ ", "{").replace(" }", "}");

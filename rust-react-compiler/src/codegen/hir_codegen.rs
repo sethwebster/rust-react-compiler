@@ -20,8 +20,8 @@ use std::fmt::Write;
 use crate::hir::hir::{
     ArrayElement, BlockId, BinaryOperator, CallArg, DeclarationId, FunctionExpressionType,
     GotoVariant, HIRFunction, Instruction, InstructionId, InstructionKind, InstructionValue,
-    JsxAttribute, JsxTag, LValuePattern, NonLocalBinding, ObjectExpressionProperty, ObjectProperty,
-    ObjectPropertyKey, ObjectPatternProperty, Param, Pattern, Place, PrimitiveValue,
+    JsxAttribute, JsxTag, LogicalOperator, LValuePattern, NonLocalBinding, ObjectExpressionProperty,
+    ObjectProperty, ObjectPropertyKey, ObjectPatternProperty, Param, Pattern, Place, PrimitiveValue,
     ReactiveScope, ReactiveScopeDependency, ScopeId, Terminal, UnaryOperator, UpdateOperator,
 };
 use crate::hir::environment::Environment;
@@ -984,18 +984,29 @@ impl<'a> Codegen<'a> {
         let mut visited: std::collections::HashSet<BlockId> = std::collections::HashSet::new();
         let mut inlined_ids_mut = inlined_ids.clone();
 
-        self.emit_cfg_region(
-            self.hir.body.entry,
-            None,
-            1,
-            &mut out,
-            &mut visited,
-            &mut emitted_scopes,
-            &mut scope_index,
-            &instr_scope,
-            &mut inlined_ids_mut,
-            &scope_instrs_map,
-        );
+        // Use tree-based emission if enabled via env var (for testing/development).
+        // The tree-based approach requires the reactive_block to be available and
+        // requires that rename_variables has assigned correct tN names to scope output temps.
+        // By default, fall back to the proven CFG-based approach.
+        let use_tree = std::env::var("RC_TREE_CODEGEN").is_ok() && self.hir.reactive_block.is_some();
+        if use_tree {
+            if let Some(reactive_block) = self.hir.reactive_block.clone() {
+                self.codegen_tree_block(&reactive_block, &[], 1, &mut out);
+            }
+        } else {
+            self.emit_cfg_region(
+                self.hir.body.entry,
+                None,
+                1,
+                &mut out,
+                &mut visited,
+                &mut emitted_scopes,
+                &mut scope_index,
+                &instr_scope,
+                &mut inlined_ids_mut,
+                &scope_instrs_map,
+            );
+        }
 
         if self.hir.is_arrow {
             let _ = writeln!(out, "}};");
@@ -5466,6 +5477,278 @@ impl<'a> Codegen<'a> {
         // (No post-processing pruning needed — scope assignments are final.)
 
         map
+    }
+
+    // -----------------------------------------------------------------------
+    // Tree-based (ReactiveBlock) emission
+    // -----------------------------------------------------------------------
+
+    /// Walk a ReactiveBlock tree and emit JS statements to `out`.
+    /// `scope_out_names` is the set of variable names that are scope outputs
+    /// (should be assigned without `const`/`let` declaration prefix).
+    /// `indent` is the indentation level (1 = 2 spaces per level).
+    fn codegen_tree_block(
+        &mut self,
+        block: &[crate::hir::hir::ReactiveStatement],
+        scope_out_names: &[String],
+        indent: usize,
+        out: &mut String,
+    ) {
+        use crate::hir::hir::{ReactiveStatement, ReactiveTerminal};
+
+        let pad = "  ".repeat(indent);
+
+        for stmt in block {
+            match stmt {
+                ReactiveStatement::Instruction(reactive_instr) => {
+                    // Look up the flat HIR instruction by its lvalue identifier.
+                    // The reactive instruction stores the lvalue Place and value,
+                    // but emit_stmt works on the original flat Instruction.
+                    let flat_instr = self.instr_map.get(&reactive_instr.lvalue.as_ref().map(|p| p.identifier.0).unwrap_or(u32::MAX)).cloned();
+                    if let Some(instr) = flat_instr {
+                        if let Some(s) = self.emit_stmt(&instr.clone(), None, scope_out_names) {
+                            for line in s.lines() {
+                                let _ = std::fmt::write(out, format_args!("{pad}{}\n", line));
+                            }
+                        }
+                    }
+                }
+                ReactiveStatement::PrunedScope(pruned) => {
+                    // Pruned scopes don't emit cache logic — just their instructions.
+                    self.codegen_tree_block(&pruned.instructions, scope_out_names, indent, out);
+                }
+                ReactiveStatement::Scope(scope_block) => {
+                    self.codegen_tree_scope(scope_block, indent, out);
+                }
+                ReactiveStatement::Terminal(term_stmt) => {
+                    self.codegen_tree_terminal(&term_stmt.terminal, scope_out_names, indent, out);
+                }
+            }
+        }
+    }
+
+    /// Emit a reactive scope block with memoization if/else.
+    fn codegen_tree_scope(
+        &mut self,
+        scope_block: &crate::hir::hir::ReactiveScopeBlock,
+        indent: usize,
+        out: &mut String,
+    ) {
+        let pad = "  ".repeat(indent);
+        let body_pad = "  ".repeat(indent + 1);
+        let scope = &scope_block.scope;
+        let scope_id = scope.id;
+
+        // Collect declaration variable names (sorted by id for determinism).
+        let mut decl_ids: Vec<crate::hir::hir::IdentifierId> = scope.declarations.keys().copied().collect();
+        decl_ids.sort_by_key(|id| id.0);
+
+        let mut scope_out_names: Vec<String> = Vec::new();
+        for id in &decl_ids {
+            let name = self.ident_name(*id);
+            if !name.starts_with("$t") {
+                scope_out_names.push(name.clone());
+                let _ = std::fmt::write(out, format_args!("{pad}let {name};\n"));
+            }
+        }
+
+        // Also collect reassignment names.
+        let mut reassign_ids = scope.reassignments.clone();
+        reassign_ids.sort_by_key(|id| id.0);
+        for id in &reassign_ids {
+            let name = self.ident_name(*id);
+            if !name.starts_with("$t") && !scope_out_names.contains(&name) {
+                scope_out_names.push(name.clone());
+                let _ = std::fmt::write(out, format_args!("{pad}let {name};\n"));
+            }
+        }
+
+        // Get pre-assigned cache slots from the existing slot map.
+        let dep_slots = self.dep_slots.get(&scope_id).cloned().unwrap_or_default();
+        let out_slots = self.output_slots.get(&scope_id).cloned().unwrap_or_default();
+
+        // Build dependency expressions.
+        let deps: Vec<_> = scope.dependencies.iter().cloned().collect();
+        let dep_exprs: Vec<String> = deps.iter().map(|d| self.dep_expr(d)).collect();
+
+        // Build the test condition.
+        let has_deps = !dep_slots.is_empty() && !dep_exprs.is_empty();
+        let condition = if has_deps {
+            let parts: Vec<String> = dep_slots.iter().zip(dep_exprs.iter())
+                .map(|(&slot, dep_expr)| format!("$[{slot}] !== {dep_expr}"))
+                .collect();
+            parts.join(" || ")
+        } else if !out_slots.is_empty() {
+            // No deps: invalidate based on sentinel.
+            format!("$[{}] === Symbol.for(\"react.memo_cache_sentinel\")", out_slots[0])
+        } else {
+            // No slots at all — no memoization condition; just emit body.
+            self.codegen_tree_block(&scope_block.instructions, &scope_out_names, indent, out);
+            return;
+        };
+
+        // Emit: if (condition) { body; cache stores; } else { cache loads; }
+        let _ = std::fmt::write(out, format_args!("{pad}if ({condition}) {{\n"));
+
+        // Emit scope body.
+        let mut body_str = String::new();
+        self.codegen_tree_block(&scope_block.instructions, &scope_out_names, indent + 1, &mut body_str);
+        out.push_str(&body_str);
+
+        // Emit cache stores for deps.
+        for (&slot, dep_expr) in dep_slots.iter().zip(dep_exprs.iter()) {
+            let _ = std::fmt::write(out, format_args!("{body_pad}$[{slot}] = {dep_expr};\n"));
+        }
+        // Emit cache stores for outputs.
+        for (&slot, name) in out_slots.iter().zip(scope_out_names.iter()) {
+            let _ = std::fmt::write(out, format_args!("{body_pad}$[{slot}] = {name};\n"));
+        }
+
+        let _ = std::fmt::write(out, format_args!("{pad}}} else {{\n"));
+
+        // Emit cache loads.
+        for (&slot, name) in out_slots.iter().zip(scope_out_names.iter()) {
+            let _ = std::fmt::write(out, format_args!("{body_pad}{name} = $[{slot}];\n"));
+        }
+
+        let _ = std::fmt::write(out, format_args!("{pad}}}\n"));
+    }
+
+    /// Emit a reactive terminal (if, switch, loops, return, etc.).
+    fn codegen_tree_terminal(
+        &mut self,
+        terminal: &crate::hir::hir::ReactiveTerminal,
+        scope_out_names: &[String],
+        indent: usize,
+        out: &mut String,
+    ) {
+        use crate::hir::hir::ReactiveTerminal;
+        let pad = "  ".repeat(indent);
+
+        match terminal {
+            ReactiveTerminal::Return { value, .. } => {
+                let expr = self.expr(value);
+                let _ = std::fmt::write(out, format_args!("{pad}return {expr};\n"));
+            }
+            ReactiveTerminal::Throw { value, .. } => {
+                let expr = self.expr(value);
+                let _ = std::fmt::write(out, format_args!("{pad}throw {expr};\n"));
+            }
+            ReactiveTerminal::Break { .. } => {
+                let _ = std::fmt::write(out, format_args!("{pad}break;\n"));
+            }
+            ReactiveTerminal::Continue { .. } => {
+                let _ = std::fmt::write(out, format_args!("{pad}continue;\n"));
+            }
+            ReactiveTerminal::If { test, consequent, alternate, .. } => {
+                let test_expr = self.expr(test);
+                let _ = std::fmt::write(out, format_args!("{pad}if ({test_expr}) {{\n"));
+                self.codegen_tree_block(consequent, scope_out_names, indent + 1, out);
+                if let Some(alt) = alternate {
+                    let _ = std::fmt::write(out, format_args!("{pad}}} else {{\n"));
+                    self.codegen_tree_block(alt, scope_out_names, indent + 1, out);
+                }
+                let _ = std::fmt::write(out, format_args!("{pad}}}\n"));
+            }
+            ReactiveTerminal::While { test, loop_, .. } => {
+                // test is a ReactiveValue — emit via reactive value expression
+                let test_expr = self.reactive_value_expr(test);
+                let _ = std::fmt::write(out, format_args!("{pad}while ({test_expr}) {{\n"));
+                self.codegen_tree_block(loop_, scope_out_names, indent + 1, out);
+                let _ = std::fmt::write(out, format_args!("{pad}}}\n"));
+            }
+            ReactiveTerminal::DoWhile { loop_, test, .. } => {
+                let _ = std::fmt::write(out, format_args!("{pad}do {{\n"));
+                self.codegen_tree_block(loop_, scope_out_names, indent + 1, out);
+                let test_expr = self.reactive_value_expr(test);
+                let _ = std::fmt::write(out, format_args!("{pad}}} while ({test_expr});\n"));
+            }
+            ReactiveTerminal::For { init, test, update, loop_, .. } => {
+                let init_expr = self.reactive_value_expr(init);
+                let test_expr = self.reactive_value_expr(test);
+                let update_expr = update.as_ref().map(|u| self.reactive_value_expr(u)).unwrap_or_default();
+                let _ = std::fmt::write(out, format_args!("{pad}for ({init_expr}; {test_expr}; {update_expr}) {{\n"));
+                self.codegen_tree_block(loop_, scope_out_names, indent + 1, out);
+                let _ = std::fmt::write(out, format_args!("{pad}}}\n"));
+            }
+            ReactiveTerminal::ForOf { init, test, loop_, .. } => {
+                let init_expr = self.reactive_value_expr(init);
+                let test_expr = self.reactive_value_expr(test);
+                let _ = std::fmt::write(out, format_args!("{pad}for ({init_expr} of {test_expr}) {{\n"));
+                self.codegen_tree_block(loop_, scope_out_names, indent + 1, out);
+                let _ = std::fmt::write(out, format_args!("{pad}}}\n"));
+            }
+            ReactiveTerminal::ForIn { init, loop_, .. } => {
+                let init_expr = self.reactive_value_expr(init);
+                let _ = std::fmt::write(out, format_args!("{pad}for ({init_expr} in ???) {{\n"));
+                self.codegen_tree_block(loop_, scope_out_names, indent + 1, out);
+                let _ = std::fmt::write(out, format_args!("{pad}}}\n"));
+            }
+            ReactiveTerminal::Switch { test, cases, .. } => {
+                let test_expr = self.expr(test);
+                let _ = std::fmt::write(out, format_args!("{pad}switch ({test_expr}) {{\n"));
+                for case in cases {
+                    if let Some(case_test) = &case.test {
+                        let case_expr = self.expr(case_test);
+                        let _ = std::fmt::write(out, format_args!("{pad}  case {case_expr}:\n"));
+                    } else {
+                        let _ = std::fmt::write(out, format_args!("{pad}  default:\n"));
+                    }
+                    if let Some(block) = &case.block {
+                        self.codegen_tree_block(block, scope_out_names, indent + 2, out);
+                    }
+                }
+                let _ = std::fmt::write(out, format_args!("{pad}}}\n"));
+            }
+            ReactiveTerminal::Label { block, .. } => {
+                self.codegen_tree_block(block, scope_out_names, indent, out);
+            }
+            ReactiveTerminal::Try { block, handler_binding, handler, .. } => {
+                let _ = std::fmt::write(out, format_args!("{pad}try {{\n"));
+                self.codegen_tree_block(block, scope_out_names, indent + 1, out);
+                if let Some(binding) = handler_binding {
+                    let binding_name = self.ident_name(binding.identifier);
+                    let _ = std::fmt::write(out, format_args!("{pad}}} catch ({binding_name}) {{\n"));
+                } else {
+                    let _ = std::fmt::write(out, format_args!("{pad}}} catch (_e) {{\n"));
+                }
+                self.codegen_tree_block(handler, scope_out_names, indent + 1, out);
+                let _ = std::fmt::write(out, format_args!("{pad}}}\n"));
+            }
+        }
+    }
+
+    /// Emit a ReactiveValue as an expression string (for loop conditions etc.).
+    fn reactive_value_expr(&self, value: &crate::hir::hir::ReactiveValue) -> String {
+        use crate::hir::hir::ReactiveValue;
+        match value {
+            ReactiveValue::Instruction(instr_val) => {
+                // For simple cases: look up what produces this value.
+                // Since we can't easily re-emit InstructionValue as an expression here,
+                // we use inlined_exprs where possible, or fall back to the lvalue name.
+                // This is a simplification — the tree codegen will mainly be used
+                // for cases where the existing flat codegen already works.
+                let _ = instr_val;
+                String::new()
+            }
+            ReactiveValue::Logical(logical) => {
+                let left = self.reactive_value_expr(&logical.left);
+                let right = self.reactive_value_expr(&logical.right);
+                let op = match logical.operator {
+                    crate::hir::hir::LogicalOperator::And => "&&",
+                    crate::hir::hir::LogicalOperator::Or => "||",
+                    crate::hir::hir::LogicalOperator::NullishCoalescing => "??",
+                };
+                format!("{left} {op} {right}")
+            }
+            ReactiveValue::Ternary(ternary) => {
+                let test = self.reactive_value_expr(&ternary.test);
+                let consequent = self.reactive_value_expr(&ternary.consequent);
+                let alternate = self.reactive_value_expr(&ternary.alternate);
+                format!("{test} ? {consequent} : {alternate}")
+            }
+            ReactiveValue::Sequence(_) | ReactiveValue::OptionalCall(_) => String::new(),
+        }
     }
 }
 

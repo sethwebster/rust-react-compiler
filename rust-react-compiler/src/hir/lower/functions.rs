@@ -77,6 +77,7 @@ fn make_stub_hir_body(
         is_arrow: false,
         is_named_export: false,
         is_default_export: false,
+            reactive_block: None,
     }
 }
 

@@ -11,7 +11,9 @@ use std::collections::{HashMap, HashSet};
 use crate::hir::environment::Environment;
 use crate::hir::hir::*;
 
-pub fn run(_hir: &mut HIRFunction) {}
+pub fn run(hir: &mut HIRFunction, env: &Environment) {
+    hir.reactive_block = build(hir, env);
+}
 
 /// Build the reactive function tree. Returns None on failure (fallback to flat codegen).
 pub fn build(hir: &HIRFunction, env: &Environment) -> Option<ReactiveBlock> {

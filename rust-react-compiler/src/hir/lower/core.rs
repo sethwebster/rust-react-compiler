@@ -99,6 +99,7 @@ fn make_passthrough_hir(env: &mut Environment) -> Result<HIRFunction> {
         is_arrow: false,
         is_named_export: false,
         is_default_export: false,
+            reactive_block: None,
     })
 }
 
@@ -799,6 +800,7 @@ fn lower_arrow_function<'a>(
         is_arrow: true,
         is_named_export: false,
         is_default_export: false,
+            reactive_block: None,
     })
 }
 
@@ -899,6 +901,7 @@ pub fn lower_function<'a>(
         is_arrow: false,
         is_named_export: false,
         is_default_export: false,
+            reactive_block: None,
     })
 }
 
