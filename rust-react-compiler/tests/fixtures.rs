@@ -220,12 +220,15 @@ fn normalize_js(js: &str) -> String {
     // We re-split the result and replace temps that aren't followed by alphanumeric
     // characters (to avoid renaming inside string literals or object keys).
     let result = normalize_temp_names(&result);
+    // Inline scope output names BEFORE compacting: `let _TN; if (...) {_TN = ...; $[K] = _TN;} else {_TN = $[K];}
+    // const VARNAME = _TN;` → replace _TN with VARNAME and remove the binding.
+    // Must run before compact_temp_names to avoid conflating function parameter temps
+    // with scope-output temps that get assigned the same _TN slot after compaction.
+    // (e.g. parameter _T0 and scope-output _T1 both become _T0 after compaction,
+    //  then `const z = _T0;` would incorrectly rename the parameter to `z`.)
+    let result = inline_scope_output_names(&result);
     // Compact temp names: reuse _TN names across non-overlapping live ranges.
     let result = compact_temp_names(&result);
-    // Inline scope output names: `let _TN; if (...) {_TN = ...; $[K] = _TN;} else {_TN = $[K];}
-    // const VARNAME = _TN;` → replace _TN with VARNAME and remove the binding.
-    // One compiler uses temp names for scope outputs, the other preserves original names.
-    let result = inline_scope_output_names(&result);
     // Normalize scope output variable collisions: when inline_scope_output_names
     // renames a scope output temp to VAR (because of `const VAR = _TN;`), any
     // inner `_TN = inner_VAR` becomes `VAR = VAR` (self-assignment). Also, the
