@@ -241,8 +241,11 @@ fn rename_place(
     // - `name: None` (anonymous temp) → rename to t{counter}
     // - `name: Some(Promoted("$t..."))` or `name: Some(Promoted("$T..."))` → rename to t{counter}/T{counter}
     // Named user variables (Named("a"), Named("x"), etc.) are NOT renamed.
+    // Only rename promoted temps that have the $t/$T prefix.
+    // Anonymous temps (name: None) are left unnamed so hir_codegen inlines them.
+    // Named user variables (Named("x")) are never touched.
     let needs_rename = match &ident.name {
-        None => true,
+        None => false,
         Some(n) => matches!(n, IdentifierName::Promoted(_))
             && (n.value().starts_with("$t") || n.value().starts_with("$T")),
     };
