@@ -44,9 +44,9 @@ Update the following before stopping:
 
 ## Current Task
 
-**Active work**: Codegen improvements. Compile 82.6% (1419/1717), Correct 33.0% (566/1717).
+**Active work**: Codegen improvements. Compile 82.6% (1419/1717), Correct 34.3% (589/1717).
 
-Session progress: 560 → 566/1717. Recent fix: allow hook-named local vars as values.
+Session progress: 566 → 589/1717 (+23). Recent: DCE DeclareLocal/StoreLocal, MethodCall mutable_range, for-of loop mutation range.
 
 **In progress (uncommitted)**: +a2187af fix: extend collection mutable range when for-of loop elements are mutat
 
@@ -293,3 +293,4 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-07 | 82.5 | 32.6 | — | 18 | 28 | Switched to recursive fixture scan (1244→1717), InlineJs dep propagation fix (560/1717) |
 | 2026-03-07 | 82.5 | 33.0 | — | 18 | 28 | Ternary phi node resolution (+6, 566/1717) |
 | 2026-03-07 | 82.6 | 33.0 | — | 18 | 28 | Allow hook-named local vars as values (566/1717, compile 1419/1717) |
+| 2026-03-08 | 82.6 | 34.3 | — | 18 | 28 | DCE DeclareLocal/StoreLocal, MethodCall mutable_range, for-of mutation range (+23, 589/1717) |
