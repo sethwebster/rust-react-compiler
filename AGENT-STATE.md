@@ -48,7 +48,7 @@ Update the following before stopping:
 
 Session progress: 566 → 589/1717 (+23). Recent: DCE DeclareLocal/StoreLocal, MethodCall mutable_range, for-of loop mutation range.
 
-**In progress (uncommitted)**: +61e8c6b fix: hardcode TOTAL_FIXTURES=1717, parse counts directly — denominator
+**In progress (uncommitted)**: +6227725 fix: exclude hook calls from scope assignment before lvalue-scope lookup
 
 Recent commits (newest first):
 - cd3b0c3: chore: update AGENT-STATE.md
