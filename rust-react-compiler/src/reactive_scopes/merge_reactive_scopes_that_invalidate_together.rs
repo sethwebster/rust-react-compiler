@@ -215,8 +215,19 @@ pub fn run_with_env(hir: &mut HIRFunction, env: &mut Environment) {
                             }
                             ids
                         };
-                        let mut gap_safe = true;
-                        if a_end < b_start {
+                        // Pruned scopes act as merge barriers (mirrors TS which resets the
+                        // merge candidate on `pruned-scope` nodes in the reactive tree).
+                        // If any pruned scope's range overlaps [a_end, b_start), block the merge.
+                        let pruned_barrier = env.pruned_scope_ranges.iter().any(|&(ps, pe)| {
+                            // Overlap: pruned scope [ps,pe) overlaps gap [a_end,b_start)
+                            ps < b_start && pe > a_end
+                        });
+                        if std::env::var("RC_DEBUG").is_ok() && pruned_barrier {
+                            eprintln!("[merge_adjacent] BLOCKED by pruned-scope barrier in gap [{},{})", a_end, b_start);
+                        }
+
+                        let mut gap_safe = !pruned_barrier;
+                        if gap_safe && a_end < b_start {
                             'gap: for (_, block) in &hir.body.blocks {
                                 for instr in &block.instructions {
                                     let iid = instr.id.0;

@@ -416,7 +416,48 @@ fn has_side_effects(value: &InstructionValue) -> bool {
             | InstructionValue::Await { .. }
             | InstructionValue::UnsupportedNode { .. }
             | InstructionValue::InlineJs { .. }
+            // JSX expressions are treated as side-effectful so that scope inference
+            // can assign them a reactive scope before they are pruned by
+            // prune_non_escaping_scopes. The pruned scope range then acts as a
+            // merge barrier in merge_reactive_scopes_that_invalidate_together.
+            | InstructionValue::JsxExpression { .. }
+            | InstructionValue::JsxFragment { .. }
     )
+}
+
+/// Remove JSX instructions (JsxExpression, JsxFragment) whose lvalue is never
+/// used as an operand anywhere in the function. This runs after
+/// `prune_non_escaping_scopes` to clean up JSX statement expressions whose
+/// reactive scopes were pruned (their results were never consumed).
+///
+/// We can't use the main DCE for this because JSX is kept alive by the main DCE
+/// so that scope inference can assign it a reactive scope first. Once that scope
+/// is pruned, this pass removes the now-unused JSX instruction.
+pub fn prune_unused_jsx(hir: &mut HIRFunction) {
+    use std::collections::HashSet;
+    // Collect all identifiers used as operands (non-lvalue) anywhere.
+    let mut used: HashSet<IdentifierId> = HashSet::new();
+    for (_, block) in &hir.body.blocks {
+        for instr in &block.instructions {
+            collect_instruction_uses(&instr.value, &mut used);
+        }
+        collect_terminal_uses(&block.terminal, &mut used);
+        for phi in &block.phis {
+            for op in phi.operands.values() {
+                used.insert(op.identifier);
+            }
+        }
+    }
+    // Remove JSX instructions whose result is unused.
+    for (_, block) in hir.body.blocks.iter_mut() {
+        block.instructions.retain(|instr| {
+            let is_unused_jsx = matches!(
+                &instr.value,
+                InstructionValue::JsxExpression { .. } | InstructionValue::JsxFragment { .. }
+            ) && !used.contains(&instr.lvalue.identifier);
+            !is_unused_jsx
+        });
+    }
 }
 
 fn collect_terminal_uses(terminal: &Terminal, used: &mut HashSet<IdentifierId>) {

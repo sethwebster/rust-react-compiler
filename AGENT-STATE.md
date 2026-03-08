@@ -35,9 +35,9 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.6% (1419/1717 all fixtures) |
-| Correct rate | **26.7% (458/1717)** — honest baseline after stripping semantic normalizations |
+| Correct rate | **26.8% (460/1717)** — after JSX scope barrier fix (+2) |
 | Old (inflated) correct rate | 34.4% (591/1717) — was inflated by 50+ semantic normalizations |
-| Uncommitted changes | none — committed |
+| Uncommitted changes | JSX scope barrier fix (see Current Task) |
 | Fixture denominator | **1717** (recursive scan of all subdirs) |
 
 ---
@@ -52,8 +52,13 @@ Update the following before stopping:
 - `rename_variables::run_with_env()` now renames `$tN`/`$TN` promoted temps to `t0`/`T0` in tree order
 - Pipeline now calls both passes unconditionally
 
+**JSX scope barrier fix (2026-03-08)**: Fixed `array-map-frozen-array.js` and similar patterns (+2, 460/1717):
+1. `Identifier::new_temporary` now takes an explicit `DeclarationId` parameter
+2. `Environment::new_temporary` allocates unique declaration IDs via `new_declaration_id()`
+3. `JsxExpression`/`JsxFragment` treated as side-effectful in DCE so scope inference can assign a scope
+4. `prune_unused_jsx` pass removes orphaned JSX instructions after `prune_non_escaping_scopes`
+
 **Next step**: Implement `codegen_reactive_function` to walk the `ReactiveBlock` tree and replace flat `hir_codegen.rs`.
-The smoke test shows the remaining issue is scope inference: `_c(1)` (ours) vs `_c(2)` (expected) — `someObj()` should be in its own reactive scope.
 
 Recent commits (newest first):
 - cd3b0c3: chore: update AGENT-STATE.md
@@ -300,3 +305,4 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-07 | 82.6 | 33.0 | — | 18 | 28 | Allow hook-named local vars as values (566/1717, compile 1419/1717) |
 | 2026-03-08 | 82.6 | 34.3 | — | 18 | 28 | DCE DeclareLocal/StoreLocal, MethodCall mutable_range, for-of mutation range (+23, 589/1717) |
 | 2026-03-08 | 82.6 | **26.7** | — | 18 | 28 | Architecture reset: stripped 50+ semantic normalizations from fixtures.rs. Honest baseline is 458/1717. build_reactive_function + rename_variables now real (not no-ops). |
+| 2026-03-08 | 82.6 | **26.8** | — | 18 | 28 | JSX scope barrier fix: prune_non_escaping_scopes barrier for JSX statement expressions (+2, 460/1717) |

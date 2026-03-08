@@ -60,10 +60,6 @@ pub fn run_with_env(hir: &mut HIRFunction, env: &mut Environment) {
     for (&id, &root) in &canonical {
         if let Some(&scope_id) = root_to_scope_id.get(&root) {
             if let Some(ident) = env.get_identifier_mut(id) {
-                if std::env::var("RC_DEBUG").is_ok() {
-                    eprintln!("[infer_scope_vars] ident {:?} (name={:?}) gets scope {:?}",
-                        id.0, ident.name.as_ref().map(|n| n.value()), scope_id.0);
-                }
                 ident.scope = Some(scope_id);
             }
             if let Some(scope) = scopes.get_mut(&root) {
@@ -99,9 +95,6 @@ fn find_disjoint_mutable_values(
                     NonLocalBinding::ImportNamespace { name, .. } => name.clone(),
                     NonLocalBinding::ModuleLocal { name } => name.clone(),
                 };
-                if std::env::var("RC_DEBUG").is_ok() {
-                    eprintln!("[global_names] ident {} = {:?}", instr.lvalue.identifier.0, name);
-                }
                 global_names.insert(instr.lvalue.identifier, name);
             }
         }
@@ -289,11 +282,6 @@ fn find_disjoint_mutable_values(
             );
             if !is_hook_call && (may_alloc || (lvalue_mutable && lvalue_reactive && !is_transparent_read)) {
                 operands.push(lvalue_id);
-            }
-            if std::env::var("RC_DEBUG").is_ok() {
-                eprintln!("[scope_debug] instr {:?}: lvalue={}, may_alloc={}, lvalue_mutable={}, lvalue_reactive={}, discriminant={:?}",
-                    instr.id.0, lvalue_id.0, may_alloc, lvalue_mutable, lvalue_reactive,
-                    std::mem::discriminant(&instr.value));
             }
 
             match &instr.value {
@@ -567,13 +555,6 @@ fn find_disjoint_mutable_values(
                 let mut seen = HashSet::new();
                 let dedup: Vec<_> =
                     operands.into_iter().filter(|&id| seen.insert(id)).collect();
-                if std::env::var("RC_DEBUG").is_ok() {
-                    let ids: Vec<_> = dedup.iter().map(|id| {
-                        let name = env.get_identifier(*id).and_then(|i| i.name.as_ref()).map(|n| n.value()).unwrap_or_default();
-                        format!("{}({:?})", id.0, name)
-                    }).collect();
-                    eprintln!("[union] instr {:?}: {:?}", instr.id.0, ids);
-                }
                 set.union(&dedup);
             }
         }

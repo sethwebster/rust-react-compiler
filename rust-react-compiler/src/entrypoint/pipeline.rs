@@ -13,7 +13,7 @@ use crate::hir::print_hir::print_hir_function;
 
 use crate::optimization::{
     constant_propagation::constant_propagation,
-    dead_code_elimination::dead_code_elimination_with_env,
+    dead_code_elimination::{dead_code_elimination_with_env, prune_unused_jsx},
     prune_maybe_throws::prune_maybe_throws,
     optimize_props_method_calls::optimize_props_method_calls,
     optimize_for_ssr::optimize_for_ssr,
@@ -820,6 +820,10 @@ pub fn run_with_environment(
     flatten_reactive_loops_hir(hir, env);
     flatten_scopes_with_hooks_or_use_hir(hir, env);
     prune_non_escaping_scopes(hir, env);
+    // Remove JSX instructions whose result was never used (e.g. `<div>{x}</div>;`
+    // as a statement). These were kept alive by DCE so scope inference could assign
+    // and then prune their reactive scope (creating a merge barrier). Now they can go.
+    prune_unused_jsx(hir);
     propagate_scope_dependencies_hir(hir, env);
     merge_reactive_scopes_that_invalidate_together(hir, env);
     prune_non_reactive_dependencies(hir, env);

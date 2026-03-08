@@ -385,11 +385,6 @@ pub fn run_with_env(hir: &HIRFunction, env: &mut Environment) {
         }
     }
 
-    if std::env::var("RC_DEBUG").is_ok() {
-        eprintln!("[prune_non_escaping] escaping decls: {:?}", escaping.iter().map(|id| id.0).collect::<Vec<_>>());
-        eprintln!("[prune_non_escaping] definitions: {:?}", definitions.iter().map(|(k, v)| (k.0, v.0)).collect::<Vec<_>>());
-    }
-
     // Visit each escaping decl and propagate memoization.
     for &decl in &escaping {
         visit(decl, false, &mut nodes, &mut scope_nodes, &definitions);
@@ -402,10 +397,6 @@ pub fn run_with_env(hir: &HIRFunction, env: &mut Environment) {
         .map(|(&d, _)| d)
         .collect();
 
-    if std::env::var("RC_DEBUG").is_ok() {
-        eprintln!("[prune_non_escaping] memoized decls: {:?}", memoized_decls.iter().map(|id| id.0).collect::<Vec<_>>());
-    }
-
     // Prune scopes where no declaration's decl_id is in memoized_decls.
     let scopes_to_prune: Vec<ScopeId> = env
         .scopes
@@ -416,13 +407,6 @@ pub fn run_with_env(hir: &HIRFunction, env: &mut Environment) {
                 memoized_decls.contains(&d)
             });
             if !any_memoized {
-                if std::env::var("RC_DEBUG").is_ok() {
-                    eprintln!(
-                        "[prune_non_escaping] scope {:?} pruned: no memoized members ({:?})",
-                        sid.0,
-                        scope.declarations.keys().map(|id| id.0).collect::<Vec<_>>()
-                    );
-                }
                 Some(sid)
             } else {
                 None
@@ -431,6 +415,11 @@ pub fn run_with_env(hir: &HIRFunction, env: &mut Environment) {
         .collect();
 
     for sid in scopes_to_prune {
+        // Record the pruned scope's range before removing it.
+        // merge_reactive_scopes_that_invalidate_together uses these as merge barriers.
+        if let Some(scope) = env.scopes.get(&sid) {
+            env.pruned_scope_ranges.push((scope.range.start.0, scope.range.end.0));
+        }
         env.scopes.remove(&sid);
         for ident in env.identifiers.values_mut() {
             if ident.scope == Some(sid) {

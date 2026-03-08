@@ -104,6 +104,10 @@ pub struct Environment {
     // Used by outline_functions to determine if free variables are safe to capture
     // from an outlined (hoisted) function.
     pub module_level_names: HashSet<String>,
+
+    // Ranges of scopes that were pruned by prune_non_escaping_scopes (start, end instruction IDs).
+    // Used by merge_reactive_scopes_that_invalidate_together to treat pruned scopes as merge barriers.
+    pub pruned_scope_ranges: Vec<(u32, u32)>,
 }
 
 impl Environment {
@@ -126,6 +130,7 @@ impl Environment {
             errors: Vec::new(),
             outlined_functions: Vec::new(),
             module_level_names: HashSet::new(),
+            pruned_scope_ranges: Vec::new(),
         }
     }
 
@@ -164,7 +169,8 @@ impl Environment {
     /// Allocate a new temporary identifier and register it.
     pub fn new_temporary(&mut self, loc: SourceLocation) -> IdentifierId {
         let id = self.new_identifier_id();
-        let ident = Identifier::new_temporary(id, loc);
+        let decl_id = self.new_declaration_id();
+        let ident = Identifier::new_temporary(id, decl_id, loc);
         self.identifiers.insert(id, ident);
         id
     }

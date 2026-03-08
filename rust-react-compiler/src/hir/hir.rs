@@ -152,10 +152,10 @@ pub struct Identifier {
 }
 
 impl Identifier {
-    pub fn new_temporary(id: IdentifierId, loc: SourceLocation) -> Self {
+    pub fn new_temporary(id: IdentifierId, declaration_id: DeclarationId, loc: SourceLocation) -> Self {
         Identifier {
             id,
-            declaration_id: DeclarationId(id.0),
+            declaration_id,
             name: None,
             mutable_range: MutableRange::zero(),
             scope: None,
