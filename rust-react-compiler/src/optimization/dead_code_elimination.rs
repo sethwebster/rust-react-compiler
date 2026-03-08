@@ -1,5 +1,5 @@
 #![allow(unused_imports, unused_variables, dead_code)]
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use crate::hir::hir::*;
 use crate::hir::environment::Environment;
 
@@ -280,6 +280,20 @@ fn remove_dead_instructions(hir: &mut HIRFunction, env: Option<&Environment>) {
         }
     }
 
+    // Build a set of declaration IDs that are loaded by any SSA version.
+    // After SSA, Destructure pattern places create new SSA identifiers for named variables,
+    // so DeclareLocal/StoreLocal (which keep the original pre-SSA identifier) may not
+    // directly appear in `loaded_vars`. Using declaration_id groups all SSA versions of
+    // the same variable, allowing liveness to propagate across SSA rename boundaries.
+    let loaded_decl_ids: HashSet<DeclarationId> = if let Some(env) = env {
+        loaded_vars.iter()
+            .filter_map(|&id| env.get_identifier(id))
+            .map(|i| i.declaration_id)
+            .collect()
+    } else {
+        HashSet::new()
+    };
+
     // Remove instructions whose lvalue is dead and that have no side effects.
     // Special case: StoreLocal whose named variable is never loaded, never
     // captured by a closure, AND never consumed as a phi operand is dead
@@ -303,18 +317,48 @@ fn remove_dead_instructions(hir: &mut HIRFunction, env: Option<&Environment>) {
                     if loop_iter_results.contains(&value.identifier) {
                         return true;
                     }
-                    return used.contains(&instr.lvalue.identifier);
+                    if used.contains(&instr.lvalue.identifier) {
+                        return true;
+                    }
+                    // SSA alias check: after a Destructure renames a variable (id→new_id),
+                    // LoadLocals use new_id, not the original id in StoreLocal.lvalue.place.
+                    // Check if any SSA alias (same declaration_id) of this variable is loaded.
+                    if let Some(env) = env {
+                        if let Some(decl_id) = env.get_identifier(lvalue.place.identifier)
+                            .map(|i| i.declaration_id)
+                        {
+                            if loaded_decl_ids.contains(&decl_id) {
+                                return true;
+                            }
+                        }
+                    }
+                    return false;
                 }
             }
             // DeclareLocal for a variable that is never loaded, never captured,
             // and never used as a phi operand is truly dead — eliminate it.
             // This handles `let foo;` inside a loop where `foo` is never read.
+            // SSA alias check: also preserve if any SSA alias (same declaration_id) is loaded.
             if let InstructionValue::DeclareLocal { lvalue, .. } = &instr.value {
                 if !loaded_vars.contains(&lvalue.place.identifier)
                     && !captured_vars.contains(&lvalue.place.identifier)
                     && !used.contains(&lvalue.place.identifier)
                 {
-                    return false;
+                    if let Some(env) = env {
+                        if let Some(decl_id) = env.get_identifier(lvalue.place.identifier)
+                            .map(|i| i.declaration_id)
+                        {
+                            if loaded_decl_ids.contains(&decl_id) {
+                                // An SSA alias is loaded — fall through to has_side_effects (true).
+                            } else {
+                                return false;
+                            }
+                        } else {
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
                 }
             }
             // PostfixUpdate/PrefixUpdate (e.g. i++, --i) are dead when:

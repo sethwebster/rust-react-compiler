@@ -1167,6 +1167,11 @@ impl<'a> Codegen<'a> {
             // Emit instructions in this block.
             for instr in &block.instructions {
                 let lv_id = instr.lvalue.identifier.0;
+                if std::env::var("RC_DEBUG_INSTR").is_ok() {
+                    eprintln!("[DEBUG_INSTR] lv_id={} discriminant={:?} inlined={} in_scope={:?}",
+                        lv_id, std::mem::discriminant(&instr.value),
+                        inlined_ids.contains(&lv_id), instr_scope.get(&instr.id));
+                }
 
                 // Check if this instruction belongs to a scope.
                 if let Some(&sid) = instr_scope.get(&instr.id) {
@@ -4769,7 +4774,15 @@ impl<'a> Codegen<'a> {
                             ObjectPatternProperty::Spread(s) => format!("...{}", self.ident_name(s.place.identifier)),
                         }).collect();
                         let props_str = props.join(", ");
-                        if props_str.is_empty() {
+                        if kw.is_empty() {
+                            // Reassignment: wrap in parens to avoid ambiguity with block statement.
+                            // `({ x, y } = val)` not `{ x, y } = val`
+                            if props_str.is_empty() {
+                                Some(format!("({{}} = {val});"))
+                            } else {
+                                Some(format!("({{ {props_str} }} = {val});"))
+                            }
+                        } else if props_str.is_empty() {
                             Some(format!("{}{{}} = {val};", prefix))
                         } else {
                             Some(format!("{}{{ {props_str} }} = {val};", prefix))

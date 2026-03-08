@@ -5,7 +5,12 @@ use oxc_semantic::Semantic;
 use crate::hir::hir::{
     BinaryOperator as HirBinaryOp,
     SourceLocation, Place, InstructionValue, InstructionKind,
-    LValue, NonLocalBinding,
+    LValue, LValuePattern, Pattern, NonLocalBinding,
+    ArrayElement, SpreadPattern,
+    ObjectPatternProperty, ObjectPropertyKey, ObjectPropertyType,
+    ArrayPattern as HirArrayPattern,
+    ObjectPattern as HirObjectPattern,
+    ObjectProperty as HirObjectProperty,
 };
 use crate::error::{CompilerError, Result};
 use super::LoweringContext;
@@ -286,10 +291,184 @@ fn store_to_assignment_target<'a>(
                 loc,
             );
         }
+        AssignmentTarget::ObjectAssignmentTarget(obj) => {
+            lower_object_assignment_target(ctx, semantic, obj, value, loc, lower_expr)?;
+        }
+        AssignmentTarget::ArrayAssignmentTarget(arr) => {
+            lower_array_assignment_target(ctx, semantic, arr, value, loc, lower_expr)?;
+        }
         _ => {
             ctx.push(InstructionValue::UnsupportedNode { loc }, SourceLocation::Generated);
         }
     }
+    Ok(())
+}
+
+/// Lower an object assignment target `({x, y: z} = value)` as a Destructure instruction.
+fn lower_object_assignment_target<'a>(
+    ctx: &mut LoweringContext,
+    semantic: &Semantic<'a>,
+    obj: &ObjectAssignmentTarget<'a>,
+    value: Place,
+    loc: SourceLocation,
+    lower_expr: &mut dyn FnMut(&Expression<'a>, &mut LoweringContext) -> Result<Place>,
+) -> Result<()> {
+    let mut properties: Vec<ObjectPatternProperty> = Vec::new();
+
+    for prop in &obj.properties {
+        match prop {
+            AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(prop_ident) => {
+                // `{x}` or `{x = default}` — shorthand form
+                let ident = &prop_ident.binding;
+                let ref_id = ident.reference_id.get();
+                let sym_id = ref_id.and_then(|r| semantic.scoping().get_reference(r).symbol_id());
+                let id = if let Some(sym) = sym_id {
+                    ctx.get_or_create_symbol(sym.index() as u32, Some(ident.name.as_str()), loc.clone())
+                } else {
+                    ctx.env.new_temporary(loc.clone())
+                };
+                // Default values (`{x = default}`) are not handled here; just use the place.
+                let key = ObjectPropertyKey::Identifier(ident.name.to_string());
+                properties.push(ObjectPatternProperty::Property(HirObjectProperty {
+                    key,
+                    type_: ObjectPropertyType::Property,
+                    place: Place::new(id, loc.clone()),
+                }));
+            }
+            AssignmentTargetProperty::AssignmentTargetPropertyProperty(prop_prop) => {
+                // `{key: target}` — explicit key:value form
+                let key = match &prop_prop.name {
+                    PropertyKey::StaticIdentifier(id) => ObjectPropertyKey::Identifier(id.name.to_string()),
+                    PropertyKey::StringLiteral(s) => ObjectPropertyKey::String(s.value.to_string()),
+                    PropertyKey::NumericLiteral(n) => ObjectPropertyKey::Number(n.value),
+                    _ => {
+                        // Computed or other key — use UnsupportedNode placeholder
+                        let key_place = ctx.push(InstructionValue::UnsupportedNode { loc: loc.clone() }, SourceLocation::Generated);
+                        ObjectPropertyKey::Computed(key_place)
+                    }
+                };
+
+                let dest_place = match &prop_prop.binding {
+                    AssignmentTargetMaybeDefault::AssignmentTargetIdentifier(ident_ref) => {
+                        let ref_id = ident_ref.reference_id.get();
+                        let sym_id = ref_id.and_then(|r| semantic.scoping().get_reference(r).symbol_id());
+                        let id = if let Some(sym) = sym_id {
+                            ctx.get_or_create_symbol(sym.index() as u32, Some(ident_ref.name.as_str()), loc.clone())
+                        } else {
+                            ctx.env.new_temporary(loc.clone())
+                        };
+                        Place::new(id, loc.clone())
+                    }
+                    _ => ctx.make_temporary(loc.clone()),
+                };
+                properties.push(ObjectPatternProperty::Property(HirObjectProperty {
+                    key,
+                    type_: ObjectPropertyType::Property,
+                    place: dest_place,
+                }));
+            }
+        }
+    }
+
+    // Handle rest: `{...rest} = obj`
+    if let Some(rest) = &obj.rest {
+        if let AssignmentTarget::AssignmentTargetIdentifier(ident) = &rest.target {
+            let ref_id = ident.reference_id.get();
+            let sym_id = ref_id.and_then(|r| semantic.scoping().get_reference(r).symbol_id());
+            let id = if let Some(sym) = sym_id {
+                ctx.get_or_create_symbol(sym.index() as u32, Some(ident.name.as_str()), loc.clone())
+            } else {
+                ctx.env.new_temporary(loc.clone())
+            };
+            properties.push(ObjectPatternProperty::Spread(SpreadPattern {
+                place: Place::new(id, loc.clone()),
+            }));
+        } else {
+            let tmp = ctx.make_temporary(loc.clone());
+            properties.push(ObjectPatternProperty::Spread(SpreadPattern { place: tmp }));
+        }
+    }
+
+    let hir_pattern = Pattern::Object(HirObjectPattern { properties, loc: loc.clone() });
+    ctx.push(
+        InstructionValue::Destructure {
+            lvalue: LValuePattern { pattern: hir_pattern, kind: InstructionKind::Reassign },
+            value,
+            loc,
+        },
+        SourceLocation::Generated,
+    );
+
+    Ok(())
+}
+
+/// Lower an array assignment target `[x, y] = value` as a Destructure instruction.
+fn lower_array_assignment_target<'a>(
+    ctx: &mut LoweringContext,
+    semantic: &Semantic<'a>,
+    arr: &ArrayAssignmentTarget<'a>,
+    value: Place,
+    loc: SourceLocation,
+    lower_expr: &mut dyn FnMut(&Expression<'a>, &mut LoweringContext) -> Result<Place>,
+) -> Result<()> {
+    let mut items: Vec<ArrayElement> = Vec::new();
+
+    for elem in &arr.elements {
+        match elem {
+            None => {
+                items.push(ArrayElement::Hole);
+            }
+            Some(maybe_default) => {
+                match maybe_default {
+                    AssignmentTargetMaybeDefault::AssignmentTargetIdentifier(ident) => {
+                        let ref_id = ident.reference_id.get();
+                        let sym_id = ref_id.and_then(|r| semantic.scoping().get_reference(r).symbol_id());
+                        let id = if let Some(sym) = sym_id {
+                            ctx.get_or_create_symbol(sym.index() as u32, Some(ident.name.as_str()), loc.clone())
+                        } else {
+                            ctx.env.new_temporary(loc.clone())
+                        };
+                        items.push(ArrayElement::Place(Place::new(id, loc.clone())));
+                    }
+                    _ => {
+                        // Nested patterns or defaults — use a temporary placeholder
+                        let tmp = ctx.make_temporary(loc.clone());
+                        items.push(ArrayElement::Place(tmp));
+                    }
+                }
+            }
+        }
+    }
+
+    // Handle rest: [...rest] = arr
+    if let Some(rest) = &arr.rest {
+        if let AssignmentTarget::AssignmentTargetIdentifier(ident) = &rest.target {
+            let ref_id = ident.reference_id.get();
+            let sym_id = ref_id.and_then(|r| semantic.scoping().get_reference(r).symbol_id());
+            let id = if let Some(sym) = sym_id {
+                ctx.get_or_create_symbol(sym.index() as u32, Some(ident.name.as_str()), loc.clone())
+            } else {
+                ctx.env.new_temporary(loc.clone())
+            };
+            items.push(ArrayElement::Spread(SpreadPattern {
+                place: Place::new(id, loc.clone()),
+            }));
+        } else {
+            let tmp = ctx.make_temporary(loc.clone());
+            items.push(ArrayElement::Spread(SpreadPattern { place: tmp }));
+        }
+    }
+
+    let hir_pattern = Pattern::Array(HirArrayPattern { items, loc: loc.clone() });
+    ctx.push(
+        InstructionValue::Destructure {
+            lvalue: LValuePattern { pattern: hir_pattern, kind: InstructionKind::Reassign },
+            value,
+            loc,
+        },
+        SourceLocation::Generated,
+    );
+
     Ok(())
 }
 
