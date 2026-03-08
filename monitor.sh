@@ -47,6 +47,7 @@ update_metrics_in_file() {
 
   sed -i "s/| Compile rate |.*/| Compile rate | ${compile_pct}% ${compile_frac} |/" AGENT-STATE.md
   sed -i "s/| Correct rate |.*/| Correct rate | ${correct_pct}% ${correct_frac} |/" AGENT-STATE.md
+  # NOTE: fractions must remain in format (N/1717) — no suffix. TOTAL_FIXTURES=1717 is hardcoded in worker.ts.
 
   log "Updated metrics: compile=${compile_pct}% ${compile_frac}, correct=${correct_pct}% ${correct_frac}"
   return 0
