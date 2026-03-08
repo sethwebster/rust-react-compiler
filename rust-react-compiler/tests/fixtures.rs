@@ -3110,6 +3110,9 @@ fn show_diffs_impl() {
                     if std::env::var("DUMP_OUTPUT").is_ok() {
                         eprintln!("--- ACTUAL (normalized) ---\n{}\n--- EXPECTED (normalized) ---\n{}\n---", na, ne);
                     }
+                    if std::env::var("DUMP_RAW").is_ok() {
+                        eprintln!("--- ACTUAL (raw) ---\n{}\n---", actual);
+                    }
                     // Find first difference
                     let a_chars: Vec<char> = na.chars().collect();
                     let e_chars: Vec<char> = ne.chars().collect();

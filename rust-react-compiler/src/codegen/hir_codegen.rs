@@ -1129,8 +1129,20 @@ impl<'a> Codegen<'a> {
                 }
                 Terminal::ForOf { .. } => {
                     for instr in &block.instructions {
-                        if let InstructionValue::GetIterator { .. } = &instr.value {
+                        if let InstructionValue::GetIterator { collection, .. } = &instr.value {
                             inlined_ids.insert(instr.lvalue.identifier.0);
+                            // If the collection comes from a MethodCall or CallExpression,
+                            // inline it too so the expression appears directly in the for-of
+                            // header instead of as a standalone discarded statement.
+                            if let Some(coll_instr) = self.instr_map.get(&collection.identifier.0) {
+                                match &coll_instr.value {
+                                    InstructionValue::MethodCall { .. }
+                                    | InstructionValue::CallExpression { .. } => {
+                                        inlined_ids.insert(collection.identifier.0);
+                                    }
+                                    _ => {}
+                                }
+                            }
                         }
                     }
                 }
@@ -1566,6 +1578,27 @@ impl<'a> Codegen<'a> {
                                         .cloned()
                                         .unwrap_or_else(|| self.expr(property));
                                     local_exprs.insert(instr.lvalue.identifier.0, format!("{}[{}]", obj, prop));
+                                }
+                                InstructionValue::MethodCall { receiver, property, args, .. } => {
+                                    let recv = local_exprs.get(&receiver.identifier.0)
+                                        .cloned()
+                                        .unwrap_or_else(|| self.expr(receiver));
+                                    let method_suffix = self.method_suffix_from_place(property);
+                                    let args_str = args.iter().map(|a| match a {
+                                        crate::hir::hir::CallArg::Place(p) => local_exprs.get(&p.identifier.0).cloned().unwrap_or_else(|| self.expr(p)),
+                                        crate::hir::hir::CallArg::Spread(s) => format!("...{}", local_exprs.get(&s.place.identifier.0).cloned().unwrap_or_else(|| self.expr(&s.place))),
+                                    }).collect::<Vec<_>>().join(", ");
+                                    local_exprs.insert(instr.lvalue.identifier.0, format!("{recv}{method_suffix}({args_str})"));
+                                }
+                                InstructionValue::CallExpression { callee, args, .. } => {
+                                    let callee_str = local_exprs.get(&callee.identifier.0)
+                                        .cloned()
+                                        .unwrap_or_else(|| self.expr(callee));
+                                    let args_str = args.iter().map(|a| match a {
+                                        crate::hir::hir::CallArg::Place(p) => local_exprs.get(&p.identifier.0).cloned().unwrap_or_else(|| self.expr(p)),
+                                        crate::hir::hir::CallArg::Spread(s) => format!("...{}", local_exprs.get(&s.place.identifier.0).cloned().unwrap_or_else(|| self.expr(&s.place))),
+                                    }).collect::<Vec<_>>().join(", ");
+                                    local_exprs.insert(instr.lvalue.identifier.0, format!("{callee_str}({args_str})"));
                                 }
                                 InstructionValue::GetIterator { collection, .. } => {
                                     let coll = local_exprs.get(&collection.identifier.0)
