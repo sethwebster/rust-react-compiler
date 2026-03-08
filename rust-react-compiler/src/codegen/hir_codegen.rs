@@ -5335,6 +5335,29 @@ impl<'a> Codegen<'a> {
             .collect();
 
         for instr in instrs {
+            // Pre-check: hook calls and outlined FunctionExpressions must NEVER be placed
+            // inside a memoization scope block — they must run unconditionally.
+            // This check must happen before the ident.scope lookup (step 1) because
+            // the scope inference may have tagged hook-call results as scope declarations,
+            // but codegen must still emit them outside the scope block.
+            let is_early_excluded = match &instr.value {
+                InstructionValue::CallExpression { callee, .. } => {
+                    self.inlined_exprs.get(&callee.identifier.0)
+                        .map(|name| name.starts_with("use")
+                            && name.len() > 3
+                            && name[3..].starts_with(|c: char| c.is_uppercase()))
+                        .unwrap_or(false)
+                }
+                InstructionValue::FunctionExpression { name_hint, .. } => name_hint.is_some(),
+                InstructionValue::GetIterator { .. }
+                | InstructionValue::IteratorNext { .. }
+                | InstructionValue::NextPropertyOf { .. } => true,
+                _ => false,
+            };
+            if is_early_excluded {
+                continue;
+            }
+
             // 1. Check the instruction's own lvalue identifier.
             if let Some(ident) = self.env.get_identifier(instr.lvalue.identifier) {
                 if let Some(sid) = ident.scope {
