@@ -35,8 +35,8 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.6% (1419/1717 all fixtures) |
-| Correct rate | 34.4% (591/1717 all fixtures) |
-| Output correct (subset) | ~155/300 (first 300 alphabetically) |
+| Correct rate | **26.7% (458/1717)** — honest baseline after stripping semantic normalizations |
+| Old (inflated) correct rate | 34.4% (591/1717) — was inflated by 50+ semantic normalizations |
 | Uncommitted changes | none — committed |
 | Fixture denominator | **1717** (recursive scan of all subdirs) |
 
@@ -44,19 +44,16 @@ Update the following before stopping:
 
 ## Current Task
 
-**Active work**: Architecture reset — strip test normalizations, implement build_reactive_function + codegen_reactive_function properly.
+**Active work**: Implement tree-based codegen (`codegen_reactive_function`) to replace flat HIR codegen.
 
-**KEY DISCOVERY (2026-03-08)**: The 34.4% "correct" number is inflated. `tests/fixtures.rs` has accumulated 50+ normalization passes (temp name canonicalization, slot count erasure, scope output inlining, compound assignment rewriting, variable disambiguation stripping, IIFE rewriting, etc.) that paper over fundamental semantic differences. These violated the zero-test-changes mandate and hid the real gap.
+**ARCHITECTURE RESET COMPLETE (2026-03-08)**:
+- Stripped 50+ semantic normalizations from `tests/fixtures.rs` → honest baseline: **458/1717 (26.7%)**
+- `build_reactive_function::run()` now actually builds and stores the `ReactiveBlock` tree
+- `rename_variables::run_with_env()` now renames `$tN`/`$TN` promoted temps to `t0`/`T0` in tree order
+- Pipeline now calls both passes unconditionally
 
-**Root cause of slow progress**: Codegen bypasses the `ReactiveFunction` tree (`build_reactive_function::run()` is a no-op) and operates on raw flat HIR. The TS compiler's output is structurally produced by `CodegenReactiveFunction.ts` walking a `ReactiveFunction` tree. No amount of incremental HIR patching can bridge this gap.
-
-**Plan**:
-1. Strip `normalize_js` in fixtures.rs to whitespace/comment normalization only — honest baseline
-2. Implement `codegen_reactive_function` by porting `CodegenReactiveFunction.ts` to walk the existing `ReactiveBlock` tree
-3. Wire `build_reactive_function::build()` into the pipeline (it already exists, just not called)
-4. Numbers will drop initially, then climb on a sound structural foundation
-
-**In progress (uncommitted)**: implementing plan above
+**Next step**: Implement `codegen_reactive_function` to walk the `ReactiveBlock` tree and replace flat `hir_codegen.rs`.
+The smoke test shows the remaining issue is scope inference: `_c(1)` (ours) vs `_c(2)` (expected) — `someObj()` should be in its own reactive scope.
 
 Recent commits (newest first):
 - cd3b0c3: chore: update AGENT-STATE.md
@@ -302,3 +299,4 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-07 | 82.5 | 33.0 | — | 18 | 28 | Ternary phi node resolution (+6, 566/1717) |
 | 2026-03-07 | 82.6 | 33.0 | — | 18 | 28 | Allow hook-named local vars as values (566/1717, compile 1419/1717) |
 | 2026-03-08 | 82.6 | 34.3 | — | 18 | 28 | DCE DeclareLocal/StoreLocal, MethodCall mutable_range, for-of mutation range (+23, 589/1717) |
+| 2026-03-08 | 82.6 | **26.7** | — | 18 | 28 | Architecture reset: stripped 50+ semantic normalizations from fixtures.rs. Honest baseline is 458/1717. build_reactive_function + rename_variables now real (not no-ops). |
