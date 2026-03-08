@@ -13,7 +13,7 @@ log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
 run_metrics() {
   log "Running fixture tests..."
-  cargo test --test fixtures run_all_fixtures -- --ignored 2>&1 \
+  cargo test --test fixtures run_all_fixtures -- --include-ignored 2>&1 \
     | grep -E "Correct rate|Compile rate|correct:|compile:" | tail -20
 }
 
@@ -59,26 +59,19 @@ LAST_COMMIT=$(git rev-parse HEAD)
 while true; do
   sleep "$POLL_INTERVAL"
 
-  git fetch --quiet origin main 2>/dev/null || true
-  REMOTE_HEAD=$(git rev-parse origin/main 2>/dev/null || echo "")
   LOCAL_HEAD=$(git rev-parse HEAD)
-  NEW_HEAD="${REMOTE_HEAD:-$LOCAL_HEAD}"
 
-  if [[ "$NEW_HEAD" == "$LAST_COMMIT" ]]; then
+  if [[ "$LOCAL_HEAD" == "$LAST_COMMIT" ]]; then
     continue
   fi
 
-  NEW_COMMITS=$(git log --oneline "${LAST_COMMIT}..${NEW_HEAD}" 2>/dev/null | head -10)
-  [[ -z "$NEW_COMMITS" ]] && { LAST_COMMIT="$NEW_HEAD"; continue; }
+  NEW_COMMITS=$(git log --oneline "${LAST_COMMIT}..${LOCAL_HEAD}" 2>/dev/null | head -10)
+  [[ -z "$NEW_COMMITS" ]] && { LAST_COMMIT="$LOCAL_HEAD"; continue; }
 
   log "New commits:"
   echo "$NEW_COMMITS"
 
-  # Pull if remote is ahead
-  if [[ "$REMOTE_HEAD" != "$LOCAL_HEAD" ]]; then
-    git pull --ff-only origin main 2>/dev/null || true
-  fi
-  LAST_COMMIT=$(git rev-parse HEAD)
+  LAST_COMMIT="$LOCAL_HEAD"
 
   # Skip if only AGENT-STATE updates
   MEANINGFUL=$(echo "$NEW_COMMITS" | grep -v "chore: update AGENT-STATE" || true)
