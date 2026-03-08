@@ -48,7 +48,7 @@ Update the following before stopping:
 
 Session progress: 560 → 566/1717. Recent fix: allow hook-named local vars as values.
 
-**In progress (uncommitted)**: +671a142 fix: scope output naming and IIFE const prefix (+1 correct)
+**In progress (uncommitted)**: +a2187af fix: extend collection mutable range when for-of loop elements are mutat
 
 Recent commits (newest first):
 - cd3b0c3: chore: update AGENT-STATE.md
