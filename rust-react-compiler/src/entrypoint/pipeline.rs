@@ -229,12 +229,21 @@ fn collect_compilable_fn_spans(source: &str, source_type: SourceType) -> Vec<(u3
     }
     if !parse.errors.is_empty() { return vec![]; }
 
+    // @ignoreUseNoForget: compile functions even if they have 'use no forget'.
+    let ignore_use_no_forget = source.contains("@ignoreUseNoForget");
+
     // Check module-level 'use no memo' / 'use no forget' directives.
-    let module_no_memo = parse.program.directives.iter()
+    let module_no_memo = !ignore_use_no_forget && parse.program.directives.iter()
         .any(|d| matches!(d.expression.value.as_str(), "use no memo" | "use no forget"));
     if module_no_memo {
         return vec![]; // Skip all functions in the file.
     }
+
+    // Helper to check if a function body has opt-out directives.
+    let fn_has_no_memo = |body: Option<&oxc_allocator::Box<'_, oxc_ast::ast::FunctionBody>>| -> bool {
+        if ignore_use_no_forget { return false; }
+        body.map(|b| b.directives.iter().any(|d| matches!(d.expression.value.as_str(), "use no memo" | "use no forget"))).unwrap_or(false)
+    };
 
     let mut spans: Vec<(u32, u32)> = Vec::new();
 
@@ -242,20 +251,14 @@ fn collect_compilable_fn_spans(source: &str, source_type: SourceType) -> Vec<(u3
         match stmt {
             Statement::FunctionDeclaration(func) => {
                 // Skip 'use no memo' / 'use no forget' functions.
-                let no_memo = func.body.as_ref()
-                    .map(|b| b.directives.iter().any(|d| matches!(d.expression.value.as_str(), "use no memo" | "use no forget")))
-                    .unwrap_or(false);
-                if !no_memo {
+                if !fn_has_no_memo(func.body.as_ref()) {
                     spans.push((func.span.start, func.span.end));
                 }
             }
             Statement::ExportDefaultDeclaration(decl) => {
                 match &decl.declaration {
                     ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
-                        let no_memo = func.body.as_ref()
-                            .map(|b| b.directives.iter().any(|d| matches!(d.expression.value.as_str(), "use no memo" | "use no forget")))
-                            .unwrap_or(false);
-                        if !no_memo {
+                        if !fn_has_no_memo(func.body.as_ref()) {
                             spans.push((decl.span.start, decl.span.end));
                         }
                     }
@@ -263,10 +266,7 @@ fn collect_compilable_fn_spans(source: &str, source_type: SourceType) -> Vec<(u3
                         spans.push((decl.span.start, decl.span.end));
                     }
                     ExportDefaultDeclarationKind::FunctionExpression(func) => {
-                        let no_memo = func.body.as_ref()
-                            .map(|b| b.directives.iter().any(|d| matches!(d.expression.value.as_str(), "use no memo" | "use no forget")))
-                            .unwrap_or(false);
-                        if !no_memo {
+                        if !fn_has_no_memo(func.body.as_ref()) {
                             spans.push((decl.span.start, decl.span.end));
                         }
                     }
@@ -276,10 +276,7 @@ fn collect_compilable_fn_spans(source: &str, source_type: SourceType) -> Vec<(u3
             Statement::ExportNamedDeclaration(decl) => {
                 match decl.declaration.as_ref() {
                     Some(Declaration::FunctionDeclaration(func)) => {
-                        let no_memo = func.body.as_ref()
-                            .map(|b| b.directives.iter().any(|d| matches!(d.expression.value.as_str(), "use no memo" | "use no forget")))
-                            .unwrap_or(false);
-                        if !no_memo {
+                        if !fn_has_no_memo(func.body.as_ref()) {
                             spans.push((decl.span.start, decl.span.end));
                         }
                     }

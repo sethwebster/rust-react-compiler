@@ -387,6 +387,17 @@ fn instr_in_scope(instr: &Instruction, sid: ScopeId, scope: &ReactiveScope, env:
         _ => {}
     }
     // Step 3: instruction id within scope range.
+    // Exclude Destructure instructions that source from a parameter (mutable_range.start == 0).
+    // Parameter destructures should always be emitted outside scope blocks so that their
+    // extracted values are available for use as scope dependencies in the scope check condition.
+    if let InstructionValue::Destructure { value, .. } = &instr.value {
+        if env.get_identifier(value.identifier)
+            .map(|i| i.mutable_range.start.0 == 0)
+            .unwrap_or(false)
+        {
+            return false;
+        }
+    }
     let range_nonempty = scope.range.end > scope.range.start;
     range_nonempty && instr.id >= scope.range.start && instr.id < scope.range.end
 }
@@ -5355,6 +5366,13 @@ impl<'a> Codegen<'a> {
                 InstructionValue::GetIterator { .. }
                 | InstructionValue::IteratorNext { .. }
                 | InstructionValue::NextPropertyOf { .. } => true,
+                // Destructure instructions that source from a parameter (mutable_range.start == 0)
+                // must be emitted outside scope blocks so extracted values are available as deps.
+                InstructionValue::Destructure { value, .. } => {
+                    self.env.get_identifier(value.identifier)
+                        .map(|i| i.mutable_range.start.0 == 0)
+                        .unwrap_or(false)
+                }
                 _ => false,
             };
             if !is_excluded {

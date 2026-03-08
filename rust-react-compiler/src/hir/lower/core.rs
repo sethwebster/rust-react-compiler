@@ -183,6 +183,26 @@ fn lower_program_impl(
     // DO NOT add a file-level check here — it would prevent compiling other
     // functions in the same file.
 
+    // @ignoreUseNoForget pragma: compile functions even if they contain
+    // 'use no forget'/'use no memo' directives (used in test fixtures to verify
+    // the compiler can handle functions that have the opt-out directive).
+    let ignore_use_no_forget = source.contains("@ignoreUseNoForget");
+    // Helper: returns true if the function body has 'use no forget'/'use no memo'
+    // AND the file does NOT have @ignoreUseNoForget.
+    let check_no_memo_directives = |directives: &[oxc_ast::ast::Directive]| -> bool {
+        directives.iter().any(|d| {
+            matches!(d.expression.value.as_str(), "use no memo" | "use no forget")
+        })
+    };
+    let check_no_memo = |body: Option<&oxc_ast::ast::FunctionBody>| -> bool {
+        if ignore_use_no_forget { return false; }
+        body.map(|b| check_no_memo_directives(&b.directives)).unwrap_or(false)
+    };
+    let check_no_memo_boxed = |body: Option<&oxc_allocator::Box<'_, oxc_ast::ast::FunctionBody>>| -> bool {
+        if ignore_use_no_forget { return false; }
+        body.map(|b| check_no_memo_directives(&b.directives)).unwrap_or(false)
+    };
+
     // Test-only pragma: simulate an unexpected exception in the pipeline.
     if source.contains("@throwUnknownException__testonly:true") {
         return Err(CompilerError::invariant("unexpected error"));
@@ -537,9 +557,7 @@ fn lower_program_impl(
             Statement::FunctionDeclaration(func) => {
                 // Skip 'use no memo' functions — they are not compilable,
                 // just passed through unchanged by the pipeline.
-                let no_memo = func.body.as_ref()
-                    .map(|b| b.directives.iter().any(|d| matches!(d.expression.value.as_str(), "use no memo" | "use no forget")))
-                    .unwrap_or(false);
+                let no_memo = check_no_memo_boxed(func.body.as_ref());
                 if !no_memo {
                     maybe_lower_fn!(lower_function(func, &semantic, env));
                 }
@@ -550,9 +568,7 @@ fn lower_program_impl(
             Statement::ExportDefaultDeclaration(decl) => {
                 match &decl.declaration {
                     ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
-                        let no_memo = func.body.as_ref()
-                            .map(|b| b.directives.iter().any(|d| matches!(d.expression.value.as_str(), "use no memo" | "use no forget")))
-                            .unwrap_or(false);
+                        let no_memo = check_no_memo_boxed(func.body.as_ref());
                         if !no_memo {
                             maybe_lower_fn!(lower_function(func, &semantic, env), false, true);
                         }
@@ -561,9 +577,7 @@ fn lower_program_impl(
                         maybe_lower_fn!(lower_arrow_function(arrow, &semantic, env), false, true);
                     }
                     ExportDefaultDeclarationKind::FunctionExpression(func) => {
-                        let no_memo = func.body.as_ref()
-                            .map(|b| b.directives.iter().any(|d| matches!(d.expression.value.as_str(), "use no memo" | "use no forget")))
-                            .unwrap_or(false);
+                        let no_memo = check_no_memo_boxed(func.body.as_ref());
                         if !no_memo {
                             maybe_lower_fn!(lower_function(func, &semantic, env), false, true);
                         }
@@ -578,9 +592,7 @@ fn lower_program_impl(
                 if let Some(declaration) = &decl.declaration {
                     match declaration {
                         Declaration::FunctionDeclaration(func) => {
-                            let no_memo = func.body.as_ref()
-                                .map(|b| b.directives.iter().any(|d| matches!(d.expression.value.as_str(), "use no memo" | "use no forget")))
-                                .unwrap_or(false);
+                            let no_memo = check_no_memo_boxed(func.body.as_ref());
                             if !no_memo {
                                 maybe_lower_fn!(lower_function(func, &semantic, env), true, false);
                             }

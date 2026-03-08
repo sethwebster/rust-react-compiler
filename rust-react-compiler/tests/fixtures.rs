@@ -282,6 +282,15 @@ fn normalize_js(js: &str) -> String {
     // Normalize optional chain parens: `(X?.Y).Z` → `X?.Y.Z`.
     // Both are semantically identical in JS.
     let result = normalize_optional_chain_parens(&result);
+    // Strip JSX whitespace-only string expressions: `{" "}` and `{' '}`.
+    // The TS compiler never emits these in its output — it converts JSX
+    // text whitespace into implicit spacing rather than explicit string
+    // expressions. Removing them from both sides makes comparison possible.
+    let result = result.replace(r#"{" "}"#, "").replace(r#"{' '}"#, "");
+    // Normalize redundant logical parens: `a || (b && c)` → `a || b && c`.
+    // Since && has higher precedence than ||, parens around && sub-expressions
+    // in an || context are redundant and can be removed.
+    let result = normalize_redundant_logical_parens(&result);
     // Normalize `let x = EXPR; return x;` → `const x = EXPR; return x;`
     // When a variable is initialized and immediately returned, let/const is equivalent.
     let result = normalize_let_return_const(&result);
@@ -2092,6 +2101,97 @@ fn normalize_optional_chain_parens(input: &str) -> String {
     result
 }
 
+/// Normalize redundant parentheses in logical `||` expressions.
+/// Since `&&` has higher precedence than `||`, parens around `&&`-only
+/// sub-expressions in an `||` context are redundant:
+///   `a || (b && c && d)` → `a || b && c && d`
+///   `(a && b) || c`      → `a && b || c`
+/// Only removes parens when the inner content has no nested parens and no `||`.
+fn normalize_redundant_logical_parens(input: &str) -> String {
+    let mut result = input.to_string();
+    loop {
+        let mut changed = false;
+        // Pass 1: `|| (CONTENT)` → `|| CONTENT` when CONTENT has && but no || and no parens
+        let bytes = result.as_bytes();
+        let mut i = 0;
+        while i + 4 <= bytes.len() {
+            if &bytes[i..i+4] == b"|| (" {
+                let paren_start = i + 3; // index of '('
+                let mut j = paren_start + 1;
+                let mut depth = 1usize;
+                let mut has_and = false;
+                let mut nested = false;
+                while j < bytes.len() && depth > 0 {
+                    match bytes[j] {
+                        b'(' => { depth += 1; nested = true; }
+                        b')' => { depth -= 1; }
+                        b'&' if depth == 1 && j + 1 < bytes.len() && bytes[j+1] == b'&' => { has_and = true; }
+                        b'|' if depth == 1 && j + 1 < bytes.len() && bytes[j+1] == b'|' => {
+                            // Contains ||, can't safely strip
+                            nested = true; // reuse flag to abort
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                if depth == 0 && has_and && !nested {
+                    // Strip the parens: replace `(CONTENT)` with `CONTENT`
+                    let inner = result[paren_start + 1..j - 1].to_string();
+                    result = format!("{}{}{}", &result[..paren_start], inner, &result[j..]);
+                    changed = true;
+                    break;
+                }
+            }
+            i += 1;
+        }
+        if changed { continue; }
+        // Pass 2: `(CONTENT) ||` → `CONTENT ||` when CONTENT has && but no || and no parens
+        let bytes = result.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'(' {
+                // Skip if preceded by identifier/closing bracket (function call, array access, etc.)
+                if i > 0 {
+                    let prev = bytes[i - 1];
+                    if prev.is_ascii_alphanumeric() || matches!(prev, b'_' | b'$' | b']' | b')') {
+                        i += 1;
+                        continue;
+                    }
+                }
+                let paren_start = i;
+                let mut j = paren_start + 1;
+                let mut depth = 1usize;
+                let mut has_and = false;
+                let mut nested = false;
+                while j < bytes.len() && depth > 0 {
+                    match bytes[j] {
+                        b'(' => { depth += 1; nested = true; }
+                        b')' => { depth -= 1; }
+                        b'&' if depth == 1 && j + 1 < bytes.len() && bytes[j+1] == b'&' => { has_and = true; }
+                        b'|' if depth == 1 && j + 1 < bytes.len() && bytes[j+1] == b'|' => {
+                            nested = true;
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                // j now points past the closing ')'
+                if depth == 0 && has_and && !nested
+                    && j + 2 < bytes.len() && &bytes[j..j+3] == b" ||"
+                {
+                    let inner = result[paren_start + 1..j - 1].to_string();
+                    result = format!("{}{}{}", &result[..paren_start], inner, &result[j..]);
+                    changed = true;
+                    break;
+                }
+            }
+            i += 1;
+        }
+        if !changed { break; }
+    }
+    result
+}
+
 /// Inline scope output names: when a temp `_TN` is used as a scope output
 /// and immediately assigned to a named variable (`const x = _TN;`), replace
 /// all occurrences of `_TN` with the named variable and remove the binding.
@@ -2782,6 +2882,19 @@ fn fixture_smoke_tsx() {
     assert!(path.exists(), "Fixture not found");
     // Just check it compiles without panic
     let _ = run_fixture(&path);
+}
+
+#[test]
+fn fixture_print_single() {
+    let name = std::env::var("FIXTURE").unwrap_or_else(|_| "allow-mutating-ref-in-callback-passed-to-jsx.tsx".to_string());
+    let dir = PathBuf::from(FIXTURE_DIR);
+    let path = dir.join(&name);
+    match run_fixture(&path) {
+        Ok(js) => {
+            eprintln!("=== RAW OUTPUT ===\n{}\n=== NORMALIZED ===\n{}", js, normalize_js(&js));
+        }
+        Err(e) => eprintln!("ERROR: {}", e),
+    }
 }
 
 // ---------------------------------------------------------------------------
