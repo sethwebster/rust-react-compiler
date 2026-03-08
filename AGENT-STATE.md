@@ -48,7 +48,7 @@ Update the following before stopping:
 
 Session progress: 566 → 589/1717 (+23). Recent: DCE DeclareLocal/StoreLocal, MethodCall mutable_range, for-of loop mutation range.
 
-**In progress (uncommitted)**: +a2187af fix: extend collection mutable range when for-of loop elements are mutat
+**In progress (uncommitted)**: +61e8c6b fix: hardcode TOTAL_FIXTURES=1717, parse counts directly — denominator
 
 Recent commits (newest first):
 - cd3b0c3: chore: update AGENT-STATE.md
