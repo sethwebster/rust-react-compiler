@@ -1075,8 +1075,8 @@
       setText('correct-rate', `${fmt(metrics.correctRate)}%`)
       setText('unexpected-val', metrics.errorUnexpected)
 
-      const passing = Math.round(metrics.totalFixtures * metrics.compileRate / 100)
-      const correct = Math.round(metrics.totalFixtures * metrics.correctRate / 100)
+      const passing = metrics.compileCount || Math.round(metrics.totalFixtures * metrics.compileRate / 100)
+      const correct = metrics.correctCount || Math.round(metrics.totalFixtures * metrics.correctRate / 100)
       setText('compile-sub', `${passing.toLocaleString()} of ${metrics.totalFixtures.toLocaleString()} fixtures compile`)
       setText('correct-sub', `${correct.toLocaleString()} of ${metrics.totalFixtures.toLocaleString()} produce correct output`)
       setText('expected-sub', `${metrics.errorExpected} expected · ${metrics.uncommittedFiles} uncommitted files`)

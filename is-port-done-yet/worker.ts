@@ -229,14 +229,19 @@ function parseState(content: string) {
   const s = extractSection(content, "Metrics.*?")
   const n = (rx: RegExp) => parseFloat(content.match(rx)?.[1] ?? "0") || 0
   const i = (rx: RegExp) => parseInt(content.match(rx)?.[1] ?? "0") || 0
-  const totalMatch = s.match(/\((\d+)\/(\d+)[^)]*\)/)
+  // Parse counts directly from fractions — never derive from percentage math
+  const TOTAL_FIXTURES = 1717 // canonical fixture count — never change
+  const compileMatch = s.match(/Compile rate[^(]*\((\d+)\/(\d+)/)
+  const correctMatch = s.match(/Correct rate[^(]*\((\d+)\/(\d+)/)
   const metrics = {
     compileRate:      n(/Compile rate[^\d]*(\d+\.?\d*)%/),
     correctRate:      n(/Correct rate[^\d]*(\d+\.?\d*)%/),
+    compileCount:     compileMatch ? parseInt(compileMatch[1]) : 0,
+    correctCount:     correctMatch ? parseInt(correctMatch[1]) : 0,
     errorExpected:    i(/Error \(expected\)[^\d]*(\d+)/),
     errorUnexpected:  i(/Error \(unexpected\)[^\d]*(\d+)/),
     uncommittedFiles: i(/Uncommitted changes[^\d]*(\d+)\s*files/),
-    totalFixtures:    totalMatch ? parseInt(totalMatch[2]) : 1244,
+    totalFixtures:    TOTAL_FIXTURES,
   }
 
   const passes = parsePasses(content)
