@@ -3582,6 +3582,15 @@ impl<'a> Codegen<'a> {
                 ) {
                     used_outside = self.is_let_var_phi_escaped(var_id, &scope_lvalue_ids);
                 }
+                // Also check if the instruction's result lvalue (a temp) is used outside scope.
+                // This covers the case where the StoreLocal result flows to a scope cache slot:
+                // e.g. `const onClick = () => {...}` where the StoreLocal result $t6 is the
+                // cache value, even though `onClick` itself isn't directly used outside scope.
+                // Treating it as "escaping" ensures we emit `const onClick = tN;` post-scope,
+                // which inline_scope_output_names then rewrites to use `onClick` as the temp name.
+                if !used_outside && var_name.is_some() {
+                    used_outside = self.is_var_used_outside_scope(instr.lvalue.identifier, &scope_lvalue_ids);
+                }
                 if std::env::var("RC_DEBUG").is_ok() {
                     eprintln!("[analyze_scope] StoreLocal idx={} var_id={} name={:?} kind={:?} fallthrough_bid={:?} instr_block={:?} used_outside={}",
                         idx, var_id.0, var_name, lvalue.kind,

@@ -1725,10 +1725,21 @@ fn normalize_simple_iife(input: &str) -> String {
             let post_return = &body[ret_end + 1..]; // text after return's semicolon
             let pre = pre_return.trim();
             let post = post_return.trim();
-            let new_text = if post.is_empty() {
-                format!("{}{}{} = {};{}", prefix, pre, var_name, return_expr, suffix)
+            // Strip trailing `const `/`let ` from prefix and re-attach after the body.
+            // `const object = (() => {const x = ...; return x;})()` should normalize to
+            // `const x = ...; const object = x;` not `const const x = ...; object = x;`.
+            let (prefix_stripped, var_kw) = if prefix.ends_with("const ") {
+                (&prefix[..prefix.len()-6], "const ")
+            } else if prefix.ends_with("let ") {
+                (&prefix[..prefix.len()-4], "let ")
             } else {
-                format!("{}{}{} = {};{}{}", prefix, pre, var_name, return_expr, post, suffix)
+                (prefix as &str, "")
+            };
+            let sep = if pre.is_empty() { "" } else { " " };
+            let new_text = if post.is_empty() {
+                format!("{}{}{}{}{} = {};{}", prefix_stripped, pre, sep, var_kw, var_name, return_expr, suffix)
+            } else {
+                format!("{}{}{}{}{} = {};{}{}", prefix_stripped, pre, sep, var_kw, var_name, return_expr, post, suffix)
             };
             result = new_text;
         } else {
