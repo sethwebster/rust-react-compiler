@@ -44,11 +44,19 @@ Update the following before stopping:
 
 ## Current Task
 
-**Active work**: Codegen improvements. Compile 82.6% (1419/1717), Correct 34.3% (589/1717).
+**Active work**: Architecture reset — strip test normalizations, implement build_reactive_function + codegen_reactive_function properly.
 
-Session progress: 566 → 589/1717 (+23). Recent: DCE DeclareLocal/StoreLocal, MethodCall mutable_range, for-of loop mutation range.
+**KEY DISCOVERY (2026-03-08)**: The 34.4% "correct" number is inflated. `tests/fixtures.rs` has accumulated 50+ normalization passes (temp name canonicalization, slot count erasure, scope output inlining, compound assignment rewriting, variable disambiguation stripping, IIFE rewriting, etc.) that paper over fundamental semantic differences. These violated the zero-test-changes mandate and hid the real gap.
 
-**In progress (uncommitted)**: +6227725 fix: exclude hook calls from scope assignment before lvalue-scope lookup
+**Root cause of slow progress**: Codegen bypasses the `ReactiveFunction` tree (`build_reactive_function::run()` is a no-op) and operates on raw flat HIR. The TS compiler's output is structurally produced by `CodegenReactiveFunction.ts` walking a `ReactiveFunction` tree. No amount of incremental HIR patching can bridge this gap.
+
+**Plan**:
+1. Strip `normalize_js` in fixtures.rs to whitespace/comment normalization only — honest baseline
+2. Implement `codegen_reactive_function` by porting `CodegenReactiveFunction.ts` to walk the existing `ReactiveBlock` tree
+3. Wire `build_reactive_function::build()` into the pipeline (it already exists, just not called)
+4. Numbers will drop initially, then climb on a sound structural foundation
+
+**In progress (uncommitted)**: implementing plan above
 
 Recent commits (newest first):
 - cd3b0c3: chore: update AGENT-STATE.md
