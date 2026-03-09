@@ -985,13 +985,17 @@ impl<'a> Codegen<'a> {
         let mut inlined_ids_mut = inlined_ids.clone();
 
         // Use tree-based emission if enabled via env var (for testing/development).
-        // The tree-based approach requires the reactive_block to be available and
-        // requires that rename_variables has assigned correct tN names to scope output temps.
-        // By default, fall back to the proven CFG-based approach.
+        // Use tree-based codegen when RC_TREE_CODEGEN is set and reactive_block is available.
+        // Flat CFG-based codegen is the default until tree codegen reaches parity.
         let use_tree = std::env::var("RC_TREE_CODEGEN").is_ok() && self.hir.reactive_block.is_some();
         if use_tree {
             if let Some(reactive_block) = self.hir.reactive_block.clone() {
-                self.codegen_tree_block(&reactive_block, &[], 1, &mut out);
+                let mut declared_names = std::collections::HashSet::new();
+                self.codegen_tree_block(
+                    &reactive_block, &[], 1, &mut out,
+                    &scope_instrs_map, &inlined_ids_mut,
+                    &mut scope_index, &mut declared_names,
+                );
             }
         } else {
             self.emit_cfg_region(
@@ -1214,6 +1218,8 @@ impl<'a> Codegen<'a> {
                             scope_index,
                             out,
                             inlined_ids,
+                            &std::collections::HashSet::new(),
+                            None,
                         );
                         emitted_scopes.insert(sid);
                     }
@@ -1975,6 +1981,8 @@ impl<'a> Codegen<'a> {
         scope_index: &mut usize,
         out: &mut String,
         inlined_ids: &std::collections::HashSet<u32>,
+        declared_names: &std::collections::HashSet<String>,
+        tree_body: Option<(&[crate::hir::hir::ReactiveStatement], &std::collections::HashMap<ScopeId, Vec<Instruction>>)>,
     ) {
         let pad = "  ".repeat(indent);
         let body_pad = "  ".repeat(indent + 1);
@@ -2125,6 +2133,41 @@ impl<'a> Codegen<'a> {
             }
         }
 
+        // Post-process: for outputs with is_named_var=true whose name is pre-declared
+        // in an outer scope (via DeclareLocal before this scope in tree walk),
+        // convert to temp+reassignment so we don't double-declare.
+        for output in &mut analysis.outputs {
+            if output.is_named_var {
+                if let Some(ref name) = output.out_name {
+                    if declared_names.contains(name) {
+                        // Find the StoreLocal that writes to this name to get skip_idx and cache_expr.
+                        let found = instrs.iter().enumerate().find(|(_, instr)| {
+                            if let InstructionValue::StoreLocal { lvalue, .. } = &instr.value {
+                                self.env.get_identifier(lvalue.place.identifier)
+                                    .and_then(|i| i.name.as_ref())
+                                    .map(|n| n.value() == name.as_str())
+                                    .unwrap_or(false)
+                            } else {
+                                false
+                            }
+                        });
+                        if let Some((idx, instr)) = found {
+                            if let InstructionValue::StoreLocal { value, .. } = &instr.value {
+                                let value_expr = self.expr(value);
+                                output.is_named_var = false;
+                                output.out_kw = "";  // plain reassignment
+                                output.skip_idx = Some(idx);
+                                output.cache_expr = value_expr;
+                            }
+                        } else {
+                            output.is_named_var = false;
+                            output.out_kw = "";
+                        }
+                    }
+                }
+            }
+        }
+
         // Assign temp names to outputs.
         let mut output_cache_vars: Vec<String> = Vec::new();
         for output in &analysis.outputs {
@@ -2208,24 +2251,37 @@ impl<'a> Codegen<'a> {
             scope_block_set.iter().next().copied()
         };
 
+        // If tree_body is provided (tree codegen path), use codegen_tree_block for body emission.
+        // This correctly handles loop terminals (While, For, etc.) inside the scope body.
+        let tree_body_str: Option<String> = if let Some((tree_stmts, tree_scope_instrs)) = tree_body {
+            let mut body_out = String::new();
+            let mut local_declared = declared_names.clone();
+            self.codegen_tree_block(tree_stmts, &all_out_names, indent + 1, &mut body_out, tree_scope_instrs, inlined_ids, scope_index, &mut local_declared);
+            Some(body_out)
+        } else {
+            None
+        };
+
         // If we have multiple scope blocks (scope spans if/else), use CFG-based emission.
         // Otherwise fall back to flat emission (single block, no control flow structure needed).
-        let body_str_opt: Option<String> = if scope_block_set.len() > 1 {
-            if let Some(start_bid) = start_block {
-                let mut body_str = String::new();
-                let mut vis = std::collections::HashSet::new();
-                self.emit_scope_body_cfg_walk(
-                    start_bid, &scope_block_set, &scope_instr_set, &intra_instr_ids,
-                    &skip_instr_set, inlined_ids, &all_out_names, scope_id,
-                    indent + 1, &mut vis, &mut body_str,
-                );
-                Some(body_str)
+        let body_str_opt: Option<String> = tree_body_str.or_else(|| {
+            if scope_block_set.len() > 1 {
+                if let Some(start_bid) = start_block {
+                    let mut body_str = String::new();
+                    let mut vis = std::collections::HashSet::new();
+                    self.emit_scope_body_cfg_walk(
+                        start_bid, &scope_block_set, &scope_instr_set, &intra_instr_ids,
+                        &skip_instr_set, inlined_ids, &all_out_names, scope_id,
+                        indent + 1, &mut vis, &mut body_str,
+                    );
+                    Some(body_str)
+                } else {
+                    None  // couldn't find start block, fall back to flat
+                }
             } else {
-                None  // couldn't find start block, fall back to flat
+                None  // single block scope, flat emission is correct
             }
-        } else {
-            None  // single block scope, flat emission is correct
-        };
+        });
 
         // Build body lines (flat fallback for single-block scopes).
         // Instructions after the last scope-output store should be emitted AFTER
@@ -2284,7 +2340,9 @@ impl<'a> Codegen<'a> {
                 }
             }
             for cache_var in &output_cache_vars {
-                let _ = writeln!(out, "{pad}let {cache_var};");
+                if !declared_names.contains(cache_var) {
+                    let _ = writeln!(out, "{pad}let {cache_var};");
+                }
             }
             let cond_parts: Vec<String> = hoisted_dep_info.iter().zip(&dep_slot_list)
                 .map(|((_, dep_str), &slot)| {
@@ -2322,7 +2380,11 @@ impl<'a> Codegen<'a> {
             for (output, cache_var) in analysis.outputs.iter().zip(&output_cache_vars) {
                 if !output.is_named_var {
                     if let Some(ref name) = output.out_name {
-                        let _ = writeln!(out, "{pad}{} {name} = {cache_var};", output.out_kw);
+                        if output.out_kw.is_empty() {
+                            let _ = writeln!(out, "{pad}{name} = {cache_var};");
+                        } else {
+                            let _ = writeln!(out, "{pad}{} {name} = {cache_var};", output.out_kw);
+                        }
                     }
                 }
             }
@@ -2334,7 +2396,9 @@ impl<'a> Codegen<'a> {
             }
         } else {
             for cache_var in &output_cache_vars {
-                let _ = writeln!(out, "{pad}let {cache_var};");
+                if !declared_names.contains(cache_var) {
+                    let _ = writeln!(out, "{pad}let {cache_var};");
+                }
             }
             let _ = writeln!(out, "{pad}if ($[{sentinel_slot}] === Symbol.for(\"react.memo_cache_sentinel\")) {{");
             if let Some(ref body_str) = body_str_opt {
@@ -2364,7 +2428,11 @@ impl<'a> Codegen<'a> {
                 if !output.is_named_var {
                     if let Some(ref name) = output.out_name {
                         if name != cache_var {
-                            let _ = writeln!(out, "{pad}{} {name} = {cache_var};", output.out_kw);
+                            if output.out_kw.is_empty() {
+                                let _ = writeln!(out, "{pad}{name} = {cache_var};");
+                            } else {
+                                let _ = writeln!(out, "{pad}{} {name} = {cache_var};", output.out_kw);
+                            }
                         }
                     }
                 }
@@ -5487,24 +5555,87 @@ impl<'a> Codegen<'a> {
     /// `scope_out_names` is the set of variable names that are scope outputs
     /// (should be assigned without `const`/`let` declaration prefix).
     /// `indent` is the indentation level (1 = 2 spaces per level).
+    #[allow(clippy::too_many_arguments)]
     fn codegen_tree_block(
         &mut self,
         block: &[crate::hir::hir::ReactiveStatement],
         scope_out_names: &[String],
         indent: usize,
         out: &mut String,
+        scope_instrs: &std::collections::HashMap<ScopeId, Vec<Instruction>>,
+        inlined_ids: &std::collections::HashSet<u32>,
+        scope_index: &mut usize,
+        declared_names: &mut std::collections::HashSet<String>,
     ) {
-        use crate::hir::hir::{ReactiveStatement, ReactiveTerminal};
+        use crate::hir::hir::{ReactiveStatement, ReactiveValue};
 
         let pad = "  ".repeat(indent);
+
+        // Track instruction IDs consumed by scope emission so they aren't re-emitted
+        // as siblings. The tree builder places some scope output instructions (StoreLocal)
+        // outside the Scope node, but emit_scope_block_inner already handles them via skip_idx.
+        let mut consumed_instr_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
+        // Pre-compute for-init instruction IDs: if this block contains a Terminal(For),
+        // collect the trailing DeclareLocal/StoreLocal instruction IDs from init_bid so they
+        // are suppressed from regular statement emission (they'll be emitted in the for-init).
+        let for_init_ids: std::collections::HashSet<u32> = {
+            let mut ids = std::collections::HashSet::new();
+            for stmt in block {
+                if let ReactiveStatement::Terminal(term_stmt) = stmt {
+                    if let crate::hir::hir::ReactiveTerminal::For { init_bid, .. } = &term_stmt.terminal {
+                        if let Some(init_block) = self.hir.body.blocks.get(init_bid) {
+                            for instr in init_block.instructions.iter().rev() {
+                                match &instr.value {
+                                    InstructionValue::DeclareLocal { .. } | InstructionValue::StoreLocal { .. } => {
+                                        ids.insert(instr.lvalue.identifier.0);
+                                    }
+                                    _ => break,
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            ids
+        };
 
         for stmt in block {
             match stmt {
                 ReactiveStatement::Instruction(reactive_instr) => {
+                    // Skip instructions already consumed by a scope in this block.
+                    let lv_id = reactive_instr.lvalue.as_ref().map(|p| p.identifier.0).unwrap_or(u32::MAX);
+                    if consumed_instr_ids.contains(&lv_id) {
+                        continue;
+                    }
+                    // Skip instructions that are inlined at use sites (no standalone emission needed).
+                    if inlined_ids.contains(&lv_id) {
+                        continue;
+                    }
+                    // Skip for-init instructions — they will be emitted in the for(...) header.
+                    if for_init_ids.contains(&lv_id) {
+                        continue;
+                    }
+                    // Skip promoted-temp lvalues (names starting with "$t" or "$T") —
+                    // these are SSA temporaries always inlined at use sites, not standalone stmts.
+                    let lv_name_opt = reactive_instr.lvalue.as_ref()
+                        .and_then(|p| self.env.get_identifier(p.identifier))
+                        .and_then(|i| i.name.as_ref())
+                        .map(|n| n.value().to_string());
+                    if lv_name_opt.as_deref().map(|n| n.starts_with("$t") || n.starts_with("$T")).unwrap_or(false) {
+                        continue;
+                    }
+                    // Track DeclareLocal names for double-declaration prevention.
+                    if let ReactiveValue::Instruction(InstructionValue::DeclareLocal { lvalue, .. }) = &reactive_instr.value {
+                        if let Some(name) = self.env.get_identifier(lvalue.place.identifier)
+                            .and_then(|i| i.name.as_ref())
+                            .map(|n| n.value().to_string())
+                        {
+                            declared_names.insert(name);
+                        }
+                    }
                     // Look up the flat HIR instruction by its lvalue identifier.
-                    // The reactive instruction stores the lvalue Place and value,
-                    // but emit_stmt works on the original flat Instruction.
-                    let flat_instr = self.instr_map.get(&reactive_instr.lvalue.as_ref().map(|p| p.identifier.0).unwrap_or(u32::MAX)).cloned();
+                    let flat_instr = self.instr_map.get(&lv_id).cloned();
                     if let Some(instr) = flat_instr {
                         if let Some(s) = self.emit_stmt(&instr.clone(), None, scope_out_names) {
                             for line in s.lines() {
@@ -5515,24 +5646,46 @@ impl<'a> Codegen<'a> {
                 }
                 ReactiveStatement::PrunedScope(pruned) => {
                     // Pruned scopes don't emit cache logic — just their instructions.
-                    self.codegen_tree_block(&pruned.instructions, scope_out_names, indent, out);
+                    self.codegen_tree_block(&pruned.instructions, scope_out_names, indent, out, scope_instrs, inlined_ids, scope_index, declared_names);
                 }
                 ReactiveStatement::Scope(scope_block) => {
-                    self.codegen_tree_scope(scope_block, indent, out);
+                    let sid = scope_block.scope.id;
+                    let instrs_list = scope_instrs.get(&sid).cloned().unwrap_or_default();
+                    // Mark all flat instructions consumed by this scope so siblings don't re-emit them.
+                    for i in &instrs_list {
+                        consumed_instr_ids.insert(i.lvalue.identifier.0);
+                    }
+                    let instr_refs: Vec<&Instruction> = instrs_list.iter().collect();
+                    let tree_body = Some((scope_block.instructions.as_slice(), scope_instrs));
+                    self.emit_scope_block_inner(
+                        &sid,
+                        &instr_refs,
+                        indent,
+                        scope_index,
+                        out,
+                        inlined_ids,
+                        declared_names,
+                        tree_body,
+                    );
                 }
                 ReactiveStatement::Terminal(term_stmt) => {
-                    self.codegen_tree_terminal(&term_stmt.terminal, scope_out_names, indent, out);
+                    self.codegen_tree_terminal(&term_stmt.terminal, scope_out_names, indent, out, scope_instrs, inlined_ids, scope_index, declared_names);
                 }
             }
         }
     }
 
     /// Emit a reactive scope block with memoization if/else.
+    #[allow(clippy::too_many_arguments)]
     fn codegen_tree_scope(
         &mut self,
         scope_block: &crate::hir::hir::ReactiveScopeBlock,
         indent: usize,
         out: &mut String,
+        scope_instrs: &std::collections::HashMap<ScopeId, Vec<Instruction>>,
+        inlined_ids: &std::collections::HashSet<u32>,
+        scope_index: &mut usize,
+        declared_names: &mut std::collections::HashSet<String>,
     ) {
         let pad = "  ".repeat(indent);
         let body_pad = "  ".repeat(indent + 1);
@@ -5548,7 +5701,10 @@ impl<'a> Codegen<'a> {
             let name = self.ident_name(*id);
             if !name.starts_with("$t") {
                 scope_out_names.push(name.clone());
-                let _ = std::fmt::write(out, format_args!("{pad}let {name};\n"));
+                // Skip `let name;` if already declared by outer DeclareLocal.
+                if !declared_names.contains(&name) {
+                    let _ = std::fmt::write(out, format_args!("{pad}let {name};\n"));
+                }
             }
         }
 
@@ -5559,7 +5715,10 @@ impl<'a> Codegen<'a> {
             let name = self.ident_name(*id);
             if !name.starts_with("$t") && !scope_out_names.contains(&name) {
                 scope_out_names.push(name.clone());
-                let _ = std::fmt::write(out, format_args!("{pad}let {name};\n"));
+                // Skip `let name;` if already declared by outer DeclareLocal.
+                if !declared_names.contains(&name) {
+                    let _ = std::fmt::write(out, format_args!("{pad}let {name};\n"));
+                }
             }
         }
 
@@ -5583,7 +5742,7 @@ impl<'a> Codegen<'a> {
             format!("$[{}] === Symbol.for(\"react.memo_cache_sentinel\")", out_slots[0])
         } else {
             // No slots at all — no memoization condition; just emit body.
-            self.codegen_tree_block(&scope_block.instructions, &scope_out_names, indent, out);
+            self.codegen_tree_block(&scope_block.instructions, &scope_out_names, indent, out, scope_instrs, inlined_ids, scope_index, declared_names);
             return;
         };
 
@@ -5592,7 +5751,7 @@ impl<'a> Codegen<'a> {
 
         // Emit scope body.
         let mut body_str = String::new();
-        self.codegen_tree_block(&scope_block.instructions, &scope_out_names, indent + 1, &mut body_str);
+        self.codegen_tree_block(&scope_block.instructions, &scope_out_names, indent + 1, &mut body_str, scope_instrs, inlined_ids, scope_index, declared_names);
         out.push_str(&body_str);
 
         // Emit cache stores for deps.
@@ -5615,20 +5774,38 @@ impl<'a> Codegen<'a> {
     }
 
     /// Emit a reactive terminal (if, switch, loops, return, etc.).
+    #[allow(clippy::too_many_arguments)]
     fn codegen_tree_terminal(
         &mut self,
         terminal: &crate::hir::hir::ReactiveTerminal,
         scope_out_names: &[String],
         indent: usize,
         out: &mut String,
+        scope_instrs: &std::collections::HashMap<ScopeId, Vec<Instruction>>,
+        inlined_ids: &std::collections::HashSet<u32>,
+        scope_index: &mut usize,
+        declared_names: &mut std::collections::HashSet<String>,
     ) {
         use crate::hir::hir::ReactiveTerminal;
         let pad = "  ".repeat(indent);
 
         match terminal {
             ReactiveTerminal::Return { value, .. } => {
-                let expr = self.expr(value);
-                let _ = std::fmt::write(out, format_args!("{pad}return {expr};\n"));
+                let expr = if let Some(replacement) = self.terminal_replacement.get(&value.identifier.0) {
+                    replacement.clone()
+                } else {
+                    self.expr(value)
+                };
+                if expr == "undefined" {
+                    // Suppress `return undefined;` at function body level (indent==1) — it's the
+                    // implicit function end. Inside a nested block (indent>1) emit bare `return;`
+                    // so early exits are preserved (e.g., `if (cond) { return; }`).
+                    if indent > 1 {
+                        let _ = std::fmt::write(out, format_args!("{pad}return;\n"));
+                    }
+                } else {
+                    let _ = std::fmt::write(out, format_args!("{pad}return {expr};\n"));
+                }
             }
             ReactiveTerminal::Throw { value, .. } => {
                 let expr = self.expr(value);
@@ -5643,45 +5820,110 @@ impl<'a> Codegen<'a> {
             ReactiveTerminal::If { test, consequent, alternate, .. } => {
                 let test_expr = self.expr(test);
                 let _ = std::fmt::write(out, format_args!("{pad}if ({test_expr}) {{\n"));
-                self.codegen_tree_block(consequent, scope_out_names, indent + 1, out);
+                self.codegen_tree_block(consequent, scope_out_names, indent + 1, out, scope_instrs, inlined_ids, scope_index, declared_names);
                 if let Some(alt) = alternate {
-                    let _ = std::fmt::write(out, format_args!("{pad}}} else {{\n"));
-                    self.codegen_tree_block(alt, scope_out_names, indent + 1, out);
+                    if !alt.is_empty() {
+                        let _ = std::fmt::write(out, format_args!("{pad}}} else {{\n"));
+                        self.codegen_tree_block(alt, scope_out_names, indent + 1, out, scope_instrs, inlined_ids, scope_index, declared_names);
+                    }
                 }
                 let _ = std::fmt::write(out, format_args!("{pad}}}\n"));
             }
-            ReactiveTerminal::While { test, loop_, .. } => {
-                // test is a ReactiveValue — emit via reactive value expression
-                let test_expr = self.reactive_value_expr(test);
+            ReactiveTerminal::While { test, loop_, test_bid, .. } => {
+                // Use do_while_test_expr to correctly resolve compound tests (e.g. x && y).
+                let test_expr = {
+                    let expr = self.do_while_test_expr(*test_bid);
+                    if expr == "true" || expr.is_empty() {
+                        self.reactive_value_expr(test) // fallback
+                    } else {
+                        expr
+                    }
+                };
                 let _ = std::fmt::write(out, format_args!("{pad}while ({test_expr}) {{\n"));
-                self.codegen_tree_block(loop_, scope_out_names, indent + 1, out);
+                let mut loop_out = String::new();
+                self.codegen_tree_block(loop_, scope_out_names, indent + 1, &mut loop_out, scope_instrs, inlined_ids, scope_index, declared_names);
+                out.push_str(&strip_trailing_continue(&loop_out, indent + 1));
                 let _ = std::fmt::write(out, format_args!("{pad}}}\n"));
             }
-            ReactiveTerminal::DoWhile { loop_, test, .. } => {
+            ReactiveTerminal::DoWhile { loop_, test, test_bid, .. } => {
                 let _ = std::fmt::write(out, format_args!("{pad}do {{\n"));
-                self.codegen_tree_block(loop_, scope_out_names, indent + 1, out);
-                let test_expr = self.reactive_value_expr(test);
+                let mut loop_out = String::new();
+                self.codegen_tree_block(loop_, scope_out_names, indent + 1, &mut loop_out, scope_instrs, inlined_ids, scope_index, declared_names);
+                out.push_str(&strip_trailing_continue(&loop_out, indent + 1));
+                // Use do_while_test_expr to correctly resolve compound tests (e.g. x && y).
+                let test_expr = {
+                    let expr = self.do_while_test_expr(*test_bid);
+                    if expr == "true" || expr.is_empty() {
+                        self.reactive_value_expr(test) // fallback for simple tests
+                    } else {
+                        expr
+                    }
+                };
                 let _ = std::fmt::write(out, format_args!("{pad}}} while ({test_expr});\n"));
             }
-            ReactiveTerminal::For { init, test, update, loop_, .. } => {
-                let init_expr = self.reactive_value_expr(init);
-                let test_expr = self.reactive_value_expr(test);
-                let update_expr = update.as_ref().map(|u| self.reactive_value_expr(u)).unwrap_or_default();
+            ReactiveTerminal::For { loop_, init_bid, test_bid, update_bid, .. } => {
+                // Collect trailing DeclareLocal/StoreLocal from the init block as the for-init
+                // expression (same approach as flat codegen). These instructions were suppressed
+                // from regular emission in codegen_tree_block via for_init_ids.
+                let init_expr = self.hir.body.blocks.get(init_bid).map(|b| {
+                    // Walk backwards from the end of init_bid to collect trailing
+                    // DeclareLocal/StoreLocal instructions (same as flat codegen marking).
+                    let mut rev_parts: Vec<String> = Vec::new();
+                    for instr in b.instructions.iter().rev() {
+                        match &instr.value {
+                            InstructionValue::DeclareLocal { .. } | InstructionValue::StoreLocal { .. } => {
+                                if let Some(s) = self.emit_stmt(instr, None, scope_out_names) {
+                                    rev_parts.push(s.trim_end_matches(';').to_string());
+                                }
+                            }
+                            _ => break,
+                        }
+                    }
+                    rev_parts.reverse();
+                    rev_parts.join(", ")
+                }).unwrap_or_default();
+                let test_expr = self.hir.body.blocks.get(test_bid).and_then(|b| {
+                    if let crate::hir::hir::Terminal::Branch { test, .. } = &b.terminal {
+                        Some(self.expr(test))
+                    } else { None }
+                }).unwrap_or_else(|| "true".to_string());
+                let update_expr = update_bid.and_then(|ubid| {
+                    self.hir.body.blocks.get(&ubid).and_then(|b| {
+                        let mut last = None;
+                        for instr in &b.instructions {
+                            match &instr.value {
+                                InstructionValue::Primitive { value, .. } => { last = Some(primitive_expr(value)); }
+                                InstructionValue::LoadLocal { place, .. } => { last = Some(self.expr(place)); }
+                                _ => {
+                                    if let Some(s) = self.emit_stmt(instr, None, scope_out_names) {
+                                        last = Some(s.trim_end_matches(';').to_string());
+                                    }
+                                }
+                            }
+                        }
+                        last
+                    })
+                }).unwrap_or_default();
                 let _ = std::fmt::write(out, format_args!("{pad}for ({init_expr}; {test_expr}; {update_expr}) {{\n"));
-                self.codegen_tree_block(loop_, scope_out_names, indent + 1, out);
+                let mut loop_out = String::new();
+                self.codegen_tree_block(loop_, scope_out_names, indent + 1, &mut loop_out, scope_instrs, inlined_ids, scope_index, declared_names);
+                out.push_str(&strip_trailing_continue(&loop_out, indent + 1));
                 let _ = std::fmt::write(out, format_args!("{pad}}}\n"));
             }
-            ReactiveTerminal::ForOf { init, test, loop_, .. } => {
-                let init_expr = self.reactive_value_expr(init);
-                let test_expr = self.reactive_value_expr(test);
-                let _ = std::fmt::write(out, format_args!("{pad}for ({init_expr} of {test_expr}) {{\n"));
-                self.codegen_tree_block(loop_, scope_out_names, indent + 1, out);
+            ReactiveTerminal::ForOf { loop_var, iterable, loop_, .. } => {
+                let iterable_expr = self.reactive_value_expr(iterable);
+                let _ = std::fmt::write(out, format_args!("{pad}for (const {loop_var} of {iterable_expr}) {{\n"));
+                let mut loop_out = String::new();
+                self.codegen_tree_block(loop_, scope_out_names, indent + 1, &mut loop_out, scope_instrs, inlined_ids, scope_index, declared_names);
+                out.push_str(&strip_trailing_continue(&loop_out, indent + 1));
                 let _ = std::fmt::write(out, format_args!("{pad}}}\n"));
             }
-            ReactiveTerminal::ForIn { init, loop_, .. } => {
-                let init_expr = self.reactive_value_expr(init);
-                let _ = std::fmt::write(out, format_args!("{pad}for ({init_expr} in ???) {{\n"));
-                self.codegen_tree_block(loop_, scope_out_names, indent + 1, out);
+            ReactiveTerminal::ForIn { loop_var, object, loop_, .. } => {
+                let object_expr = self.reactive_value_expr(object);
+                let _ = std::fmt::write(out, format_args!("{pad}for (const {loop_var} in {object_expr}) {{\n"));
+                let mut loop_out = String::new();
+                self.codegen_tree_block(loop_, scope_out_names, indent + 1, &mut loop_out, scope_instrs, inlined_ids, scope_index, declared_names);
+                out.push_str(&strip_trailing_continue(&loop_out, indent + 1));
                 let _ = std::fmt::write(out, format_args!("{pad}}}\n"));
             }
             ReactiveTerminal::Switch { test, cases, .. } => {
@@ -5690,29 +5932,30 @@ impl<'a> Codegen<'a> {
                 for case in cases {
                     if let Some(case_test) = &case.test {
                         let case_expr = self.expr(case_test);
-                        let _ = std::fmt::write(out, format_args!("{pad}  case {case_expr}:\n"));
+                        let _ = std::fmt::write(out, format_args!("{pad}  case {case_expr}: {{\n"));
                     } else {
-                        let _ = std::fmt::write(out, format_args!("{pad}  default:\n"));
+                        let _ = std::fmt::write(out, format_args!("{pad}  default: {{\n"));
                     }
                     if let Some(block) = &case.block {
-                        self.codegen_tree_block(block, scope_out_names, indent + 2, out);
+                        self.codegen_tree_block(block, scope_out_names, indent + 2, out, scope_instrs, inlined_ids, scope_index, declared_names);
                     }
+                    let _ = std::fmt::write(out, format_args!("{pad}  }}\n"));
                 }
                 let _ = std::fmt::write(out, format_args!("{pad}}}\n"));
             }
             ReactiveTerminal::Label { block, .. } => {
-                self.codegen_tree_block(block, scope_out_names, indent, out);
+                self.codegen_tree_block(block, scope_out_names, indent, out, scope_instrs, inlined_ids, scope_index, declared_names);
             }
             ReactiveTerminal::Try { block, handler_binding, handler, .. } => {
                 let _ = std::fmt::write(out, format_args!("{pad}try {{\n"));
-                self.codegen_tree_block(block, scope_out_names, indent + 1, out);
+                self.codegen_tree_block(block, scope_out_names, indent + 1, out, scope_instrs, inlined_ids, scope_index, declared_names);
                 if let Some(binding) = handler_binding {
                     let binding_name = self.ident_name(binding.identifier);
                     let _ = std::fmt::write(out, format_args!("{pad}}} catch ({binding_name}) {{\n"));
                 } else {
                     let _ = std::fmt::write(out, format_args!("{pad}}} catch (_e) {{\n"));
                 }
-                self.codegen_tree_block(handler, scope_out_names, indent + 1, out);
+                self.codegen_tree_block(handler, scope_out_names, indent + 1, out, scope_instrs, inlined_ids, scope_index, declared_names);
                 let _ = std::fmt::write(out, format_args!("{pad}}}\n"));
             }
         }
@@ -5723,13 +5966,19 @@ impl<'a> Codegen<'a> {
         use crate::hir::hir::ReactiveValue;
         match value {
             ReactiveValue::Instruction(instr_val) => {
-                // For simple cases: look up what produces this value.
-                // Since we can't easily re-emit InstructionValue as an expression here,
-                // we use inlined_exprs where possible, or fall back to the lvalue name.
-                // This is a simplification — the tree codegen will mainly be used
-                // for cases where the existing flat codegen already works.
-                let _ = instr_val;
-                String::new()
+                // Resolve instruction values to expressions. The primary cases are LoadLocal
+                // (used for loop test blocks) and PropertyLoad (e.g., `props.cond`).
+                // All temp lvalues should be resolvable via inlined_exprs.
+                match instr_val {
+                    InstructionValue::LoadLocal { place, .. } |
+                    InstructionValue::LoadContext { place, .. } => self.expr(place),
+                    InstructionValue::Primitive { value, .. } => primitive_expr(value),
+                    InstructionValue::PropertyLoad { object, property, .. } => {
+                        let obj = self.expr(object);
+                        format!("{obj}.{property}")
+                    }
+                    _ => String::new(),
+                }
             }
             ReactiveValue::Logical(logical) => {
                 let left = self.reactive_value_expr(&logical.left);
@@ -5747,7 +5996,9 @@ impl<'a> Codegen<'a> {
                 let alternate = self.reactive_value_expr(&ternary.alternate);
                 format!("{test} ? {consequent} : {alternate}")
             }
-            ReactiveValue::Sequence(_) | ReactiveValue::OptionalCall(_) => String::new(),
+            // Sequence: all intermediate instructions are transparent temps; yield the final value.
+            ReactiveValue::Sequence(seq) => self.reactive_value_expr(&seq.value),
+            ReactiveValue::OptionalCall(_) => String::new(),
         }
     }
 }
@@ -5755,6 +6006,22 @@ impl<'a> Codegen<'a> {
 // ---------------------------------------------------------------------------
 // Free helpers
 // ---------------------------------------------------------------------------
+
+/// Strip a trailing natural `continue;` from a loop body string.
+/// The last statement in a loop body is often `continue;` (the natural loop-back
+/// edge). This is semantically redundant and should not be emitted.
+fn strip_trailing_continue(body: &str, indent: usize) -> String {
+    let pad = "  ".repeat(indent);
+    let continue_line = format!("{pad}continue;\n");
+    // Find the last non-empty line and check if it's `continue;`.
+    if body.ends_with(&continue_line) {
+        // Strip the trailing continue line.
+        let trimmed = &body[..body.len() - continue_line.len()];
+        trimmed.to_string()
+    } else {
+        body.to_string()
+    }
+}
 
 fn binary_op_str(op: &BinaryOperator) -> &'static str {
     match op {

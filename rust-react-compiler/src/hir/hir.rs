@@ -1417,8 +1417,8 @@ pub enum ReactiveTerminal {
         id: InstructionId,
         loc: SourceLocation,
     },
-    DoWhile { loop_: ReactiveBlock, test: Box<ReactiveValue>, id: InstructionId, loc: SourceLocation },
-    While { test: Box<ReactiveValue>, loop_: ReactiveBlock, id: InstructionId, loc: SourceLocation },
+    DoWhile { loop_: ReactiveBlock, test: Box<ReactiveValue>, id: InstructionId, loc: SourceLocation, test_bid: BlockId },
+    While { test: Box<ReactiveValue>, loop_: ReactiveBlock, id: InstructionId, loc: SourceLocation, test_bid: BlockId },
     For {
         init: Box<ReactiveValue>,
         test: Box<ReactiveValue>,
@@ -1426,16 +1426,22 @@ pub enum ReactiveTerminal {
         loop_: ReactiveBlock,
         id: InstructionId,
         loc: SourceLocation,
+        /// Original HIR block IDs for init/test/update — used by tree codegen
+        /// to emit the for-loop header using the same approach as flat codegen.
+        init_bid: BlockId,
+        test_bid: BlockId,
+        update_bid: Option<BlockId>,
     },
     ForOf {
-        init: Box<ReactiveValue>,
-        test: Box<ReactiveValue>,
+        loop_var: String,
+        iterable: Box<ReactiveValue>,
         loop_: ReactiveBlock,
         id: InstructionId,
         loc: SourceLocation,
     },
     ForIn {
-        init: Box<ReactiveValue>,
+        loop_var: String,
+        object: Box<ReactiveValue>,
         loop_: ReactiveBlock,
         id: InstructionId,
         loc: SourceLocation,

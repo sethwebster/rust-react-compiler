@@ -186,13 +186,12 @@ fn rename_terminal(
             }
             rename_block(loop_, env, seen, counter, jsx_counter);
         }
-        ReactiveTerminal::ForOf { init, test, loop_, .. } => {
-            rename_reactive_value(init, env, seen, counter, jsx_counter);
-            rename_reactive_value(test, env, seen, counter, jsx_counter);
+        ReactiveTerminal::ForOf { iterable, loop_, .. } => {
+            rename_reactive_value(iterable, env, seen, counter, jsx_counter);
             rename_block(loop_, env, seen, counter, jsx_counter);
         }
-        ReactiveTerminal::ForIn { init, loop_, .. } => {
-            rename_reactive_value(init, env, seen, counter, jsx_counter);
+        ReactiveTerminal::ForIn { object, loop_, .. } => {
+            rename_reactive_value(object, env, seen, counter, jsx_counter);
             rename_block(loop_, env, seen, counter, jsx_counter);
         }
         ReactiveTerminal::Label { block, .. } => {
