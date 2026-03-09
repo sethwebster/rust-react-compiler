@@ -82,6 +82,17 @@ fn normalize_js(js: &str) -> String {
             i += 2;
             continue;
         }
+        // Add spaces around bracket/brace characters so that `[{` and `}]`
+        // tokenize the same regardless of whether the formatter emits spaces.
+        // e.g. Babel: `[ { arg: 3 } ]`  vs oxc: `[{ arg: 3 }]` → both become `[ { arg: 3 } ]`.
+        if c == b'[' || c == b']' || c == b'{' || c == b'}' {
+            stripped.push(' ');
+            stripped.push(c as char);
+            stripped.push(' ');
+            prev = c;
+            i += 1;
+            continue;
+        }
         let adv = push_utf8_char(&mut stripped, bytes, i);
         prev = c;
         i += adv;

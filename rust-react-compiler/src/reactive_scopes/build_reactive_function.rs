@@ -11,6 +11,21 @@ use std::collections::{HashMap, HashSet};
 use crate::hir::environment::Environment;
 use crate::hir::hir::*;
 
+/// Returns true if every execution path through `block` ends in a terminating statement
+/// (Break, Continue, Return, or Throw). Used to detect dead-code fallthroughs: if both
+/// branches of an If always terminate, the fallthrough block is unreachable.
+fn block_always_terminates(block: &[ReactiveStatement]) -> bool {
+    match block.last() {
+        Some(ReactiveStatement::Terminal(t)) => matches!(&t.terminal,
+            ReactiveTerminal::Break { .. }
+            | ReactiveTerminal::Continue { .. }
+            | ReactiveTerminal::Return { .. }
+            | ReactiveTerminal::Throw { .. }
+        ),
+        _ => false,
+    }
+}
+
 pub fn run(hir: &mut HIRFunction, env: &Environment) {
     hir.reactive_block = build(hir, env);
 }
@@ -32,11 +47,16 @@ struct Context<'a> {
     /// Blocks that are "scheduled" as fallthroughs — should not be visited
     /// until the current terminal's children are done.
     scheduled: HashSet<BlockId>,
-    /// Blocks that require an explicit `break` to reach (loop/label fallthroughs).
+    /// Blocks that require an explicit `break` to reach (loop/switch fallthroughs).
     /// A `goto fallthrough (Break)` to a break_target emits a JS `break;`.
     /// A `goto join (Break)` to a non-break-target scheduled block is a natural
     /// if/else fallthrough and is suppressed.
     break_targets: HashSet<BlockId>,
+    /// Fallthroughs of Label terminals. A `Goto(Break, target)` where target is
+    /// in label_exits is an explicit `break label;` ONLY when `break_targets` is
+    /// non-empty (i.e. we're inside a loop/switch). Otherwise it is a natural exit
+    /// from the label body and should be suppressed (no break emitted).
+    label_exits: HashSet<BlockId>,
     /// Scope lookup: instruction ID → scope that starts/ends here.
     scope_starts: HashMap<InstructionId, ScopeId>,
     scope_ends: HashMap<InstructionId, ScopeId>,
@@ -56,6 +76,7 @@ impl<'a> Context<'a> {
             emitted: HashSet::new(),
             scheduled: HashSet::new(),
             break_targets: HashSet::new(),
+            label_exits: HashSet::new(),
             scope_starts,
             scope_ends,
         }
@@ -172,12 +193,11 @@ impl<'a> Context<'a> {
             Terminal::Goto { block: next, variant, .. } => {
                 match variant {
                     GotoVariant::Break => {
-                        if !self.break_targets.contains(next) {
-                            // Natural fallthrough to an if/else merge block (or constant-folded branch).
-                            // No explicit break needed — continue to the target block.
-                            Some(*next)
-                        } else {
-                            // Break out of a loop or labeled block.
+                        let is_loop_break = self.break_targets.contains(next);
+                        let is_label_exit = self.label_exits.contains(next);
+                        if is_loop_break || (is_label_exit && !self.break_targets.is_empty()) {
+                            // Break out of a loop/switch, or explicit `break label;` from inside
+                            // a loop/switch that targets a label exit.
                             Self::push_stmt_or_scope(
                                 scope_body,
                                 out,
@@ -192,6 +212,16 @@ impl<'a> Context<'a> {
                                 }),
                             );
                             None
+                        } else {
+                            // Natural fallthrough: if/else merge block or natural label exit
+                            // (when not inside any loop/switch).
+                            // For label exits: suppress — the outer Label handler will visit
+                            // the fallthrough block as its natural continuation.
+                            if is_label_exit {
+                                None
+                            } else {
+                                Some(*next)
+                            }
                         }
                     }
                     GotoVariant::Continue => {
@@ -230,6 +260,10 @@ impl<'a> Context<'a> {
                 };
 
                 self.scheduled.remove(fallthrough);
+                // If ALL branches always terminate (Break/Continue/Return/Throw), the
+                // fallthrough is dead code — don't visit it to avoid spurious break stmts.
+                let all_terminate = block_always_terminates(&cons)
+                    && alt.as_ref().map_or(false, |a| block_always_terminates(a));
                 Self::push_stmt_or_scope(
                     scope_body,
                     out,
@@ -244,7 +278,14 @@ impl<'a> Context<'a> {
                         label: Some(ReactiveLabel { id: *fallthrough, implicit: false }),
                     }),
                 );
-                Some(*fallthrough)
+                if all_terminate {
+                    // Fallthrough is dead code — mark as emitted so other chains
+                    // (e.g. while fallthrough) don't visit and generate spurious breaks.
+                    self.emitted.insert(*fallthrough);
+                    None
+                } else {
+                    Some(*fallthrough)
+                }
             }
 
             Terminal::While { test, loop_, fallthrough, id, loc, .. } => {
@@ -418,6 +459,7 @@ impl<'a> Context<'a> {
                             loop_: body,
                             id: *id,
                             loc: loc.clone(),
+                            iterable_bid: *init,
                         },
                         label: Some(ReactiveLabel { id: *fallthrough, implicit: false }),
                     }),
@@ -487,6 +529,7 @@ impl<'a> Context<'a> {
                             loop_: body,
                             id: *id,
                             loc: loc.clone(),
+                            object_bid: *init,
                         },
                         label: Some(ReactiveLabel { id: *fallthrough, implicit: false }),
                     }),
@@ -590,6 +633,37 @@ impl<'a> Context<'a> {
                     scope: scope.clone(),
                     instructions: body,
                 }));
+                Some(*fallthrough)
+            }
+
+            Terminal::Label { block: body_bid, fallthrough, id, loc, .. } => {
+                self.scheduled.insert(*fallthrough);
+                // Track label fallthrough in label_exits (NOT break_targets). This allows
+                // Goto(Break, label_fallthrough) inside a loop to emit `break label;`, while
+                // Goto(Break, label_fallthrough) outside any loop is treated as a natural exit.
+                self.label_exits.insert(*fallthrough);
+                // Mark as emitted to prevent inner blocks from visiting the fallthrough.
+                self.emitted.insert(*fallthrough);
+
+                let body = self.hir.body.blocks.get(body_bid)
+                    .map(|b| self.traverse_block(b)).unwrap_or_default();
+
+                self.scheduled.remove(fallthrough);
+                self.label_exits.remove(fallthrough);
+                // Remove from emitted so the outer level can visit the fallthrough.
+                self.emitted.remove(fallthrough);
+                Self::push_stmt_or_scope(
+                    scope_body,
+                    out,
+                    ReactiveStatement::Terminal(ReactiveTerminalStatement {
+                        terminal: ReactiveTerminal::Label {
+                            block: body,
+                            id: *id,
+                            loc: loc.clone(),
+                        },
+                        label: Some(ReactiveLabel { id: *fallthrough, implicit: false }),
+                    }),
+                );
                 Some(*fallthrough)
             }
 

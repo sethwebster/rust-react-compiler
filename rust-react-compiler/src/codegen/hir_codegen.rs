@@ -5669,7 +5669,31 @@ impl<'a> Codegen<'a> {
                     );
                 }
                 ReactiveStatement::Terminal(term_stmt) => {
-                    self.codegen_tree_terminal(&term_stmt.terminal, scope_out_names, indent, out, scope_instrs, inlined_ids, scope_index, declared_names);
+                    // For Switch terminals with a label (bb0: switch ...), emit labeled switch.
+                    // For Label terminals wrapping a labeled block, prepend label to first line.
+                    let terminal_label_opt: Option<String> = term_stmt.label.as_ref()
+                        .and_then(|l| self.switch_fallthrough_labels.get(&l.id).cloned())
+                        .filter(|_| matches!(&term_stmt.terminal,
+                            crate::hir::hir::ReactiveTerminal::Switch { .. }
+                            | crate::hir::hir::ReactiveTerminal::Label { .. }
+                        ));
+                    if let Some(label) = terminal_label_opt {
+                        if let crate::hir::hir::ReactiveTerminal::Label { block, .. } = &term_stmt.terminal {
+                            // Label terminal: emit the inner block, prepend label to the first line.
+                            let mut temp = String::new();
+                            self.codegen_tree_block(block, scope_out_names, indent, &mut temp, scope_instrs, inlined_ids, scope_index, declared_names);
+                            let labeled = temp.replacen(&pad, &format!("{pad}{label}: "), 1);
+                            out.push_str(&labeled);
+                        } else {
+                            // Switch terminal: emit the switch, prepend label to the switch line.
+                            let mut temp = String::new();
+                            self.codegen_tree_terminal(&term_stmt.terminal, scope_out_names, indent, &mut temp, scope_instrs, inlined_ids, scope_index, declared_names);
+                            let labeled = temp.replacen(&pad, &format!("{pad}{label}: "), 1);
+                            out.push_str(&labeled);
+                        }
+                    } else {
+                        self.codegen_tree_terminal(&term_stmt.terminal, scope_out_names, indent, out, scope_instrs, inlined_ids, scope_index, declared_names);
+                    }
                 }
             }
         }
@@ -5811,8 +5835,14 @@ impl<'a> Codegen<'a> {
                 let expr = self.expr(value);
                 let _ = std::fmt::write(out, format_args!("{pad}throw {expr};\n"));
             }
-            ReactiveTerminal::Break { .. } => {
-                let _ = std::fmt::write(out, format_args!("{pad}break;\n"));
+            ReactiveTerminal::Break { target, .. } => {
+                // target is the fallthrough BlockId; if it's in switch_fallthrough_labels,
+                // emit a labeled break (break bb0;) regardless of target_kind.
+                if let Some(label) = self.switch_fallthrough_labels.get(target).cloned() {
+                    let _ = std::fmt::write(out, format_args!("{pad}break {label};\n"));
+                } else {
+                    let _ = std::fmt::write(out, format_args!("{pad}break;\n"));
+                }
             }
             ReactiveTerminal::Continue { .. } => {
                 let _ = std::fmt::write(out, format_args!("{pad}continue;\n"));
@@ -5910,16 +5940,21 @@ impl<'a> Codegen<'a> {
                 out.push_str(&strip_trailing_continue(&loop_out, indent + 1));
                 let _ = std::fmt::write(out, format_args!("{pad}}}\n"));
             }
-            ReactiveTerminal::ForOf { loop_var, iterable, loop_, .. } => {
-                let iterable_expr = self.reactive_value_expr(iterable);
+            ReactiveTerminal::ForOf { loop_var, iterable, loop_, iterable_bid, .. } => {
+                // Use flat-codegen local_exprs approach to resolve iterable (handles named
+                // promoted temps like $t21 = PropertyLoad that aren't in inlined_exprs).
+                let iterable_expr = self.forof_init_expr(*iterable_bid)
+                    .unwrap_or_else(|| self.reactive_value_expr(iterable));
                 let _ = std::fmt::write(out, format_args!("{pad}for (const {loop_var} of {iterable_expr}) {{\n"));
                 let mut loop_out = String::new();
                 self.codegen_tree_block(loop_, scope_out_names, indent + 1, &mut loop_out, scope_instrs, inlined_ids, scope_index, declared_names);
                 out.push_str(&strip_trailing_continue(&loop_out, indent + 1));
                 let _ = std::fmt::write(out, format_args!("{pad}}}\n"));
             }
-            ReactiveTerminal::ForIn { loop_var, object, loop_, .. } => {
-                let object_expr = self.reactive_value_expr(object);
+            ReactiveTerminal::ForIn { loop_var, object, loop_, object_bid, .. } => {
+                // Use flat-codegen local_exprs approach for ForIn object.
+                let object_expr = self.forof_init_expr(*object_bid)
+                    .unwrap_or_else(|| self.reactive_value_expr(object));
                 let _ = std::fmt::write(out, format_args!("{pad}for (const {loop_var} in {object_expr}) {{\n"));
                 let mut loop_out = String::new();
                 self.codegen_tree_block(loop_, scope_out_names, indent + 1, &mut loop_out, scope_instrs, inlined_ids, scope_index, declared_names);
@@ -5962,6 +5997,43 @@ impl<'a> Codegen<'a> {
     }
 
     /// Emit a ReactiveValue as an expression string (for loop conditions etc.).
+    /// Build the iterable/object expression for a ForOf/ForIn from its init block.
+    /// Uses the same local_exprs chain as the flat codegen, correctly resolving
+    /// named promoted temps (e.g. $t21 = PropertyLoad) that aren't in inlined_exprs.
+    fn forof_init_expr(&self, bid: crate::hir::hir::BlockId) -> Option<String> {
+        let block = self.hir.body.blocks.get(&bid)?;
+        let mut local_exprs: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+        let mut result: Option<String> = None;
+        for instr in &block.instructions {
+            match &instr.value {
+                InstructionValue::LoadLocal { place, .. }
+                | InstructionValue::LoadContext { place, .. } => {
+                    let name = self.expr(place);
+                    local_exprs.insert(instr.lvalue.identifier.0, name);
+                }
+                InstructionValue::LoadGlobal { binding, .. } => {
+                    let name = self.binding_name(binding);
+                    local_exprs.insert(instr.lvalue.identifier.0, name);
+                }
+                InstructionValue::PropertyLoad { object, property, .. } => {
+                    let obj = local_exprs.get(&object.identifier.0)
+                        .cloned()
+                        .unwrap_or_else(|| self.expr(object));
+                    local_exprs.insert(instr.lvalue.identifier.0, format!("{obj}.{property}"));
+                }
+                InstructionValue::GetIterator { collection, .. }
+                | InstructionValue::NextPropertyOf { value: collection, .. } => {
+                    // The collection IS the iterable expression.
+                    result = Some(local_exprs.get(&collection.identifier.0)
+                        .cloned()
+                        .unwrap_or_else(|| self.expr(collection)));
+                }
+                _ => {}
+            }
+        }
+        result
+    }
+
     fn reactive_value_expr(&self, value: &crate::hir::hir::ReactiveValue) -> String {
         use crate::hir::hir::ReactiveValue;
         match value {

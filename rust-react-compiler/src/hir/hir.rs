@@ -1438,6 +1438,7 @@ pub enum ReactiveTerminal {
         loop_: ReactiveBlock,
         id: InstructionId,
         loc: SourceLocation,
+        iterable_bid: BlockId,
     },
     ForIn {
         loop_var: String,
@@ -1445,6 +1446,7 @@ pub enum ReactiveTerminal {
         loop_: ReactiveBlock,
         id: InstructionId,
         loc: SourceLocation,
+        object_bid: BlockId,
     },
     If { test: Place, consequent: ReactiveBlock, alternate: Option<ReactiveBlock>, id: InstructionId, loc: SourceLocation },
     Label { block: ReactiveBlock, id: InstructionId, loc: SourceLocation },
