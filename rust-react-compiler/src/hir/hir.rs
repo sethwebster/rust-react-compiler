@@ -225,6 +225,15 @@ pub struct ReactiveScope {
     pub reassignments: Vec<IdentifierId>,
     pub merged_ranges: Vec<MutableRange>,
     pub early_returns: Vec<EarlyReturn>,
+    /// Identifier that holds the early-return sentinel value for this scope.
+    /// Set by propagate_early_returns when a reactive scope contains a `return`
+    /// statement. The sentinel is initialized at the start of the scope body and
+    /// cached as a scope output; after the scope, codegen checks if it was set
+    /// to an actual return value and emits `return earlyReturnValue;`.
+    pub early_return_value: Option<IdentifierId>,
+    /// The BlockId used as the labeled-break target for the early-return labeled block.
+    /// Set by propagate_early_returns alongside early_return_value.
+    pub early_return_label_id: Option<BlockId>,
     pub loc: SourceLocation,
 }
 

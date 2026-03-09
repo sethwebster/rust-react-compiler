@@ -39,6 +39,8 @@ pub fn run_with_env(hir: &mut HIRFunction, env: &mut Environment) {
                 reassignments: Vec::new(),
                 merged_ranges: Vec::new(),
                 early_returns: Vec::new(),
+                early_return_value: None,
+                early_return_label_id: None,
                 loc: SourceLocation::Generated,
             }
         });

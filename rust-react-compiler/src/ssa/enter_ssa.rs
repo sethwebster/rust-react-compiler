@@ -677,10 +677,12 @@ pub fn enter_ssa_with_env(hir: &mut HIRFunction, env: Option<&mut Environment>) 
     }
 
     // Write back newly created identifiers to env.
+    // Also sync next_identifier_id so later passes don't reuse SSA IDs.
     if let Some(e) = env {
-        for new_ident in builder.new_identifiers {
-            e.identifiers.insert(new_ident.id, new_ident);
+        for new_ident in &builder.new_identifiers {
+            e.identifiers.insert(new_ident.id, new_ident.clone());
         }
+        e.sync_next_identifier_id(builder.next_id);
     }
 }
 

@@ -340,6 +340,15 @@ struct Codegen<'a> {
     /// Set of fallthrough BlockIds that belong to Label terminals (as opposed to switches).
     /// Used to distinguish natural exits (no break needed) from switch exits (break needed).
     label_fallthrough_blocks: std::collections::HashSet<BlockId>,
+    /// Set of ReactiveLabel block IDs that correspond to early-return labeled blocks.
+    /// These get emitted as `bb0: { ... }` (with braces) rather than `bb0: switch { ... }`.
+    early_return_label_blocks: std::collections::HashSet<BlockId>,
+    /// When inside an early-return scope body, Some((sentinel_var_name, label_name)).
+    /// Used by emit_scope_body_cfg_walk to transform `return val` → `sentinel = val; break label`.
+    active_early_return: Option<(String, String)>,
+    /// Blocks that were processed as early-return branch bodies inside a scope's cfg walk.
+    /// These blocks' Return terminals were already transformed; emit_cfg_region must skip them.
+    early_return_handled_blocks: std::collections::HashSet<BlockId>,
 }
 
 /// Traverse blocks reachable from `start` (not crossing `fall_bid`) and check
@@ -457,7 +466,13 @@ fn count_scope_outputs(hir: &HIRFunction, env: &Environment) -> HashMap<ScopeId,
             if used_outside { n_escaping += 1; }
         }
         if n_escaping > 0 {
-            result.insert(sid, n_escaping);
+            // If this scope has an early-return sentinel, reserve one extra slot for it.
+            let extra = if scope.early_return_value.is_some() { 1 } else { 0 };
+            if std::env::var("RC_DEBUG").is_ok() {
+                eprintln!("[count_scope_outputs] scope {:?} n_escaping={} extra={} early_return={:?}",
+                    sid.0, n_escaping, extra, scope.early_return_value);
+            }
+            result.insert(sid, n_escaping + extra);
             continue;
         }
         // No escaping StoreLocals. Count non-transparent SSA temps consumed outside scope.
@@ -582,7 +597,14 @@ fn count_scope_outputs(hir: &HIRFunction, env: &Environment) -> HashMap<ScopeId,
                 n_ssa_outputs += 1;
             }
         }
-        result.insert(sid, n_ssa_outputs.max(1));
+        let base = n_ssa_outputs.max(1);
+        // If this scope has an early-return sentinel, reserve one extra slot for it.
+        let extra = if scope.early_return_value.is_some() { 1 } else { 0 };
+        if std::env::var("RC_DEBUG").is_ok() {
+            eprintln!("[count_scope_outputs] scope {:?} n_escaping={} n_ssa={} base={} extra={} early_return={:?}",
+                sid.0, n_escaping, n_ssa_outputs, base, extra, scope.early_return_value);
+        }
+        result.insert(sid, base + extra);
     }
     result
 }
@@ -849,6 +871,9 @@ impl<'a> Codegen<'a> {
             scope_output_names: HashMap::new(),
             reassigned_decl_ids,
             label_fallthrough_blocks: std::collections::HashSet::new(),
+            early_return_label_blocks: std::collections::HashSet::new(),
+            active_early_return: None,
+            early_return_handled_blocks: std::collections::HashSet::new(),
         }
     }
 
@@ -879,6 +904,17 @@ impl<'a> Codegen<'a> {
                     self.label_fallthrough_blocks.insert(fall_bid);
                     label_counter += 1;
                 }
+            }
+        }
+
+        // Register early-return labeled blocks from env.scopes.
+        // These are created by propagate_early_returns and need labels for break/label emission.
+        for (_, scope) in &self.env.scopes {
+            if let Some(label_id) = scope.early_return_label_id {
+                let label_str = format!("bb{label_counter}");
+                self.switch_fallthrough_labels.insert(label_id, label_str);
+                self.early_return_label_blocks.insert(label_id);
+                label_counter += 1;
             }
         }
 
@@ -1302,6 +1338,11 @@ impl<'a> Codegen<'a> {
                     let consequent_has_instrs = self.cfg_region_has_instructions(*consequent, *fallthrough);
                     let mut if_buf = String::new();
                     let mut vis2 = visited.clone();
+                    // If the consequent block was handled as an early-return branch inside a scope's
+                    // cfg walk, pre-mark it visited so emit_cfg_region doesn't re-emit its Return.
+                    for &bid in &self.early_return_handled_blocks.clone() {
+                        vis2.insert(bid);
+                    }
                     self.emit_cfg_region(
                         *consequent, Some(*fallthrough), body_pad, &mut if_buf,
                         &mut vis2, emitted_scopes, scope_index, instr_scope, inlined_ids, scope_instrs,
@@ -1989,7 +2030,14 @@ impl<'a> Codegen<'a> {
 
         let dep_slot_list = self.dep_slots.get(scope_id).cloned().unwrap_or_default();
         let out_slot_list = self.output_slots.get(scope_id).cloned().unwrap_or_else(|| vec![0]);
-        let sentinel_slot = out_slot_list[0];
+        // For early-return scopes, the sentinel (early-return value) occupies the LAST output slot.
+        // For non-early-return no-deps scopes, the memo-cache-sentinel check uses the FIRST output slot.
+        let has_early_return = self.env.scopes.get(scope_id).and_then(|s| s.early_return_value).is_some();
+        let sentinel_slot = if has_early_return {
+            out_slot_list.last().copied().unwrap_or(0)
+        } else {
+            out_slot_list.first().copied().unwrap_or(0)
+        };
 
         // -----------------------------------------------------------------------
         // Promote used temporaries: detect scope member instructions that are
@@ -2203,6 +2251,28 @@ impl<'a> Codegen<'a> {
             self.terminal_replacement.insert(term_id, term_expr);
         }
 
+        // If this scope has an early-return sentinel, allocate a temp name for it.
+        // The sentinel occupies the LAST output slot; regular outputs use the earlier slots.
+        // We do NOT insert the sentinel into scope_output_names (which is for flat HIR lookups)
+        // to avoid IdentifierId conflicts with existing flat HIR instructions.
+        let sentinel_var_opt: Option<String> = if self.env.scopes.get(scope_id)
+            .and_then(|s| s.early_return_value).is_some()
+        {
+            let v = format!("t{}", *scope_index + self.param_name_offset);
+            *scope_index += 1;
+            Some(v)
+        } else {
+            None
+        };
+        // Look up the early-return label name for this scope (registered in emit()).
+        let early_return_label: Option<String> = if sentinel_var_opt.is_some() {
+            self.env.scopes.get(scope_id)
+                .and_then(|s| s.early_return_label_id)
+                .and_then(|lid| self.switch_fallthrough_labels.get(&lid).cloned())
+        } else {
+            None
+        };
+
         let intra_set: std::collections::HashSet<usize> =
             analysis.intra_scope_stores.iter().copied().collect();
         let skip_set: std::collections::HashSet<usize> =
@@ -2251,6 +2321,11 @@ impl<'a> Codegen<'a> {
             scope_block_set.iter().next().copied()
         };
 
+        // Set active_early_return BEFORE body_str_opt computation so that
+        // emit_scope_body_cfg_walk sees it when handling If/Return terminals.
+        self.active_early_return = sentinel_var_opt.as_ref().zip(early_return_label.as_ref())
+            .map(|(sv, lbl)| (sv.clone(), lbl.clone()));
+
         // If tree_body is provided (tree codegen path), use codegen_tree_block for body emission.
         // This correctly handles loop terminals (While, For, etc.) inside the scope body.
         let tree_body_str: Option<String> = if let Some((tree_stmts, tree_scope_instrs)) = tree_body {
@@ -2264,22 +2339,24 @@ impl<'a> Codegen<'a> {
 
         // If we have multiple scope blocks (scope spans if/else), use CFG-based emission.
         // Otherwise fall back to flat emission (single block, no control flow structure needed).
+        // For early-return scopes, always use cfg-walk so that If terminals (with early returns
+        // in their branches) are properly emitted even when the scope fits in a single block.
         let body_str_opt: Option<String> = tree_body_str.or_else(|| {
-            if scope_block_set.len() > 1 {
+            if scope_block_set.len() > 1 || early_return_label.is_some() {
                 if let Some(start_bid) = start_block {
                     let mut body_str = String::new();
                     let mut vis = std::collections::HashSet::new();
                     self.emit_scope_body_cfg_walk(
                         start_bid, &scope_block_set, &scope_instr_set, &intra_instr_ids,
                         &skip_instr_set, inlined_ids, &all_out_names, scope_id,
-                        indent + 1, &mut vis, &mut body_str,
+                        indent + 1, None, &mut vis, &mut body_str,
                     );
                     Some(body_str)
                 } else {
                     None  // couldn't find start block, fall back to flat
                 }
             } else {
-                None  // single block scope, flat emission is correct
+                None  // single block scope without early return, flat emission is correct
             }
         });
 
@@ -2332,6 +2409,9 @@ impl<'a> Codegen<'a> {
             }
         }
 
+        // How many output slots the early-return sentinel occupies (0 or 1 at position [0]).
+        let sentinel_slot_count = sentinel_var_opt.is_some() as usize;
+
         if has_deps {
             // Emit hoisted dep const declarations.
             for (orig, hoisted) in &hoisted_dep_info {
@@ -2339,9 +2419,15 @@ impl<'a> Codegen<'a> {
                     let _ = writeln!(out, "{pad}const {hoisted} = {orig};");
                 }
             }
+            // Emit `let` for regular outputs first, then sentinel last.
             for cache_var in &output_cache_vars {
                 if !declared_names.contains(cache_var) {
                     let _ = writeln!(out, "{pad}let {cache_var};");
+                }
+            }
+            if let Some(ref sv) = sentinel_var_opt {
+                if !declared_names.contains(sv) {
+                    let _ = writeln!(out, "{pad}let {sv};");
                 }
             }
             let cond_parts: Vec<String> = hoisted_dep_info.iter().zip(&dep_slot_list)
@@ -2351,7 +2437,31 @@ impl<'a> Codegen<'a> {
                 .collect();
             let condition = cond_parts.join(" || ");
             let _ = writeln!(out, "{pad}if ({condition}) {{");
-            if let Some(ref body_str) = body_str_opt {
+            // Emit sentinel init at start of new-value branch.
+            if let Some(ref sv) = sentinel_var_opt {
+                let _ = writeln!(out, "{body_pad}{sv} = Symbol.for(\"react.early_return_sentinel\");");
+            }
+            // Emit scope body, wrapped in labeled block when there's an early return.
+            if let Some(ref lbl) = early_return_label {
+                let inner_pad = "  ".repeat(indent + 2);
+                let _ = writeln!(out, "{body_pad}{lbl}: {{");
+                if let Some(ref body_str) = body_str_opt {
+                    // body_str was generated at indent+1; re-indent to indent+2.
+                    for line in body_str.lines() {
+                        if line.trim().is_empty() {
+                            let _ = writeln!(out, "");
+                        } else {
+                            let _ = writeln!(out, "  {line}");
+                        }
+                    }
+                } else {
+                    for line in &body_lines {
+                        let reindented = reindent_multiline(line, &inner_pad);
+                        let _ = writeln!(out, "{inner_pad}{reindented}");
+                    }
+                }
+                let _ = writeln!(out, "{body_pad}}}");
+            } else if let Some(ref body_str) = body_str_opt {
                 out.push_str(body_str);
             } else {
                 for line in &body_lines {
@@ -2359,6 +2469,7 @@ impl<'a> Codegen<'a> {
                     let _ = writeln!(out, "{body_pad}{reindented}");
                 }
             }
+            self.active_early_return = None;
             for (output, cache_var) in analysis.outputs.iter().zip(&output_cache_vars) {
                 if !output.is_named_var {
                     let expr_str = maybe_paren_jsx_scope_output(cache_var, &output.cache_expr);
@@ -2369,12 +2480,23 @@ impl<'a> Codegen<'a> {
             for ((_, dep_str), &slot) in hoisted_dep_info.iter().zip(&dep_slot_list) {
                 let _ = writeln!(out, "{body_pad}$[{slot}] = {dep_str};");
             }
-            for (cache_var, &slot) in output_cache_vars.iter().zip(&out_slot_list) {
+            // Regular output cache stores first, sentinel last.
+            let n_regular_slots = out_slot_list.len().saturating_sub(sentinel_slot_count);
+            for (cache_var, &slot) in output_cache_vars.iter().zip(out_slot_list.iter().take(n_regular_slots)) {
                 let _ = writeln!(out, "{body_pad}$[{slot}] = {cache_var};");
             }
+            // Sentinel cache store at out_slot_list.last().
+            if let Some((ref sv, &slot)) = sentinel_var_opt.as_ref().zip(out_slot_list.last()) {
+                let _ = writeln!(out, "{body_pad}$[{slot}] = {sv};");
+            }
             let _ = writeln!(out, "{pad}}} else {{");
-            for (cache_var, &slot) in output_cache_vars.iter().zip(&out_slot_list) {
+            // Regular output cache loads first, sentinel last.
+            for (cache_var, &slot) in output_cache_vars.iter().zip(out_slot_list.iter().take(n_regular_slots)) {
                 let _ = writeln!(out, "{body_pad}{cache_var} = $[{slot}];");
+            }
+            // Sentinel cache load.
+            if let Some((ref sv, &slot)) = sentinel_var_opt.as_ref().zip(out_slot_list.last()) {
+                let _ = writeln!(out, "{body_pad}{sv} = $[{slot}];");
             }
             let _ = writeln!(out, "{pad}}}");
             for (output, cache_var) in analysis.outputs.iter().zip(&output_cache_vars) {
@@ -2395,13 +2517,42 @@ impl<'a> Codegen<'a> {
                 }
             }
         } else {
+            // Emit `let` for regular outputs first, then sentinel last.
             for cache_var in &output_cache_vars {
                 if !declared_names.contains(cache_var) {
                     let _ = writeln!(out, "{pad}let {cache_var};");
                 }
             }
+            if let Some(ref sv) = sentinel_var_opt {
+                if !declared_names.contains(sv) {
+                    let _ = writeln!(out, "{pad}let {sv};");
+                }
+            }
             let _ = writeln!(out, "{pad}if ($[{sentinel_slot}] === Symbol.for(\"react.memo_cache_sentinel\")) {{");
-            if let Some(ref body_str) = body_str_opt {
+            // Emit sentinel init at start of new-value branch.
+            if let Some(ref sv) = sentinel_var_opt {
+                let _ = writeln!(out, "{body_pad}{sv} = Symbol.for(\"react.early_return_sentinel\");");
+            }
+            // Emit scope body, wrapped in labeled block when there's an early return.
+            if let Some(ref lbl) = early_return_label {
+                let inner_pad = "  ".repeat(indent + 2);
+                let _ = writeln!(out, "{body_pad}{lbl}: {{");
+                if let Some(ref body_str) = body_str_opt {
+                    for line in body_str.lines() {
+                        if line.trim().is_empty() {
+                            let _ = writeln!(out, "");
+                        } else {
+                            let _ = writeln!(out, "  {line}");
+                        }
+                    }
+                } else {
+                    for line in &body_lines {
+                        let reindented = reindent_multiline(line, &inner_pad);
+                        let _ = writeln!(out, "{inner_pad}{reindented}");
+                    }
+                }
+                let _ = writeln!(out, "{body_pad}}}");
+            } else if let Some(ref body_str) = body_str_opt {
                 out.push_str(body_str);
             } else {
                 for line in &body_lines {
@@ -2409,6 +2560,7 @@ impl<'a> Codegen<'a> {
                     let _ = writeln!(out, "{body_pad}{reindented}");
                 }
             }
+            self.active_early_return = None;
             for (output, cache_var) in analysis.outputs.iter().zip(&output_cache_vars) {
                 if !output.is_named_var {
                     let expr_str = maybe_paren_jsx_scope_output(cache_var, &output.cache_expr);
@@ -2416,12 +2568,23 @@ impl<'a> Codegen<'a> {
                     let _ = writeln!(out, "{body_pad}{cache_var} = {};", reindented);
                 }
             }
-            for (cache_var, &slot) in output_cache_vars.iter().zip(&out_slot_list) {
+            let n_regular_slots_nd = out_slot_list.len().saturating_sub(sentinel_slot_count);
+            // Regular output cache stores first, sentinel last.
+            for (cache_var, &slot) in output_cache_vars.iter().zip(out_slot_list.iter().take(n_regular_slots_nd)) {
                 let _ = writeln!(out, "{body_pad}$[{slot}] = {cache_var};");
             }
+            // Sentinel cache store at out_slot_list.last().
+            if let Some((ref sv, &slot)) = sentinel_var_opt.as_ref().zip(out_slot_list.last()) {
+                let _ = writeln!(out, "{body_pad}$[{slot}] = {sv};");
+            }
             let _ = writeln!(out, "{pad}}} else {{");
-            for (cache_var, &slot) in output_cache_vars.iter().zip(&out_slot_list) {
+            // Regular output cache loads first, sentinel last.
+            for (cache_var, &slot) in output_cache_vars.iter().zip(out_slot_list.iter().take(n_regular_slots_nd)) {
                 let _ = writeln!(out, "{body_pad}{cache_var} = $[{slot}];");
+            }
+            // Sentinel cache load.
+            if let Some((ref sv, &slot)) = sentinel_var_opt.as_ref().zip(out_slot_list.last()) {
+                let _ = writeln!(out, "{body_pad}{sv} = $[{slot}];");
             }
             let _ = writeln!(out, "{pad}}}");
             for (output, cache_var) in analysis.outputs.iter().zip(&output_cache_vars) {
@@ -2443,6 +2606,12 @@ impl<'a> Codegen<'a> {
                     let _ = writeln!(out, "{pad}{reindented}");
                 }
             }
+        }
+        // After the scope, emit the early-return check if this scope has a sentinel.
+        if let Some(ref sv) = sentinel_var_opt {
+            let _ = writeln!(out, "{pad}if ({sv} !== Symbol.for(\"react.early_return_sentinel\")) {{");
+            let _ = writeln!(out, "{body_pad}return {sv};");
+            let _ = writeln!(out, "{pad}}}");
         }
 
         // After scope emission, override inlined_exprs for each skipped instruction.
@@ -2495,9 +2664,11 @@ impl<'a> Codegen<'a> {
     /// Walk the scope body using the CFG structure, emitting scope instructions
     /// with proper control flow (if/else, etc.) instead of flat emission.
     /// Only processes blocks in `scope_block_set` (blocks containing scope instructions).
+    /// `stop_at`: if Some(bid), stop before processing that block (used to prevent
+    /// if-branch walks from crossing the if's fallthrough block).
     #[allow(clippy::too_many_arguments)]
     fn emit_scope_body_cfg_walk(
-        &self,
+        &mut self,
         current: BlockId,
         scope_block_set: &std::collections::HashSet<BlockId>,
         scope_instr_set: &std::collections::HashSet<InstructionId>,
@@ -2507,9 +2678,12 @@ impl<'a> Codegen<'a> {
         all_out_names: &[String],
         scope_id: &ScopeId,
         indent: usize,
+        stop_at: Option<BlockId>,
         visited: &mut std::collections::HashSet<BlockId>,
         out: &mut String,
     ) {
+        // Stop at the designated stop block (e.g. if-fallthrough during branch walk).
+        if stop_at == Some(current) { return; }
         // Only process blocks that contain scope instructions.
         if !scope_block_set.contains(&current) { return; }
         if !visited.insert(current) { return; }
@@ -2537,31 +2711,50 @@ impl<'a> Codegen<'a> {
             Terminal::If { test, consequent, alternate, fallthrough, .. } => {
                 let body_indent = indent + 1;
                 let body_pad = "  ".repeat(indent);  // same as pad
+                let inner_pad = "  ".repeat(body_indent);
 
                 let consq_has = scope_block_set.contains(consequent);
                 let alt_has = *alternate != *fallthrough && scope_block_set.contains(alternate);
 
-                if consq_has || alt_has {
+                // For early-return scopes: also handle branches that lead to Return terminals.
+                let (consq_early_ret, alt_early_ret) = if let Some((ref sv, ref lbl)) = self.active_early_return.clone() {
+                    let consq_ret = self.early_return_branch_stmt(*consequent, sv, lbl, body_indent);
+                    let alt_ret = if *alternate != *fallthrough {
+                        self.early_return_branch_stmt(*alternate, sv, lbl, body_indent)
+                    } else { None };
+                    (consq_ret, alt_ret)
+                } else {
+                    (None, None)
+                };
+
+                if consq_has || alt_has || consq_early_ret.is_some() || alt_early_ret.is_some() {
                     let test_expr = self.expr(test);
+                    // Use fallthrough as the stop point for branch walks so they don't
+                    // cross into the shared continuation block.
+                    let branch_stop = Some(*fallthrough);
 
                     let mut if_body = String::new();
+                    let mut vis2 = visited.clone();
                     if consq_has {
-                        let mut vis2 = visited.clone();
                         self.emit_scope_body_cfg_walk(
                             *consequent, scope_block_set, scope_instr_set, intra_instr_ids,
                             skip_instr_set, inlined_ids, all_out_names, scope_id,
-                            body_indent, &mut vis2, &mut if_body,
+                            body_indent, branch_stop, &mut vis2, &mut if_body,
                         );
+                    } else if let Some(ref stmt) = consq_early_ret {
+                        if_body.push_str(stmt);
                     }
 
                     let mut else_body = String::new();
+                    let mut vis3 = visited.clone();
                     if alt_has {
-                        let mut vis3 = visited.clone();
                         self.emit_scope_body_cfg_walk(
                             *alternate, scope_block_set, scope_instr_set, intra_instr_ids,
                             skip_instr_set, inlined_ids, all_out_names, scope_id,
-                            body_indent, &mut vis3, &mut else_body,
+                            body_indent, branch_stop, &mut vis3, &mut else_body,
                         );
+                    } else if let Some(ref stmt) = alt_early_ret {
+                        else_body.push_str(stmt);
                     }
 
                     if !if_body.is_empty() || !else_body.is_empty() {
@@ -2575,18 +2768,22 @@ impl<'a> Codegen<'a> {
                     }
                 }
 
-                // Continue at fallthrough.
+                // Continue at fallthrough — clear active_early_return so that any Return
+                // terminal on the main scope-exit path is NOT transformed (it's the natural
+                // scope exit, emitted by the caller after the scope block).
+                let saved_er = self.active_early_return.take();
                 self.emit_scope_body_cfg_walk(
                     *fallthrough, scope_block_set, scope_instr_set, intra_instr_ids,
                     skip_instr_set, inlined_ids, all_out_names, scope_id,
-                    indent, visited, out,
+                    indent, stop_at, visited, out,
                 );
+                self.active_early_return = saved_er;
             }
             Terminal::Goto { block: next, .. } => {
                 self.emit_scope_body_cfg_walk(
                     *next, scope_block_set, scope_instr_set, intra_instr_ids,
                     skip_instr_set, inlined_ids, all_out_names, scope_id,
-                    indent, visited, out,
+                    indent, stop_at, visited, out,
                 );
             }
             Terminal::DoWhile { loop_, fallthrough, .. }
@@ -2598,13 +2795,13 @@ impl<'a> Codegen<'a> {
                 self.emit_scope_body_cfg_walk(
                     *loop_, scope_block_set, scope_instr_set, intra_instr_ids,
                     skip_instr_set, inlined_ids, all_out_names, scope_id,
-                    indent, &mut loop_vis, out,
+                    indent, Some(*fallthrough), &mut loop_vis, out,
                 );
                 // Continue at fallthrough.
                 self.emit_scope_body_cfg_walk(
                     *fallthrough, scope_block_set, scope_instr_set, intra_instr_ids,
                     skip_instr_set, inlined_ids, all_out_names, scope_id,
-                    indent, visited, out,
+                    indent, stop_at, visited, out,
                 );
             }
             Terminal::ForOf { loop_, fallthrough, .. }
@@ -2613,16 +2810,61 @@ impl<'a> Codegen<'a> {
                 self.emit_scope_body_cfg_walk(
                     *loop_, scope_block_set, scope_instr_set, intra_instr_ids,
                     skip_instr_set, inlined_ids, all_out_names, scope_id,
-                    indent, &mut loop_vis, out,
+                    indent, Some(*fallthrough), &mut loop_vis, out,
                 );
                 self.emit_scope_body_cfg_walk(
                     *fallthrough, scope_block_set, scope_instr_set, intra_instr_ids,
                     skip_instr_set, inlined_ids, all_out_names, scope_id,
-                    indent, visited, out,
+                    indent, stop_at, visited, out,
                 );
             }
-            // For other terminals (Return, Throw, etc.), stop walking.
+            // If inside an early-return scope and we see a Return terminal directly,
+            // transform it: sentinel = val; break label.
+            Terminal::Return { value, .. } => {
+                if let Some((ref sv, ref lbl)) = self.active_early_return.clone() {
+                    let val_expr = self.expr(value);
+                    let _ = writeln!(out, "{pad}{sv} = {val_expr};");
+                    let _ = writeln!(out, "{pad}break {lbl};");
+                    // Mark this block as handled so emit_cfg_region doesn't re-emit it.
+                    self.early_return_handled_blocks.insert(current);
+                }
+                // Else: stop walking (natural scope exit, handled after scope block).
+            }
+            // For other terminals (Throw, etc.), stop walking.
             _ => {}
+        }
+    }
+
+    /// For an early-return branch: if `bid` directly leads to a Return terminal
+    /// (possibly through a chain of empty Goto blocks), return the transformed statement.
+    fn early_return_branch_stmt(&mut self, bid: BlockId, sentinel_var: &str, label: &str, indent: usize) -> Option<String> {
+        let pad = "  ".repeat(indent);
+        let mut current = bid;
+        let mut visited = std::collections::HashSet::new();
+        loop {
+            if !visited.insert(current) { return None; }
+            let block = self.hir.body.blocks.get(&current)?.clone();
+            // Emit any instructions in this block (e.g., const x = val before the return).
+            let mut stmts = String::new();
+            for instr in &block.instructions {
+                if let Some(s) = self.emit_stmt(instr, None, &[]) {
+                    let _ = writeln!(stmts, "{pad}{s}");
+                }
+            }
+            match &block.terminal {
+                Terminal::Return { value, .. } => {
+                    let val_expr = self.expr(value);
+                    let _ = writeln!(stmts, "{pad}{sentinel_var} = {val_expr};");
+                    let _ = writeln!(stmts, "{pad}break {label};");
+                    return Some(stmts);
+                }
+                Terminal::Goto { block: next, .. } => {
+                    current = *next;
+                    // For simplicity, only follow empty Goto blocks.
+                    if !stmts.trim().is_empty() { return None; }
+                }
+                _ => return None,
+            }
         }
     }
 
@@ -5608,6 +5850,20 @@ impl<'a> Codegen<'a> {
                     if consumed_instr_ids.contains(&lv_id) {
                         continue;
                     }
+                    // Handle synthetic instructions with no flat-HIR lvalue.
+                    // These are created by propagate_early_returns: StoreLocal(sentinel, val).
+                    // Emit as `sentinel_var = val_expr;` using scope_output_names for the name.
+                    if lv_id == u32::MAX {
+                        if let ReactiveValue::Instruction(InstructionValue::StoreLocal { lvalue: inner_lv, value, .. }) = &reactive_instr.value {
+                            let inner_id = inner_lv.place.identifier;
+                            let target_name = self.scope_output_names.get(&inner_id.0)
+                                .cloned()
+                                .unwrap_or_else(|| self.ident_name(inner_id));
+                            let val_expr = self.expr(value);
+                            let _ = std::fmt::write(out, format_args!("{pad}{target_name} = {val_expr};\n"));
+                        }
+                        continue;
+                    }
                     // Skip instructions that are inlined at use sites (no standalone emission needed).
                     if inlined_ids.contains(&lv_id) {
                         continue;
@@ -5679,11 +5935,24 @@ impl<'a> Codegen<'a> {
                         ));
                     if let Some(label) = terminal_label_opt {
                         if let crate::hir::hir::ReactiveTerminal::Label { block, .. } = &term_stmt.terminal {
-                            // Label terminal: emit the inner block, prepend label to the first line.
-                            let mut temp = String::new();
-                            self.codegen_tree_block(block, scope_out_names, indent, &mut temp, scope_instrs, inlined_ids, scope_index, declared_names);
-                            let labeled = temp.replacen(&pad, &format!("{pad}{label}: "), 1);
-                            out.push_str(&labeled);
+                            let is_early_return_label = term_stmt.label.as_ref()
+                                .map(|l| self.early_return_label_blocks.contains(&l.id))
+                                .unwrap_or(false);
+                            if is_early_return_label {
+                                // Early-return label: wrap body in braces so all stmts are labeled.
+                                // Emits: `bb0: {\n  body...\n}`
+                                let mut temp = String::new();
+                                self.codegen_tree_block(block, scope_out_names, indent + 1, &mut temp, scope_instrs, inlined_ids, scope_index, declared_names);
+                                let _ = std::fmt::write(out, format_args!("{pad}{label}: {{\n"));
+                                out.push_str(&temp);
+                                let _ = std::fmt::write(out, format_args!("{pad}}}\n"));
+                            } else {
+                                // Regular label: prepend label to the first line.
+                                let mut temp = String::new();
+                                self.codegen_tree_block(block, scope_out_names, indent, &mut temp, scope_instrs, inlined_ids, scope_index, declared_names);
+                                let labeled = temp.replacen(&pad, &format!("{pad}{label}: "), 1);
+                                out.push_str(&labeled);
+                            }
                         } else {
                             // Switch terminal: emit the switch, prepend label to the switch line.
                             let mut temp = String::new();

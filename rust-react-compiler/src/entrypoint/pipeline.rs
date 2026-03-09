@@ -57,7 +57,7 @@ use crate::reactive_scopes::{
     prune_unused_scopes::run_with_env as prune_unused_scopes,
     merge_reactive_scopes_that_invalidate_together::run_with_env as merge_reactive_scopes_that_invalidate_together,
     prune_always_invalidating_scopes::run as prune_always_invalidating_scopes,
-    propagate_early_returns::run as propagate_early_returns,
+    propagate_early_returns::run_with_env as propagate_early_returns,
     prune_unused_lvalues::run as prune_unused_lvalues,
     promote_used_temporaries::run_with_env as promote_used_temporaries,
     extract_scope_declarations_from_destructuring::run as extract_scope_declarations_from_destructuring,
@@ -828,7 +828,6 @@ pub fn run_with_environment(
     merge_reactive_scopes_that_invalidate_together(hir, env);
     prune_non_reactive_dependencies(hir, env);
     prune_always_invalidating_scopes(hir, env);
-    propagate_early_returns(hir);
     prune_unused_lvalues(hir);
     promote_used_temporaries(hir, env);
     extract_scope_declarations_from_destructuring(hir);
@@ -839,6 +838,11 @@ pub fn run_with_environment(
 
     // --- Phase: Reactive function construction ---
     build_reactive_function(hir, env);
+
+    // Propagate early returns: transform reactive scopes that contain `return` statements.
+    // Must run AFTER build_reactive_function since it operates on the reactive_block tree.
+    // Adds early_return_value identifier to scope.declarations and wraps scope body in label.
+    propagate_early_returns(hir, env);
 
     // Rename promoted temp variables ($t0 → t0, etc.) in tree definition order.
     // Must run after build_reactive_function so the reactive_block is available.

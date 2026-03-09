@@ -175,6 +175,14 @@ impl Environment {
         id
     }
 
+    /// Ensure `next_identifier_id` is at least `min_next`.
+    /// Called after SSA to prevent conflicts with SSA-allocated IDs.
+    pub fn sync_next_identifier_id(&mut self, min_next: u32) {
+        if min_next > self.next_identifier_id {
+            self.next_identifier_id = min_next;
+        }
+    }
+
     pub fn get_identifier(&self, id: IdentifierId) -> Option<&Identifier> {
         self.identifiers.get(&id)
     }
