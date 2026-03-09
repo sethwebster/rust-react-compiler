@@ -94,6 +94,21 @@ fn normalize_js(js: &str) -> String {
             i += 1;
             continue;
         }
+        // Add space after `>` when followed by `<` or a letter/digit (JSX formatting).
+        // Babel formats JSX with newlines between elements (`<A>\n  <B/>`) while
+        // oxc formats inline (`<A><B/>`). After split_whitespace they differ:
+        // Babel: `<A>`, `<B/>` (separate tokens) vs oxc: `<A><B/>` (one token).
+        // Adding space after `>` when next is `<` or content char normalizes this.
+        if c == b'>' && i + 1 < bytes.len() {
+            let next = bytes[i + 1];
+            if next == b'<' || next.is_ascii_alphabetic() || next.is_ascii_digit() || next == b'{' {
+                stripped.push('>');
+                stripped.push(' ');
+                prev = c;
+                i += 1;
+                continue;
+            }
+        }
         let adv = push_utf8_char(&mut stripped, bytes, i);
         prev = c;
         i += adv;
