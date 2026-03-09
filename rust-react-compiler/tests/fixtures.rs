@@ -82,10 +82,11 @@ fn normalize_js(js: &str) -> String {
             i += 2;
             continue;
         }
-        // Add spaces around bracket/brace characters so that `[{` and `}]`
-        // tokenize the same regardless of whether the formatter emits spaces.
+        // Add spaces around bracket/brace/paren characters so they tokenize
+        // the same regardless of whether the formatter emits spaces:
         // e.g. Babel: `[ { arg: 3 } ]`  vs oxc: `[{ arg: 3 }]` → both become `[ { arg: 3 } ]`.
-        if c == b'[' || c == b']' || c == b'{' || c == b'}' {
+        // Also ensures `);` → `) ;` so closing parens are always their own tokens.
+        if c == b'[' || c == b']' || c == b'{' || c == b'}' || c == b'(' || c == b')' {
             stripped.push(' ');
             stripped.push(c as char);
             stripped.push(' ');
@@ -100,8 +101,55 @@ fn normalize_js(js: &str) -> String {
 
     // Tokenize and normalize whitespace.
     let tokens: Vec<&str> = stripped.split_whitespace().collect();
+
+    // Remove wrapping parentheses around JSX expressions, which Babel adds for
+    // readability but are semantically equivalent to omitting them:
+    //   `t1 = (\n  <div>...</div>\n)` vs `t1 = <div>...</div>`
+    // Pattern: token before `(` is `=` or `return`, and token after `(` starts with `<`.
+    // We build a replacements map: token index → override string ("" = skip, other = replace).
+    let mut replacements: std::collections::HashMap<usize, &'static str> = std::collections::HashMap::new();
+    {
+        let mut depth = 0usize;
+        let mut paren_start = 0usize;
+        let mut in_jsx_paren = false;
+        for (i, &tok) in tokens.iter().enumerate() {
+            if in_jsx_paren {
+                if tok == "(" { depth += 1; }
+                else if tok == ")" {
+                    if depth == 0 {
+                        replacements.insert(paren_start, "");
+                        replacements.insert(i, "");
+                        in_jsx_paren = false;
+                    } else { depth -= 1; }
+                } else if tok.starts_with(')') && depth == 0 {
+                    // Closing paren combined with other chars: `);` or `),`
+                    // We can't easily replace just part of a token here, so just
+                    // leave as-is (partial match - skip the opening paren too to avoid
+                    // leaving a dangling `(` in output, but keep the suffix).
+                    // For safety, don't remove anything if the close is combined.
+                    in_jsx_paren = false;
+                }
+            } else if tok == "(" && i + 1 < tokens.len() && tokens[i + 1].starts_with('<') {
+                // Check if preceded by `=` or `return`
+                let prev = if i > 0 { tokens[i - 1] } else { "" };
+                if prev == "=" || prev == "return" || prev == "," {
+                    in_jsx_paren = true;
+                    paren_start = i;
+                    depth = 0;
+                }
+            }
+        }
+    }
+
     let mut result = String::new();
     for (i, &tok) in tokens.iter().enumerate() {
+        if let Some(&replacement) = replacements.get(&i) {
+            if !replacement.is_empty() {
+                if !result.is_empty() { result.push(' '); }
+                result.push_str(replacement);
+            }
+            continue;
+        }
         // Strip trailing comma from a token if the next token is } or ]
         let effective = if (tok.ends_with(',') || tok == ",")
             && i + 1 < tokens.len()
