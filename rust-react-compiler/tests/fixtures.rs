@@ -82,11 +82,11 @@ fn normalize_js(js: &str) -> String {
             i += 2;
             continue;
         }
-        // Add spaces around bracket/brace/paren characters so they tokenize
+        // Add spaces around bracket/brace/paren/semicolon characters so they tokenize
         // the same regardless of whether the formatter emits spaces:
         // e.g. Babel: `[ { arg: 3 } ]`  vs oxc: `[{ arg: 3 }]` → both become `[ { arg: 3 } ]`.
-        // Also ensures `);` → `) ;` so closing parens are always their own tokens.
-        if c == b'[' || c == b']' || c == b'{' || c == b'}' || c == b'(' || c == b')' {
+        // Semicolon spacing ensures `</div>;` and `</div>\n;` tokenize identically.
+        if c == b'[' || c == b']' || c == b'{' || c == b'}' || c == b'(' || c == b')' || c == b';' {
             stripped.push(' ');
             stripped.push(c as char);
             stripped.push(' ');
