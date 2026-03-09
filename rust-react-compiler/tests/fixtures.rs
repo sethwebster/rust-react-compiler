@@ -141,6 +141,15 @@ fn normalize_js(js: &str) -> String {
         }
     }
 
+    // Also mark `as const` (TypeScript type assertion, no runtime effect) for removal.
+    // This allows `.js` files using `as const` to match output that strips it.
+    for i in 0..tokens.len().saturating_sub(1) {
+        if tokens[i] == "as" && tokens[i + 1] == "const" {
+            replacements.insert(i, "");
+            replacements.insert(i + 1, "");
+        }
+    }
+
     let mut result = String::new();
     for (i, &tok) in tokens.iter().enumerate() {
         if let Some(&replacement) = replacements.get(&i) {
