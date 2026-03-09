@@ -333,6 +333,15 @@ struct Codegen<'a> {
     /// Populated during scope emission so that references to scope outputs
     /// outside the scope resolve to the correct temp name instead of "$tN".
     scope_output_names: HashMap<u32, String>,
+    /// Maps identifier id → renamed temp name for promoted $t/$T vars.
+    /// Pre-populated before emission so destructuring bindings and other
+    /// $t-prefixed identifiers get sequential t0, t1, ... names (matching
+    /// the reference compiler's rename_variables pass behavior).
+    promoted_temp_names: HashMap<u32, String>,
+    /// Maps ScopeId → set of variable names declared (via DeclareLocal) before
+    /// the scope's start in program order. Used by emit_scope_block_inner to
+    /// avoid re-declaring variables that already exist in outer blocks.
+    declared_names_before_scope: HashMap<ScopeId, std::collections::HashSet<String>>,
     /// Set of DeclarationIds that are targets of reassignment or update expressions.
     /// Used to emit `let` instead of `const` for destructuring patterns whose
     /// bound variables are later mutated (e.g., `let { c } = t0` when `c++` follows).
@@ -869,6 +878,8 @@ impl<'a> Codegen<'a> {
             switch_labels: HashMap::new(),
             switch_fallthrough_labels: HashMap::new(),
             scope_output_names: HashMap::new(),
+            promoted_temp_names: HashMap::new(),
+            declared_names_before_scope: HashMap::new(),
             reassigned_decl_ids,
             label_fallthrough_blocks: std::collections::HashSet::new(),
             early_return_label_blocks: std::collections::HashSet::new(),
@@ -928,12 +939,24 @@ impl<'a> Codegen<'a> {
         // inlined JS expressions so they emit as `a && b` instead of `$tN`.
         self.resolve_logical_phis();
 
-        // Determine which scope each instruction belongs to.
-        let instr_scope = self.assign_instructions_to_scopes(&ordered);
-
         // Build "should_inline" set: instructions that are fully inlined
         // and should NOT produce standalone statements.
         let inlined_ids = self.collect_inlined_ids(&ordered);
+
+        // Rename $t/$T promoted temp identifiers to sequential t0, t1, ... names.
+        // This must run before scope emission so the assigned names don't conflict.
+        // Returns the number of temps assigned (scope_index starts at this offset).
+        let promoted_temp_count = self.build_promoted_temp_names(&ordered, &inlined_ids);
+
+        // Rebuild inlined_exprs now that promoted_temp_names is populated.
+        // The first build_inline_map call above used fallback names (e.g. $t18);
+        // we need to redo it so inlined expression strings reference t0/t1/... names.
+        self.inlined_exprs.clear();
+        self.build_inline_map(&ordered);
+        self.resolve_logical_phis();
+
+        // Determine which scope each instruction belongs to.
+        let instr_scope = self.assign_instructions_to_scopes(&ordered);
 
         let mut out = String::new();
 
@@ -1014,8 +1037,48 @@ impl<'a> Codegen<'a> {
             }
         }
 
-        // scope_index counts scopes in emission order (0-based) for temp naming.
-        let mut scope_index: usize = 0;
+        // Build declared_names_before_scope: for each scope, collect variable names
+        // declared (via DeclareLocal/DeclareContext) in non-scope instructions that
+        // appear before the scope's first instruction in program order.
+        // This prevents double-declaration when a scope output has the same name as
+        // an outer `let` declaration.
+        {
+            let mut running_declared: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut scope_first_seen: std::collections::HashSet<ScopeId> = std::collections::HashSet::new();
+            let mut scope_declared_map: HashMap<ScopeId, std::collections::HashSet<String>> = HashMap::new();
+            for instr in &ordered {
+                if let Some(&sid) = instr_scope.get(&instr.id) {
+                    if !scope_first_seen.contains(&sid) {
+                        scope_first_seen.insert(sid);
+                        scope_declared_map.insert(sid, running_declared.clone());
+                    }
+                } else {
+                    let declared_id = match &instr.value {
+                        InstructionValue::DeclareLocal { lvalue, .. } => {
+                            Some(lvalue.place.identifier)
+                        }
+                        InstructionValue::DeclareContext { lvalue, .. } => {
+                            Some(lvalue.place.identifier)
+                        }
+                        _ => None,
+                    };
+                    if let Some(id) = declared_id {
+                        if let Some(name) = self.env.get_identifier(id)
+                            .and_then(|i| i.name.as_ref())
+                            .map(|n| n.value().to_string())
+                        {
+                            running_declared.insert(name);
+                        }
+                    }
+                }
+            }
+            self.declared_names_before_scope = scope_declared_map;
+        }
+
+        // scope_index counts scopes in emission order for temp naming.
+        // Starts at promoted_temp_count so scope output names (tN) don't conflict
+        // with promoted temp names (t0, t1, ... assigned above).
+        let mut scope_index: usize = promoted_temp_count;
         let mut emitted_scopes: std::collections::HashSet<ScopeId> = std::collections::HashSet::new();
         let mut visited: std::collections::HashSet<BlockId> = std::collections::HashSet::new();
         let mut inlined_ids_mut = inlined_ids.clone();
@@ -1247,6 +1310,7 @@ impl<'a> Codegen<'a> {
                         // Emit the whole scope block now.
                         let scope_instrs_list = scope_instrs.get(&sid).cloned().unwrap_or_default();
                         let scope_instr_refs: Vec<&Instruction> = scope_instrs_list.iter().collect();
+                        let decl_names_before = self.declared_names_before_scope.get(&sid).cloned().unwrap_or_default();
                         self.emit_scope_block_inner(
                             &sid,
                             &scope_instr_refs,
@@ -1254,7 +1318,7 @@ impl<'a> Codegen<'a> {
                             scope_index,
                             out,
                             inlined_ids,
-                            &std::collections::HashSet::new(),
+                            &decl_names_before,
                             None,
                         );
                         emitted_scopes.insert(sid);
@@ -1838,7 +1902,7 @@ impl<'a> Codegen<'a> {
                     if let Some(bname) = binding_name {
                         let _ = writeln!(out, "{pad}}} catch ({bname}) {{");
                     } else {
-                        let _ = writeln!(out, "{pad}}} catch (_e) {{");
+                        let _ = writeln!(out, "{pad}}} catch {{");
                     }
                     let mut vis3 = visited.clone();
                     self.emit_cfg_region(
@@ -3886,6 +3950,112 @@ impl<'a> Codegen<'a> {
             .collect()
     }
 
+    /// Scan all non-inlined instructions for $t/$T promoted temp identifiers and
+    /// assign sequential t0, t1, ... names to them. This mirrors the reference
+    /// compiler's rename_variables pass, which renames these temps before codegen.
+    /// Returns the count of temps assigned (used to initialize scope_index).
+    fn build_promoted_temp_names(
+        &mut self,
+        ordered: &[Instruction],
+        inlined_ids: &std::collections::HashSet<u32>,
+    ) -> usize {
+        use crate::hir::hir::IdentifierName;
+
+        // Collect all scope declaration identifier IDs — these are handled by
+        // scope_output_names during scope emission, so skip them here.
+        let scope_decl_ids: std::collections::HashSet<u32> = self.env.scopes.values()
+            .flat_map(|s| s.declarations.keys().map(|id| id.0))
+            .collect();
+
+        let mut counter: usize = 0;
+        // Track which DeclarationIds have already been assigned a name (to give
+        // all SSA copies of the same variable the same tN name).
+        let mut decl_seen: std::collections::HashMap<crate::hir::hir::DeclarationId, String> = std::collections::HashMap::new();
+
+        // Helper to try assigning a name to an identifier.
+        // `rename_none`: when true, also rename anonymous (name: None) identifiers.
+        //   Used for Destructure pattern items which have no name but appear in output.
+        let mut assign = |id: crate::hir::hir::IdentifierId,
+                          rename_none: bool,
+                          counter: &mut usize,
+                          promoted_temp_names: &mut HashMap<u32, String>,
+                          decl_seen: &mut std::collections::HashMap<crate::hir::hir::DeclarationId, String>| {
+            if promoted_temp_names.contains_key(&id.0) { return; }
+            if scope_decl_ids.contains(&id.0) { return; }
+            let ident = match self.env.get_identifier(id) {
+                Some(i) => i.clone(),
+                None => return,
+            };
+            // Only rename:
+            //   - Promoted names starting with $t or $T
+            //   - Anonymous (name: None) temps when rename_none=true (Destructure pattern items)
+            // Named user variables (Named("x")) are NEVER renamed.
+            let should_rename = match &ident.name {
+                None => rename_none,
+                Some(IdentifierName::Promoted(n)) => n.starts_with("$t") || n.starts_with("$T"),
+                Some(IdentifierName::Named(_)) => false,
+            };
+            if !should_rename { return; }
+            let is_jsx = ident.name.as_ref().map(|n| n.value().starts_with("$T")).unwrap_or(false);
+            let decl_id = ident.declaration_id;
+            // If we've already assigned a name for this DeclarationId, reuse it.
+            let new_name = if let Some(existing) = decl_seen.get(&decl_id) {
+                existing.clone()
+            } else {
+                let n = if is_jsx {
+                    format!("T{}", *counter)
+                } else {
+                    format!("t{}", *counter)
+                };
+                *counter += 1;
+                decl_seen.insert(decl_id, n.clone());
+                n
+            };
+            promoted_temp_names.insert(id.0, new_name);
+        };
+
+        for instr in ordered {
+            let lv_id = instr.lvalue.identifier;
+            let is_inlined = inlined_ids.contains(&lv_id.0);
+            let is_destructure = matches!(&instr.value, InstructionValue::Destructure { .. });
+            // For non-inlined, non-Destructure instructions, assign a name to the main lvalue.
+            // Destructure instructions don't use their main lvalue in output — only their pattern
+            // items appear (e.g. `const [t0] = x` — the main lvalue is unused).
+            if !is_inlined && !is_destructure {
+                // rename_none=false: only rename Promoted("$t...") names, not anonymous temps
+                assign(lv_id, false, &mut counter, &mut self.promoted_temp_names, &mut decl_seen);
+            }
+            // For Destructure instructions, always scan pattern bindings (even if the
+            // instruction's main lvalue is inlined — the pattern items still appear in output).
+            if let InstructionValue::Destructure { lvalue, .. } = &instr.value {
+                match &lvalue.pattern {
+                    crate::hir::hir::Pattern::Array(ap) => {
+                        for elem in &ap.items {
+                            let pid = match elem {
+                                crate::hir::hir::ArrayElement::Place(p) => p.identifier,
+                                crate::hir::hir::ArrayElement::Spread(s) => s.place.identifier,
+                                crate::hir::hir::ArrayElement::Hole => continue,
+                            };
+                            // rename_none=true: pattern items may be anonymous and need names
+                            assign(pid, true, &mut counter, &mut self.promoted_temp_names, &mut decl_seen);
+                        }
+                    }
+                    crate::hir::hir::Pattern::Object(op) => {
+                        for prop in &op.properties {
+                            let pid = match prop {
+                                crate::hir::hir::ObjectPatternProperty::Property(p) => p.place.identifier,
+                                crate::hir::hir::ObjectPatternProperty::Spread(s) => s.place.identifier,
+                            };
+                            // rename_none=true: pattern items may be anonymous and need names
+                            assign(pid, true, &mut counter, &mut self.promoted_temp_names, &mut decl_seen);
+                        }
+                    }
+                }
+            }
+        }
+        counter
+    }
+
     // -----------------------------------------------------------------------
     // Scope output analysis
     // -----------------------------------------------------------------------
@@ -5347,12 +5517,34 @@ impl<'a> Codegen<'a> {
         if let Some(name) = self.name_overrides.get(&id.0) {
             return name.clone();
         }
-        if let Some(name) = self.env
+        // Check environment identifier name.
+        // For Promoted $t/$T names, check promoted_temp_names first (rename_variables
+        // equivalent for flat codegen). Named user vars are returned directly.
+        let env_name = self.env
             .get_identifier(id)
             .and_then(|i| i.name.as_ref())
-            .map(|n| n.value().to_string())
-        {
-            return name;
+            .map(|n| n.value().to_string());
+        if let Some(ref name) = env_name {
+            use crate::hir::hir::IdentifierName;
+            let is_promoted_temp = self.env
+                .get_identifier(id)
+                .and_then(|i| i.name.as_ref())
+                .map(|n| matches!(n, IdentifierName::Promoted(_)) && (n.value().starts_with("$t") || n.value().starts_with("$T")))
+                .unwrap_or(false);
+            if is_promoted_temp {
+                // Use promoted_temp_names if available (assigned by build_promoted_temp_names).
+                if let Some(renamed) = self.promoted_temp_names.get(&id.0) {
+                    return renamed.clone();
+                }
+                // Also check scope_output_names (scope emission may have already mapped this).
+                if let Some(renamed) = self.scope_output_names.get(&id.0) {
+                    return renamed.clone();
+                }
+                // Fall through to ssa_value_to_name etc.
+                let _ = name; // suppress unused warning
+            } else {
+                return name.clone();
+            }
         }
         // Fall back to ssa_value_to_name for SSA temps that flow into named variables.
         if let Some(name) = self.ssa_value_to_name.get(&id.0) {
@@ -5367,6 +5559,10 @@ impl<'a> Codegen<'a> {
             if let InstructionValue::FunctionExpression { name_hint: Some(hint), .. } = &instr.value {
                 return hint.clone();
             }
+        }
+        // Check promoted_temp_names (anonymous temps renamed to t0, t1, ... by build_promoted_temp_names).
+        if let Some(name) = self.promoted_temp_names.get(&id.0) {
+            return name.clone();
         }
         format!("$t{}", id.0)
     }
@@ -6271,7 +6467,7 @@ impl<'a> Codegen<'a> {
                     let binding_name = self.ident_name(binding.identifier);
                     let _ = std::fmt::write(out, format_args!("{pad}}} catch ({binding_name}) {{\n"));
                 } else {
-                    let _ = std::fmt::write(out, format_args!("{pad}}} catch (_e) {{\n"));
+                    let _ = std::fmt::write(out, format_args!("{pad}}} catch {{\n"));
                 }
                 self.codegen_tree_block(handler, scope_out_names, indent + 1, out, scope_instrs, inlined_ids, scope_index, declared_names);
                 let _ = std::fmt::write(out, format_args!("{pad}}}\n"));
