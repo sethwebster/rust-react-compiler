@@ -1448,6 +1448,7 @@ pub enum ReactiveTerminal {
         id: InstructionId,
         loc: SourceLocation,
         iterable_bid: BlockId,
+        loop_bid: BlockId,
     },
     ForIn {
         loop_var: String,

@@ -6209,14 +6209,28 @@ impl<'a> Codegen<'a> {
                 out.push_str(&strip_trailing_continue(&loop_out, indent + 1));
                 let _ = std::fmt::write(out, format_args!("{pad}}}\n"));
             }
-            ReactiveTerminal::ForOf { loop_var, iterable, loop_, iterable_bid, .. } => {
+            ReactiveTerminal::ForOf { loop_var, iterable, loop_, iterable_bid, loop_bid, .. } => {
                 // Use flat-codegen local_exprs approach to resolve iterable (handles named
                 // promoted temps like $t21 = PropertyLoad that aren't in inlined_exprs).
                 let iterable_expr = self.forof_init_expr(*iterable_bid)
                     .unwrap_or_else(|| self.reactive_value_expr(iterable));
-                let _ = std::fmt::write(out, format_args!("{pad}for (const {loop_var} of {iterable_expr}) {{\n"));
+                // Detect destructuring pattern in loop body (e.g. `const [, entry] = item`).
+                // Use a local clone so we can add the Destructure's lvalue to inlined_ids for
+                // the loop body without affecting sibling instructions.
+                let iter_next_id = self.hir.body.blocks.get(loop_bid).and_then(|b| {
+                    b.instructions.iter().find_map(|instr| {
+                        match &instr.value {
+                            InstructionValue::StoreLocal { value, .. } => Some(value.identifier.0),
+                            InstructionValue::Destructure { value, .. } => Some(value.identifier.0),
+                            _ => None,
+                        }
+                    })
+                });
+                let mut loop_inlined = inlined_ids.clone();
+                let for_of_pattern = self.try_inline_for_of_destructure(*loop_bid, iter_next_id, loop_var, &mut loop_inlined);
+                let _ = std::fmt::write(out, format_args!("{pad}for (const {for_of_pattern} of {iterable_expr}) {{\n"));
                 let mut loop_out = String::new();
-                self.codegen_tree_block(loop_, scope_out_names, indent + 1, &mut loop_out, scope_instrs, inlined_ids, scope_index, declared_names);
+                self.codegen_tree_block(loop_, scope_out_names, indent + 1, &mut loop_out, scope_instrs, &loop_inlined, scope_index, declared_names);
                 out.push_str(&strip_trailing_continue(&loop_out, indent + 1));
                 let _ = std::fmt::write(out, format_args!("{pad}}}\n"));
             }
@@ -6289,6 +6303,23 @@ impl<'a> Codegen<'a> {
                         .cloned()
                         .unwrap_or_else(|| self.expr(object));
                     local_exprs.insert(instr.lvalue.identifier.0, format!("{obj}.{property}"));
+                }
+                InstructionValue::MethodCall { receiver, property, args, .. } => {
+                    // Handle method calls like `mapping.values()` or `s1.values()`.
+                    let recv = local_exprs.get(&receiver.identifier.0)
+                        .cloned()
+                        .unwrap_or_else(|| self.expr(receiver));
+                    let method_suffix = self.method_suffix_from_place(property);
+                    let call_args = self.call_args(args);
+                    local_exprs.insert(instr.lvalue.identifier.0, format!("{recv}{method_suffix}({call_args})"));
+                }
+                InstructionValue::CallExpression { callee, args, .. } => {
+                    // Handle plain call expressions like `someFunc()`.
+                    let callee_expr = local_exprs.get(&callee.identifier.0)
+                        .cloned()
+                        .unwrap_or_else(|| self.expr(callee));
+                    let call_args = self.call_args(args);
+                    local_exprs.insert(instr.lvalue.identifier.0, format!("{callee_expr}({call_args})"));
                 }
                 InstructionValue::GetIterator { collection, .. }
                 | InstructionValue::NextPropertyOf { value: collection, .. } => {

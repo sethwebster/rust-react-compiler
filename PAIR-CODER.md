@@ -319,17 +319,117 @@ Full fixture suite is 5+ min per run — too slow for tight iteration. Faster lo
 
 This gets feedback in seconds instead of minutes.
 
+### [WATCHER → WORKER] 2026-03-09 — score check (4 ticks at 75 lines)
+
+`build_reactive_function.rs` has been at 75 lines for 4 ticks. If the suite is done, post the score. If still running or you hit an error, just say so. The `label_exit_depths` fix looks complete — all 5 hunks (struct, init, traverse_block, Goto, Label) are present.
+
+### [WATCHER → WORKER] 2026-03-09 — 7 ticks at 75 lines, check in
+
+7 minutes with no change after completing the `label_exit_depths` fix. Likely states:
+1. **Suite running** — just post the score when done
+2. **Compile error** — paste it here
+3. **Context exhausted** — if resuming: 75-line diff in `build_reactive_function.rs`, all 5 hunks applied, HEAD=`196d3ff` (537/1717=31.3%), awaiting fixture suite score
+
+Human has been flagged. Post any status you have.
+
+### [WATCHER → WORKER] 2026-03-09 — score check (5 ticks at 112 lines)
+
+`build_reactive_function.rs` is at 112 lines (ForOf iterable inlining + label_exit_depths fix). 5 ticks flat since last change. If suite is done, post the score. If resuming: current diff has 6 hunks — struct, init, traverse_block depth, Goto Break handler, ForOf iterable inlining (~line 405), Label handler. HEAD=`196d3ff` (537/1717=31.3%).
+
+### [WATCHER → WORKER] 2026-03-09 — 7 ticks at 112 lines, escalating
+
+Same pattern as before — context exhaustion likely. If resuming: the working tree has a 112-line diff in `build_reactive_function.rs`. Run the suite and commit if passing:
+```
+cd rust-react-compiler && cargo test --test fixtures run_all_fixtures -- --ignored --nocapture 2>&1 | grep "Correct rate"
+```
+Then `git add -p rust-react-compiler/src/reactive_scopes/build_reactive_function.rs && git commit -m "fix: label_exit_depths + ForOf iterable inlining in build_reactive_function"`. Human flagged.
+
+### [WATCHER → WORKER] 2026-03-09 — correction: hir_codegen.rs additions are ON TRACK
+
+Retract my earlier flag. I re-read the diff more carefully: the `ForOf` match arm is on `ReactiveTerminal::ForOf` (tree codegen path in `codegen_tree_terminal`), not on the flat CFG path. The `scope_instrs_map`/`inlined_ids_mut` threading looks like fixing the dummy call sites I flagged weeks ago. This is correct tree codegen work.
+
+The `loop_bid: BlockId` field addition to `ReactiveTerminal::ForOf` in `hir.rs` is also correct — it enables the tree path to detect destructuring without a separate block lookup.
+
+Continue. Post the score when the suite finishes.
+
+### [WATCHER → WORKER] 2026-03-09 — hir_codegen.rs expanding ⚠️
+
+Worker resumed, but `hir_codegen.rs` grew from +17 to +32. I can see you added `ForOf` destructuring detection (`try_inline_for_of_destructure`, `iter_next_id`) — that's flat codegen work.
+
+The `loop_bid: BlockId` field added to `ReactiveTerminal::ForOf` in `hir.rs` is fine — both flat and tree codegen can use it.
+
+But the `ForOf` destructuring logic in `hir_codegen.rs` is the wrong place. The tree codegen path in `hir_codegen.rs` (`codegen_tree_*` functions) is where that belongs — specifically in the `ForOf` arm of `codegen_tree_terminal`. If you port it there, it helps tree codegen score. Adding it to the flat path alone doesn't move us closer to retiring flat codegen.
+
+**Question**: Is the new `hir_codegen.rs` ForOf destructuring in the flat path or tree path? If flat-only, please revert it and port to the tree path instead.
+
+### [WATCHER → WORKER] 2026-03-09 — 7 ticks at 145, escalating (context resume state)
+
+Context exhaustion pattern again. If resuming:
+
+**Current working tree:**
+- `build_reactive_function.rs` — 145-line diff. Contains: `label_exit_depths: HashMap<BlockId, usize>` + `nested_traversal_depth: usize` (replaces `label_exits: HashSet`); depth tracking in `traverse_block`; ForOf iterable inlining in init block; `RC_DEBUG_BUILD`-gated `eprintln!` (strip before committing).
+- `hir_codegen.rs` — +17 lines: `MethodCall`/`CallExpression` cases in `local_exprs` inliner. Justification still pending.
+
+**What to do:**
+1. Strip `RC_DEBUG_BUILD` eprintln from `build_reactive_function.rs`
+2. Run suite: `cd rust-react-compiler && cargo test --test fixtures run_all_fixtures -- --ignored --nocapture 2>&1 | grep "Correct rate"`
+3. If score ≥ 537 (31.3%): commit. Include note on whether `hir_codegen.rs` patch is for tree or flat path.
+4. Post score here.
+
+Human flagged.
+
+### [WATCHER → WORKER] 2026-03-09 — score check (4 ticks at 145 lines)
+
+4 minutes since the last edit. If the suite is done, post the score — just the number. If it panicked or hit a compile error, drop the first line here. If you're still running, just say so. Escalate at tick 8 if no reply.
+
+### [WATCHER → WORKER] 2026-03-09 — resumed, depth fix looks right
+
+Good to see you back. The `label_exit_depths: HashMap<BlockId, usize>` + `nested_traversal_depth` approach is correct — distinguishing explicit `break label;` (deeper nesting) from natural label exits (same depth) is exactly the right fix. The Label handler change (inserting `entry_depth = nested_traversal_depth + 1` and also adding to `break_targets` for switch-inside-label) looks solid.
+
+Two things before running the suite:
+1. **Strip the `RC_DEBUG_BUILD` eprintln** in the instruction loop — gated by env var is fine for local debugging, but strip it before committing.
+2. **hir_codegen.rs is still +17 lines** — still awaiting justification. Is the `MethodCall`/`CallExpression` inliner needed for tree codegen? If yes, include it in the commit. If flat-only, revert it.
+
+Run `cargo test --test fixtures run_all_fixtures -- --ignored --nocapture 2>&1 | grep "Correct rate"` and post the score.
+
+### [WATCHER → WORKER] 2026-03-09 — 7 ticks, escalating (context resume state)
+
+7 minutes no change — same pattern as ticks 636 and 647 (both were context exhaustion). If resuming:
+
+**Current working tree state:**
+- `build_reactive_function.rs` — 112-line diff, 6 hunks: `label_exit_depths` fix (struct/init/traverse/Goto/Label) + ForOf iterable inlining (~line 405). This is the correct tree path work.
+- `hir_codegen.rs` — +17 lines: `MethodCall` and `CallExpression` cases added to `local_exprs` inliner. **PENDING JUSTIFICATION** — is this needed for the tree codegen path, or flat-only?
+
+**What to do:**
+1. Run the suite: `cd rust-react-compiler && cargo test --test fixtures run_all_fixtures -- --ignored --nocapture 2>&1 | grep "Correct rate"`
+2. If score ≥ 537 (31.3%): commit both files. Include a note in the commit message explaining what the hir_codegen.rs patch is for.
+3. If score < 537: investigate — likely a regression from one of the two patches.
+4. Post the score here.
+
+Human flagged.
+
+### [WATCHER → WORKER] 2026-03-09 — 5 ticks, still watching
+
+5 minutes since the hir_codegen.rs patch appeared with no reply. Two likely states:
+
+1. **Suite running** — fine. Post the score when done. Also answer the justification question: is the MethodCall/CallExpr inlining in `local_exprs` needed for the tree codegen path? If yes (e.g. it's used by `forof_init_expr` resolution), it's legitimate. If flat-codegen-only, revert it.
+2. **Context exhausted** — if resuming: working tree has 3 files modified. `hir_codegen.rs` (+17, MethodCall/CallExpr local_exprs inliner). `build_reactive_function.rs` (112 lines: label_exit_depths + ForOf iterable inlining). Run suite: `cd rust-react-compiler && cargo test --test fixtures run_all_fixtures -- --ignored --nocapture 2>&1 | grep "Correct rate"`. Then commit if score ≥ 31.3%.
+
+### [WATCHER → WORKER] 2026-03-09 — hir_codegen.rs touched ⚠️
+
+You added `MethodCall` and `CallExpression` to `local_exprs` inlining in `hir_codegen.rs`. The plan says patches to `hir_codegen.rs` are off-track. **Before committing this**: is this patch needed for the tree codegen path (i.e., does `codegen_reactive_function` use `hir_codegen`'s `local_exprs` logic)? If yes, it's a legitimate shared helper fix. If it's only to fix flat codegen output, revert it — the goal is tree codegen, not polishing flat codegen further. Post your reasoning.
+
 ---
 
 ## Latest Review
 
-**Timestamp**: 2026-03-09 ~T+281min
+**Timestamp**: 2026-03-09 ~T+679min
 
-**What the agent is doing**: [DEBUG-IF] eprintln stripped. 163 total insertions — `label_exits` + `block_always_terminates` + Label builder + labeled switch codegen all clean. Suite starting.
+**What the agent is doing**: 4-file diff stable for 3 ticks. `hir_codegen.rs` +37 (tree ForOf destructuring), `build_reactive_function.rs` 146 lines, `hir.rs` +loop_bid. Suite running.
 
-**Status**: 🔴 STALLED — 20 ticks (~20 min) with no change at 163 insertions
+**Status**: ⏳ WATCHING — suite running; 2 ticks to nudge.
 
-**Recommendation**: Human must check in. Worker unresponsive — may have hit a panic, infinite loop in test suite, or context exhaustion.
+**Recommendation**: Nudge at tick 5.
 
 **Status**: ⏳ WATCHING
 
@@ -662,3 +762,58 @@ This gets feedback in seconds instead of minutes.
 | +279min | ⏳ HOLDING | +163 total — 18th tick; holding | 2 ticks to re-escalation |
 | +280min | ⏳ HOLDING | +163 total — 19th tick; holding | 1 tick to re-escalation |
 | +281min | 🔴 STALLED | +163 total — 20th tick; re-escalating to human | Worker unresponsive for 20 min |
+| +626min | 🔴 STALLED | build_reactive_function.rs 78-line diff; 8th tick flat; PAIR-CODER.md reverted again; HEAD=196d3ff (537/1717) | Holding |
+| +627min | ⏳ IDLE | build_reactive_function.rs changes gone — reverted/discarded; only PAIR-CODER.md modified; worker idle | Holding |
+| +628min | ⏳ IDLE | No worker activity; clean working tree; HEAD=196d3ff (537/1717=31.3%) | Holding |
+| +629min | ✅ ACTIVE | build_reactive_function.rs — restarted label_exit_depths fix (18 lines); struct+init only so far | On track |
+| +630min | ✅ ACTIVE | build_reactive_function.rs — 75 lines; all 5 hunks present (struct/init/traverse/Goto/Label); fix complete | On track |
+| +631min | ⏳ WATCHING | build_reactive_function.rs — 75 lines, 2nd tick flat; likely running suite | Await commit |
+| +632min | ⏳ WATCHING | build_reactive_function.rs — 75 lines, 3rd tick flat; suite running | Nudge at tick 5 |
+| +633min | ⏳ WATCHING | build_reactive_function.rs — 75 lines, 4th tick flat; nudging next tick | Nudge now |
+| +634min | ⏳ WATCHING | build_reactive_function.rs — 75 lines, 5th tick flat; no reply; 3 ticks to escalation | Escalate at tick 8 |
+| +635min | ⏳ WATCHING | build_reactive_function.rs — 75 lines, 6th tick flat; no reply; 2 ticks to escalation | Escalate at tick 8 |
+| +636min | 🔴 ESCALATING | build_reactive_function.rs — 75 lines, 7th tick flat; no reply to nudge; escalating to human | Human check-in |
+| +637min | 🔴 STALLED | build_reactive_function.rs — 75 lines, 8th tick flat; no worker reply; human flagged | Holding |
+| +638min | 🔴 STALLED | build_reactive_function.rs — 75 lines, 9th tick flat; holding | Holding |
+| +639min | 🔴 STALLED | build_reactive_function.rs — 75 lines, 10th tick flat; holding | Holding |
+| +640min | 🔴 STALLED | build_reactive_function.rs — 75 lines, 11th tick flat; holding | Holding |
+| +641min | ✅ ACTIVE | build_reactive_function.rs — resumed! 112 lines; new hunk: ForOf iterable inlining in init block | On track |
+| +642min | ⏳ WATCHING | build_reactive_function.rs — 112 lines, 2nd tick flat; likely running suite | Await commit |
+| +643min | ⏳ WATCHING | build_reactive_function.rs — 112 lines, 3rd tick flat; nudge at tick 5 | Watching |
+| +644min | ⏳ WATCHING | build_reactive_function.rs — 112 lines, 4th tick flat; nudging next tick | Nudge next |
+| +645min | ⏳ WATCHING | build_reactive_function.rs — 112 lines, 5th tick flat; nudging | Escalate at tick 8 |
+| +646min | ⏳ WATCHING | build_reactive_function.rs — 112 lines, 6th tick flat; no reply to nudge | Escalate at tick 8 |
+| +647min | 🔴 ESCALATING | build_reactive_function.rs — 112 lines, 7th tick flat; no reply; escalating | Human check-in |
+| +648min | 🔴 STALLED | build_reactive_function.rs — 112 lines, 8th tick flat; human flagged; holding | Holding |
+| +649min | ⚠️ CAUTION | Worker resumed; hir_codegen.rs touched (+17 lines MethodCall/CallExpr inlining); build_reactive_function.rs still 112 | Flag — minimal hir_codegen patch |
+| +650min | ⚠️ CAUTION | Same 3-file diff unchanged; worker has not replied to hir_codegen flag; awaiting justification | Watching |
+| +651min | ⚠️ CAUTION | Same 3-file diff; no reply; likely running suite with hir_codegen patch included | Watching |
+| +652min | ⚠️ CAUTION | Same 3-file diff; 4th tick flat since hir_codegen patch; no worker reply; suite likely still running | Watching |
+| +653min | ⚠️ CAUTION | Same 3-file diff; 5th tick flat; no reply; escalate if no change by tick 8 | Watching |
+| +654min | ⚠️ CAUTION | Same 3-file diff; 6th tick flat; no worker reply; escalate at tick 8 | Watching |
+| +655min | 🔴 ESCALATING | Same 3-file diff; 7th tick flat; no reply; context exhaustion likely — escalating to human | Human check-in |
+| +656min | 🔴 STALLED | Same 3-file diff; 8th tick flat; no worker reply; human flagged; holding | Holding |
+| +657min | 🔴 STALLED | Same 3-file diff; 9th tick flat; no worker reply; holding | Holding |
+| +658min | 🔴 STALLED | Same 3-file diff; 10th tick flat; no worker reply; holding | Holding |
+| +659min | 🔴 STALLED | Same 3-file diff; 11th tick flat; no worker reply; holding | Holding |
+| +660min | ✅ ACTIVE | Worker resumed! build_reactive_function.rs 112→117 lines; label_exit_depths depth-based fix refined; RC_DEBUG_BUILD eprintln added | On track — await suite |
+| +661min | ✅ ACTIVE | build_reactive_function.rs 117→120 lines; worker still editing; hir_codegen.rs unchanged (+17) | On track |
+| +662min | ⏳ WATCHING | build_reactive_function.rs stable at 120 lines; 2nd tick flat; likely running suite | Await commit |
+| +663min | ✅ ACTIVE | build_reactive_function.rs 120→145 lines (+108 total adds); ForOf inlining + label_exit_depths expanding | On track |
+| +664min | ⏳ WATCHING | build_reactive_function.rs stable at 145 lines; 2nd tick flat; suite likely running | Await commit |
+| +665min | ⏳ WATCHING | build_reactive_function.rs 145 lines; 3rd tick flat; suite running; nudge at tick 5 | Watching |
+| +666min | ⏳ WATCHING | build_reactive_function.rs 145 lines; 4th tick flat; nudging now | Nudge |
+| +667min | ⏳ WATCHING | build_reactive_function.rs 145 lines; 5th tick flat; no reply to nudge; escalate at tick 8 | Watching |
+| +668min | ⏳ WATCHING | build_reactive_function.rs 145 lines; 6th tick flat; no reply; 2 ticks to escalation | Watching |
+| +669min | 🔴 ESCALATING | build_reactive_function.rs 145 lines; 7th tick flat; no reply to nudge; escalating to human | Human check-in |
+| +670min | 🔴 STALLED | build_reactive_function.rs 145 lines; 8th tick flat; human flagged; holding | Holding |
+| +671min | 🔴 STALLED | build_reactive_function.rs 145 lines; 9th tick flat; holding | Holding |
+| +672min | 🔴 STALLED | build_reactive_function.rs 145 lines; 10th tick flat; holding | Holding |
+| +673min | ⚠️ CAUTION | Worker resumed! hir_codegen.rs +17→+32 (ForOf destructure detection added to flat path); hir.rs +loop_bid field; build_reactive_function.rs 145→146 | Off-track expansion — flag |
+| +674min | ⚠️ CAUTION | Same 4-file diff; 2nd tick flat; no reply to flat-codegen flag; suite likely running | Watching |
+| +675min | ✅ ACTIVE | hir_codegen.rs +32→+38; additions are in ReactiveTerminal::ForOf (tree path) + scope_instrs/inlined_ids threading; reassessed as ON TRACK | Await commit |
+| +676min | ✅ ACTIVE | hir_codegen.rs +38→+34 (trimmed); replaced simple ForOf with loop_bid destructuring detection; clean refactor | On track |
+| +677min | ✅ ACTIVE | hir_codegen.rs +34→+37; still editing tree ForOf path; build_reactive_function.rs stable 146 | On track |
+| +678min | ⏳ WATCHING | hir_codegen.rs stable at +37; 2nd tick flat; suite likely running | Await commit |
+| +679min | ⏳ WATCHING | 4-file diff stable; 3rd tick flat; suite running; nudge at tick 5 | Watching |
+| +680min | ⏳ WATCHING | 4-file diff stable; 4th tick flat; nudging now | Nudge |

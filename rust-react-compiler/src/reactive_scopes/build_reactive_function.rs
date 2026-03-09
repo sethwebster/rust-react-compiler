@@ -52,11 +52,14 @@ struct Context<'a> {
     /// A `goto join (Break)` to a non-break-target scheduled block is a natural
     /// if/else fallthrough and is suppressed.
     break_targets: HashSet<BlockId>,
-    /// Fallthroughs of Label terminals. A `Goto(Break, target)` where target is
-    /// in label_exits is an explicit `break label;` ONLY when `break_targets` is
-    /// non-empty (i.e. we're inside a loop/switch). Otherwise it is a natural exit
-    /// from the label body and should be suppressed (no break emitted).
-    label_exits: HashSet<BlockId>,
+    /// Maps label fallthrough BlockId → the `traverse_block` nesting depth at which
+    /// the Label terminal's body was entered. A `Goto(Break, target)` where target is
+    /// in `label_exit_depths` is:
+    ///   - An explicit `break label;` if the current depth > entry depth
+    ///   - A natural label exit if current depth == entry depth (suppressed)
+    label_exit_depths: HashMap<BlockId, usize>,
+    /// Current nesting depth of `traverse_block` calls.
+    nested_traversal_depth: usize,
     /// Scope lookup: instruction ID → scope that starts/ends here.
     scope_starts: HashMap<InstructionId, ScopeId>,
     scope_ends: HashMap<InstructionId, ScopeId>,
@@ -76,15 +79,18 @@ impl<'a> Context<'a> {
             emitted: HashSet::new(),
             scheduled: HashSet::new(),
             break_targets: HashSet::new(),
-            label_exits: HashSet::new(),
+            label_exit_depths: HashMap::new(),
+            nested_traversal_depth: 0,
             scope_starts,
             scope_ends,
         }
     }
 
     fn traverse_block(&mut self, block: &BasicBlock) -> ReactiveBlock {
+        self.nested_traversal_depth += 1;
         let mut result = Vec::new();
         self.visit_block(block, &mut result);
+        self.nested_traversal_depth -= 1;
         result
     }
 
@@ -118,6 +124,34 @@ impl<'a> Context<'a> {
         if !self.emitted.insert(block.id) {
             return;
         }
+
+        // When a ForOf/ForIn terminal's init block is the same as the current block,
+        // instructions that set up the iterator (GetIterator collection source etc.)
+        // would otherwise be emitted as spurious standalone statements. Pre-scan the
+        // terminal to collect lvalue IDs that should be suppressed.
+        let iterable_source_ids: std::collections::HashSet<IdentifierId> = {
+            let mut ids = std::collections::HashSet::new();
+            let (is_forof, init_bid) = match &block.terminal {
+                Terminal::ForOf { init, .. } => (true, *init),
+                Terminal::ForIn { init, .. } => (true, *init),
+                _ => (false, block.id),
+            };
+            if is_forof && init_bid == block.id {
+                // Find GetIterator/NextPropertyOf collection identifier
+                for instr in &block.instructions {
+                    match &instr.value {
+                        InstructionValue::GetIterator { collection, .. } => {
+                            ids.insert(collection.identifier);
+                        }
+                        InstructionValue::NextPropertyOf { value, .. } => {
+                            ids.insert(value.identifier);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            ids
+        };
 
         // Emit instructions, wrapping scope ranges in ReactiveScopeBlock.
         for instr in &block.instructions {
@@ -162,6 +196,11 @@ impl<'a> Context<'a> {
             ) {
                 continue;
             }
+            // Skip instructions that directly produce the iterable value (i.e., the
+            // collection for GetIterator) when the init block == current block.
+            if iterable_source_ids.contains(&instr.lvalue.identifier) {
+                continue;
+            }
 
             let stmt = ReactiveStatement::Instruction(ReactiveInstruction {
                 id: instr.id,
@@ -193,11 +232,30 @@ impl<'a> Context<'a> {
             Terminal::Goto { block: next, variant, .. } => {
                 match variant {
                     GotoVariant::Break => {
-                        let is_loop_break = self.break_targets.contains(next);
-                        let is_label_exit = self.label_exits.contains(next);
-                        if is_loop_break || (is_label_exit && !self.break_targets.is_empty()) {
-                            // Break out of a loop/switch, or explicit `break label;` from inside
-                            // a loop/switch that targets a label exit.
+                        if let Some(&label_depth) = self.label_exit_depths.get(next) {
+                            // Target is a label exit — use depth to distinguish explicit
+                            // `break label;` (deeper) from natural label fallthrough (same depth).
+                            if self.nested_traversal_depth > label_depth {
+                                Self::push_stmt_or_scope(
+                                    scope_body,
+                                    out,
+                                    ReactiveStatement::Terminal(ReactiveTerminalStatement {
+                                        terminal: ReactiveTerminal::Break {
+                                            target: *next,
+                                            id: block.terminal.id(),
+                                            target_kind: ReactiveTerminalTargetKind::Implicit,
+                                            loc: block.terminal.loc().clone(),
+                                        },
+                                        label: None,
+                                    }),
+                                );
+                                None
+                            } else {
+                                // Natural exit — suppress; outer Label handler visits fallthrough.
+                                None
+                            }
+                        } else if self.break_targets.contains(next) {
+                            // Break out of a loop or switch.
                             Self::push_stmt_or_scope(
                                 scope_body,
                                 out,
@@ -213,15 +271,8 @@ impl<'a> Context<'a> {
                             );
                             None
                         } else {
-                            // Natural fallthrough: if/else merge block or natural label exit
-                            // (when not inside any loop/switch).
-                            // For label exits: suppress — the outer Label handler will visit
-                            // the fallthrough block as its natural continuation.
-                            if is_label_exit {
-                                None
-                            } else {
-                                Some(*next)
-                            }
+                            // Natural fallthrough to if/else merge block.
+                            Some(*next)
                         }
                     }
                     GotoVariant::Continue => {
@@ -405,19 +456,38 @@ impl<'a> Context<'a> {
                 // Extract the iterable from GetIterator in init block.
                 let iterable_val = if let Some(block) = self.hir.body.blocks.get(init) {
                     self.emitted.insert(*init);
-                    block.instructions.iter().find_map(|instr| {
+                    // Find the collection place from GetIterator.
+                    let collection_opt = block.instructions.iter().find_map(|instr| {
                         if let InstructionValue::GetIterator { collection, .. } = &instr.value {
-                            Some(ReactiveValue::Instruction(InstructionValue::LoadLocal {
-                                place: collection.clone(),
-                                loc: instr.lvalue.loc.clone(),
-                            }))
+                            Some(collection.clone())
                         } else {
                             None
                         }
-                    }).unwrap_or(ReactiveValue::Instruction(InstructionValue::Primitive {
-                        value: PrimitiveValue::Undefined,
-                        loc: SourceLocation::Generated,
-                    }))
+                    });
+                    if let Some(collection) = collection_opt {
+                        // If collection is a temp defined in this init block, inline its defining
+                        // expression (e.g. `mapping.values()` rather than emitting the temp name).
+                        let defining_instr = block.instructions.iter().find(|instr| {
+                            instr.lvalue.identifier == collection.identifier
+                                && !matches!(&instr.value,
+                                    InstructionValue::GetIterator { .. }
+                                    | InstructionValue::IteratorNext { .. }
+                                )
+                        });
+                        if let Some(def) = defining_instr {
+                            ReactiveValue::Instruction(def.value.clone())
+                        } else {
+                            ReactiveValue::Instruction(InstructionValue::LoadLocal {
+                                place: collection,
+                                loc: SourceLocation::Generated,
+                            })
+                        }
+                    } else {
+                        ReactiveValue::Instruction(InstructionValue::Primitive {
+                            value: PrimitiveValue::Undefined,
+                            loc: SourceLocation::Generated,
+                        })
+                    }
                 } else {
                     ReactiveValue::Instruction(InstructionValue::Primitive {
                         value: PrimitiveValue::Undefined,
@@ -460,6 +530,7 @@ impl<'a> Context<'a> {
                             id: *id,
                             loc: loc.clone(),
                             iterable_bid: *init,
+                            loop_bid: *loop_,
                         },
                         label: Some(ReactiveLabel { id: *fallthrough, implicit: false }),
                     }),
@@ -638,19 +709,22 @@ impl<'a> Context<'a> {
 
             Terminal::Label { block: body_bid, fallthrough, id, loc, .. } => {
                 self.scheduled.insert(*fallthrough);
-                // Track label fallthrough in label_exits (NOT break_targets). This allows
-                // Goto(Break, label_fallthrough) inside a loop to emit `break label;`, while
-                // Goto(Break, label_fallthrough) outside any loop is treated as a natural exit.
-                self.label_exits.insert(*fallthrough);
-                // Mark as emitted to prevent inner blocks from visiting the fallthrough.
+                // Record the depth of the label body so Goto(Break) can distinguish
+                // explicit `break label;` (deeper) from natural exit chains (same depth).
+                let entry_depth = self.nested_traversal_depth + 1;
+                self.label_exit_depths.insert(*fallthrough, entry_depth);
+                // Keep in break_targets so switch-inside-label detects its break target.
+                self.break_targets.insert(*fallthrough);
+                // Mark as emitted to prevent visiting fallthrough from within the body.
                 self.emitted.insert(*fallthrough);
 
                 let body = self.hir.body.blocks.get(body_bid)
                     .map(|b| self.traverse_block(b)).unwrap_or_default();
 
                 self.scheduled.remove(fallthrough);
-                self.label_exits.remove(fallthrough);
-                // Remove from emitted so the outer level can visit the fallthrough.
+                self.label_exit_depths.remove(fallthrough);
+                self.break_targets.remove(fallthrough);
+                // Remove from emitted so the outer level can visit normally.
                 self.emitted.remove(fallthrough);
                 Self::push_stmt_or_scope(
                     scope_body,
