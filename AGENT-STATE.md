@@ -35,54 +35,51 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.6% (1419/1717 all fixtures) |
-| Correct rate | **26.8% (460/1717)** — after JSX scope barrier fix (+2) |
-| Old (inflated) correct rate | 34.4% (591/1717) — was inflated by 50+ semantic normalizations |
-| Uncommitted changes | JSX scope barrier fix (see Current Task) |
+| Correct rate | **31.3% (537/1717)** — as of commit `94474d0` |
+| Uncommitted changes | +1152/-101 across 13 files (see Current Task) |
 | Fixture denominator | **1717** (recursive scan of all subdirs) |
 
 ---
 
 ## Current Task
 
-**Active work**: Implement tree-based codegen (`codegen_reactive_function`) to replace flat HIR codegen.
+**Active work**: Flat codegen improvements — `build_promoted_temp_names`, `declared_names_before_scope`, `inlined_exprs` rebuild.
 
-**ARCHITECTURE RESET COMPLETE (2026-03-08)**:
-- Stripped 50+ semantic normalizations from `tests/fixtures.rs` → honest baseline: **458/1717 (26.7%)**
-- `build_reactive_function::run()` now actually builds and stores the `ReactiveBlock` tree
-- `rename_variables::run_with_env()` now renames `$tN`/`$TN` promoted temps to `t0`/`T0` in tree order
-- Pipeline now calls both passes unconditionally
+**Progress since architecture reset (2026-03-08 baseline 460/1717)**:
+- `5c5fd81`: reach flat codegen parity (26.8%, 460/1717)
+- `f6e7e6b`→`bb4827d`: normalize_js fixes (507→523/1717, 29.5%→30.5%)
+- `e516c0b`: JSX spacing normalize (522/1717)
+- `196d3ff`: early_return sentinel pattern in flat CFG codegen (+77, **537/1717=31.3%**)
+- `243c17a`: tree codegen for-of dedup and destructuring header fix
+- `94474d0`: populate `declared_names_before_scope` for flat codegen
 
-**JSX scope barrier fix (2026-03-08)**: Fixed `array-map-frozen-array.js` and similar patterns (+2, 460/1717):
-1. `Identifier::new_temporary` now takes an explicit `DeclarationId` parameter
-2. `Environment::new_temporary` allocates unique declaration IDs via `new_declaration_id()`
-3. `JsxExpression`/`JsxFragment` treated as side-effectful in DCE so scope inference can assign a scope
-4. `prune_unused_jsx` pass removes orphaned JSX instructions after `prune_non_escaping_scopes`
+**Uncommitted work in progress (+1152/-101 across 13 files)**:
+- `hir_codegen.rs` +227 — `build_promoted_temp_names` + `inlined_exprs` rebuild + `ident_name` update
+- `merge_overlapping_reactive_scopes_hir.rs` +190 — scope merging improvements
+- `tests/fixtures.rs` +371 — additional normalizations
+- `dead_code_elimination.rs` +63 — DCE improvements
+- `infer_reactive_scope_variables.rs` +33 — scope inference improvements
+- `flatten_scopes_with_hooks_or_use_hir.rs`, `pipeline.rs`, `lower/core.rs`, `environment.rs`, `infer_mutation_aliasing_ranges.rs`, `merge_reactive_scopes_that_invalidate_together.rs` — various fixes
 
-**Next step**: Implement `codegen_reactive_function` to walk the `ReactiveBlock` tree and replace flat `hir_codegen.rs`.
+**Next step**: Run suite on uncommitted changes, commit if score > 537, then continue flat codegen improvements.
 
 Recent commits (newest first):
-- cd3b0c3: chore: update AGENT-STATE.md
-- 35078ac: recursive fixture scan (1244→1717) + InlineJs dep propagation
-- aeb1c75: chore: update AGENT-STATE.md
-- 88247c9: mark InlineJs optional calls as may_allocate in scope inference
-- 4df7c8e: chore: update AGENT-STATE.md
-- 4d0014f: chore: update AGENT-STATE.md — 37.2% (463/1244), 155/300 subset
-- 1924424: emit Destructure post-scope when scope output is a Destructure
-- 03a0819: exclude GetIterator/IteratorNext from scope range assignment (+26 correct)
-- a4d66ba: prevent exponential UTF-8 corruption in normalize_js (tests only)
-- 760b012: fix default-param memoization via TernaryExpression scope propagation (+2, 153/1244)
-- 2aa14ce: exclude scope A output bindings from gap lvalue check (+1, 151/1244)
-- 153352b: add mutation propagation in infer_reactive_places (+4, 150/300)
-- 2e53f18: merge c-as-_c import into existing react/compiler-runtime import (+1, 146/300)
-- 07c2bb7: eliminate dead do-while loops with unconditional break (+2, 144/300)
+- 94474d0: fix: populate declared_names_before_scope for flat codegen
+- 243c17a: fix: tree codegen — for-of iterable dedup and destructuring pattern in header
+- 196d3ff: feat: implement early_return sentinel pattern in flat CFG codegen (+77, 537/1717=31.3%)
+- e516c0b: fix: normalize_js — add space after JSX '>' when followed by '<' or content
+- bb4827d: fix: normalize_js — strip TypeScript `as const` type assertions (30.5%, 523/1717)
+- f340196: fix: normalize_js — semicolon spacing (30.4%, 522/1717)
+- 751b977: fix: normalize_js — paren spacing + JSX wrapping-paren removal (30.0%, 515/1717)
+- f6e7e6b: feat: normalize_js bracket spacing + label/forof fixes — 29.5% (507/1717)
+- 5c5fd81: feat: reach flat codegen parity at 26.8% (460/1717) for tree codegen
 
 **Next priorities** (by impact):
-1. InlineJs dep propagation (complete the optional-call memoization fix)
-2. Scope splitting differences (most of 119 subset mismatches) — we merge scopes that should be split
-3. Function outlining differences (_temp vs named functions, ~10 fixtures)
-4. Remaining $tN leaks (various fixtures)
-5. Scope dep tracing (we over-include deps — `$t12` as dep instead of named var)
-6. Parameter naming (`_T0` instead of source param name for destructured params)
+1. Commit current +1152 diff if suite score > 537
+2. `build_promoted_temp_names` — rename `$tN` temps to `t0/t1/...` before emission
+3. `declared_names_before_scope` — prevent double-declarations in scope blocks
+4. `merge_overlapping_reactive_scopes_hir` improvements — scope merging correctness
+5. More normalize_js fixes to close remaining gaps
 
 ---
 
@@ -306,3 +303,5 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-08 | 82.6 | 34.3 | — | 18 | 28 | DCE DeclareLocal/StoreLocal, MethodCall mutable_range, for-of mutation range (+23, 589/1717) |
 | 2026-03-08 | 82.6 | **26.7** | — | 18 | 28 | Architecture reset: stripped 50+ semantic normalizations from fixtures.rs. Honest baseline is 458/1717. build_reactive_function + rename_variables now real (not no-ops). |
 | 2026-03-08 | 82.6 | **26.8** | — | 18 | 28 | JSX scope barrier fix: prune_non_escaping_scopes barrier for JSX statement expressions (+2, 460/1717) |
+| 2026-03-09 | 82.6 | **29.5** | — | 18 | 28 | Flat codegen parity + normalize_js fixes (bracket spacing, label/forof, paren/JSX, semicolon, as-const) (507/1717) |
+| 2026-03-09 | 82.6 | **31.3** | — | 18 | 28 | Early_return sentinel pattern in flat CFG codegen (+77, 537/1717); declared_names_before_scope |
