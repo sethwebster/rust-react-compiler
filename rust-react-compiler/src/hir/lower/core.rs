@@ -188,6 +188,7 @@ fn lower_program_impl(
     // 'use no forget'/'use no memo' directives (used in test fixtures to verify
     // the compiler can handle functions that have the opt-out directive).
     let ignore_use_no_forget = source.contains("@ignoreUseNoForget");
+    env.config.ignore_use_no_forget = ignore_use_no_forget;
     // Helper: returns true if the function body has 'use no forget'/'use no memo'
     // AND the file does NOT have @ignoreUseNoForget.
     let check_no_memo_directives = |directives: &[oxc_ast::ast::Directive]| -> bool {
@@ -815,6 +816,7 @@ pub fn lower_function<'a>(
     env: &mut Environment,
 ) -> Result<HIRFunction> {
     let loc = span_loc(func.span);
+    let ignore_use_no_forget = env.config.ignore_use_no_forget;
     let mut ctx = LoweringContext::new(env);
 
     // --- Params ---
@@ -836,10 +838,13 @@ pub fn lower_function<'a>(
     let mut non_opt_out_directives: Vec<String> = Vec::new();
     if let Some(body) = &func.body {
         // Collect non-opt-out directives (e.g. "use foo", "use bar", "use forget") to preserve in output.
-        // Only filter out opt-OUT directives ("use no memo", "use no forget").
+        // Only filter out opt-OUT directives ("use no memo", "use no forget") — but when
+        // @ignoreUseNoForget is active, we still compile the function AND preserve the directive
+        // in the output so the test fixture output matches the TS compiler's behavior.
         for directive in &body.directives {
             let val = directive.expression.value.as_str();
-            if val != "use no memo" && val != "use no forget" {
+            let is_opt_out = matches!(val, "use no memo" | "use no forget");
+            if !is_opt_out || ignore_use_no_forget {
                 non_opt_out_directives.push(val.to_string());
             }
         }

@@ -85,19 +85,29 @@ fn decode_jsx_html_entities(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 pub fn codegen_hir_function(hir: &HIRFunction, env: &Environment) -> String {
-    let mut gen = Codegen::new(hir, env);
-    let mut out = gen.emit();
-    // Emit any functions that were outlined by the outline_functions pass.
-    // Apply body text normalization and re-indent to top-level (body_pad = "").
-    for (_, decl) in &env.outlined_functions {
+    let (body, outlines) = codegen_hir_function_parts(hir, env);
+    let mut out = body;
+    for outline in outlines {
         out.push('\n');
-        let normalized = normalize_fn_body_text(decl);
-        let normalized = normalize_jsx_self_closing(&normalized);
-        let reindented = reindent_multiline(&normalized, "");
-        out.push_str(&reindented);
+        out.push_str(&outline);
         out.push('\n');
     }
     out
+}
+
+/// Like `codegen_hir_function`, but returns the component body and outlined helpers separately.
+/// Callers that want to append outlined helpers at the module end (after all other declarations)
+/// should use this instead of `codegen_hir_function`.
+pub fn codegen_hir_function_parts(hir: &HIRFunction, env: &Environment) -> (String, Vec<String>) {
+    let mut gen = Codegen::new(hir, env);
+    let out = gen.emit();
+    // Collect outlined function bodies separately.
+    let outlines: Vec<String> = env.outlined_functions.iter().map(|(_name, decl)| {
+        let normalized = normalize_fn_body_text(decl);
+        let normalized = normalize_jsx_self_closing(&normalized);
+        reindent_multiline(&normalized, "")
+    }).collect();
+    (out, outlines)
 }
 
 // ---------------------------------------------------------------------------
@@ -296,6 +306,9 @@ struct Codegen<'a> {
     /// Number of promoted param names (t0, t1, ...). Scope result temps
     /// start from this offset so they don't collide with param names.
     param_name_offset: usize,
+    /// Number of body temps promoted by build_promoted_temp_names.
+    /// Catch variable renaming starts at param_name_offset + promoted_temp_count.
+    promoted_temp_count: usize,
     /// Instruction map: instr lvalue identifier id → Instruction
     instr_map: HashMap<u32, Instruction>,
     /// Use count: how many times each identifier is used as an operand.
@@ -358,6 +371,9 @@ struct Codegen<'a> {
     /// Blocks that were processed as early-return branch bodies inside a scope's cfg walk.
     /// These blocks' Return terminals were already transformed; emit_cfg_region must skip them.
     early_return_handled_blocks: std::collections::HashSet<BlockId>,
+    /// Set of InstructionIds for DeclareLocal instructions that have been hoisted to before
+    /// the scope block. When emit_scope_body_cfg_walk encounters these, it skips them.
+    hoisted_declare_instr_ids: std::collections::HashSet<InstructionId>,
 }
 
 /// Traverse blocks reachable from `start` (not crossing `fall_bid`) and check
@@ -867,6 +883,7 @@ impl<'a> Codegen<'a> {
             output_slots,
             num_scopes,
             param_name_offset,
+            promoted_temp_count: 0, // will be set after build_promoted_temp_names
             instr_map,
             use_count,
             terminal_replacement: HashMap::new(),
@@ -885,6 +902,7 @@ impl<'a> Codegen<'a> {
             early_return_label_blocks: std::collections::HashSet::new(),
             active_early_return: None,
             early_return_handled_blocks: std::collections::HashSet::new(),
+            hoisted_declare_instr_ids: std::collections::HashSet::new(),
         }
     }
 
@@ -943,10 +961,16 @@ impl<'a> Codegen<'a> {
         // and should NOT produce standalone statements.
         let inlined_ids = self.collect_inlined_ids(&ordered);
 
+        // Determine which scope each instruction belongs to.
+        // Must happen before build_promoted_temp_names so we can restrict scope_decl_ids
+        // to only scopes that are actually emitted (pruned scopes should not block renaming).
+        let instr_scope = self.assign_instructions_to_scopes(&ordered);
+
         // Rename $t/$T promoted temp identifiers to sequential t0, t1, ... names.
         // This must run before scope emission so the assigned names don't conflict.
         // Returns the number of temps assigned (scope_index starts at this offset).
-        let promoted_temp_count = self.build_promoted_temp_names(&ordered, &inlined_ids);
+        let promoted_temp_count = self.build_promoted_temp_names(&ordered, &inlined_ids, &instr_scope);
+        self.promoted_temp_count = promoted_temp_count;
 
         // Rebuild inlined_exprs now that promoted_temp_names is populated.
         // The first build_inline_map call above used fallback names (e.g. $t18);
@@ -954,9 +978,6 @@ impl<'a> Codegen<'a> {
         self.inlined_exprs.clear();
         self.build_inline_map(&ordered);
         self.resolve_logical_phis();
-
-        // Determine which scope each instruction belongs to.
-        let instr_scope = self.assign_instructions_to_scopes(&ordered);
 
         let mut out = String::new();
 
@@ -1245,13 +1266,18 @@ impl<'a> Codegen<'a> {
                     for instr in &block.instructions {
                         if let InstructionValue::GetIterator { collection, .. } = &instr.value {
                             inlined_ids.insert(instr.lvalue.identifier.0);
-                            // If the collection comes from a MethodCall or CallExpression,
-                            // inline it too so the expression appears directly in the for-of
-                            // header instead of as a standalone discarded statement.
+                            // If the collection comes from a MethodCall, CallExpression,
+                            // or a literal (ArrayExpression/ObjectExpression), inline it so
+                            // the expression appears directly in the for-of header.
+                            // This prevents array/object literals that merged into a sentinel
+                            // scope from being emitted inside the scope's if-block and then
+                            // referenced outside (which would be a ReferenceError).
                             if let Some(coll_instr) = self.instr_map.get(&collection.identifier.0) {
                                 match &coll_instr.value {
                                     InstructionValue::MethodCall { .. }
-                                    | InstructionValue::CallExpression { .. } => {
+                                    | InstructionValue::CallExpression { .. }
+                                    | InstructionValue::ArrayExpression { .. }
+                                    | InstructionValue::ObjectExpression { .. } => {
                                         inlined_ids.insert(collection.identifier.0);
                                     }
                                     _ => {}
@@ -1322,6 +1348,13 @@ impl<'a> Codegen<'a> {
                             None,
                         );
                         emitted_scopes.insert(sid);
+                        // Mark all instructions absorbed into this scope's body as handled,
+                        // so the CFG walker doesn't re-emit them later (e.g., outlined function
+                        // declarations that are absorbed into the scope body via group_by_scope
+                        // but have no instr_scope entry because they're early-excluded).
+                        for si in &scope_instrs_list {
+                            inlined_ids.insert(si.lvalue.identifier.0);
+                        }
                     }
                     continue;
                 }
@@ -1687,8 +1720,29 @@ impl<'a> Codegen<'a> {
                         let mut local_exprs: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
                         for instr in &b.instructions {
                             match &instr.value {
+                                InstructionValue::Primitive { value, .. } => {
+                                    local_exprs.insert(instr.lvalue.identifier.0, primitive_expr(value));
+                                }
+                                InstructionValue::ArrayExpression { elements, .. } => {
+                                    // Inline array literal (e.g. `[1, 2]`) so for-of can use
+                                    // the literal directly instead of a scope-internal temp.
+                                    let elems: Vec<String> = elements.iter().map(|e| match e {
+                                        ArrayElement::Place(p) => local_exprs.get(&p.identifier.0)
+                                            .cloned()
+                                            .unwrap_or_else(|| self.expr(p)),
+                                        ArrayElement::Spread(s) => format!("...{}", local_exprs.get(&s.place.identifier.0)
+                                            .cloned()
+                                            .unwrap_or_else(|| self.expr(&s.place))),
+                                        ArrayElement::Hole => String::new(),
+                                    }).collect();
+                                    local_exprs.insert(instr.lvalue.identifier.0, format!("[{}]", elems.join(", ")));
+                                }
                                 InstructionValue::LoadLocal { place, .. } => {
-                                    let name = self.ident_name(place.identifier);
+                                    // Prefer a previously-resolved local_exprs entry (handles the
+                                    // case where the loaded variable itself resolves to a literal).
+                                    let name = local_exprs.get(&place.identifier.0)
+                                        .cloned()
+                                        .unwrap_or_else(|| self.ident_name(place.identifier));
                                     local_exprs.insert(instr.lvalue.identifier.0, name);
                                 }
                                 InstructionValue::PropertyLoad { object, property, .. } => {
@@ -1891,7 +1945,21 @@ impl<'a> Codegen<'a> {
                     let block_bid = *block;
                     let handler_bid = *handler;
                     let fall_bid = *fallthrough;
-                    let binding_name = handler_binding.as_ref().map(|p| self.lvalue_name(p));
+                    let binding_name = handler_binding.as_ref().map(|p| {
+                        let name = self.lvalue_name(p);
+                        // If catch variable has a user name AND is unused (use_count==0),
+                        // rename it to a temp name to match the TS compiler's rename_variables.
+                        let use_cnt = *self.use_count.get(&p.identifier.0).unwrap_or(&0);
+                        let is_user_named = self.env.get_identifier(p.identifier)
+                            .and_then(|id| id.name.as_ref())
+                            .map(|n| matches!(n, crate::hir::hir::IdentifierName::Named(_)))
+                            .unwrap_or(false);
+                        if use_cnt == 0 && is_user_named {
+                            format!("t{}", self.param_name_offset + self.promoted_temp_count)
+                        } else {
+                            name
+                        }
+                    });
                     let _ = writeln!(out, "{pad}try {{");
                     let body_pad = indent + 1;
                     let mut vis2 = visited.clone();
@@ -2347,6 +2415,15 @@ impl<'a> Codegen<'a> {
             .filter_map(|o| o.out_name.clone())
             .collect();
 
+        // Collect DeclareLocal instructions from the scope body that should be hoisted
+        // to before the scope block. A `let x;` inside the if-block is block-scoped to
+        // the if-branch, making `x` inaccessible after the scope. Hoisting ensures the
+        // variable is accessible in code after the scope (e.g., for-in loop bodies).
+        // Computed after scope_block_set is available (see below).
+        let mut hoisted_declare_names: Vec<String> = Vec::new();
+        let mut hoisted_declare_skip: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        self.hoisted_declare_instr_ids.clear();
+
         // Emit any pre-scope const promotions.
         for line in &pre_scope_lines {
             let _ = writeln!(out, "{}", line);
@@ -2365,6 +2442,51 @@ impl<'a> Codegen<'a> {
         let scope_block_set: std::collections::HashSet<BlockId> = instrs.iter()
             .filter_map(|i| self.instr_to_block.get(&i.id).copied())
             .collect();
+
+        // Compute hoisted DeclareLocal declarations now that scope_block_set is available.
+        // A DeclareLocal is hoisted if its variable is used in a block OUTSIDE the scope's blocks.
+        {
+            let scope_block_instr_ids: std::collections::HashSet<InstructionId> = scope_block_set.iter()
+                .filter_map(|bid| self.hir.body.blocks.get(bid))
+                .flat_map(|blk| blk.instructions.iter().map(|i| i.id))
+                .collect();
+            for (i, instr) in instrs.iter().enumerate() {
+                if let InstructionValue::DeclareLocal { lvalue, .. } = &instr.value {
+                    let decl_id = lvalue.place.identifier;
+                    let name = self.env.get_identifier(decl_id)
+                        .and_then(|id| id.name.as_ref())
+                        .map(|n| n.value().to_string());
+                    if let Some(ref n) = name {
+                        if !n.starts_with("$t")
+                            && !declared_names.contains(n)
+                            && !output_cache_vars.contains(n)
+                        {
+                            // Only hoist if the variable is referenced by an instruction in a block
+                            // OUTSIDE the scope's blocks. Inlined instructions in scope blocks are
+                            // also "inside" the scope even if not tagged to it.
+                            let used_outside = self.hir.body.blocks.values().any(|blk| {
+                                blk.instructions.iter().any(|bi| {
+                                    if scope_block_instr_ids.contains(&bi.id) { return false; }
+                                    match &bi.value {
+                                        InstructionValue::LoadLocal { place, .. } => place.identifier == decl_id,
+                                        InstructionValue::StoreLocal { lvalue: lv, value, .. } =>
+                                            lv.place.identifier == decl_id || value.identifier == decl_id,
+                                        InstructionValue::DeclareLocal { lvalue: lv, .. } =>
+                                            lv.place.identifier == decl_id,
+                                        _ => false,
+                                    }
+                                })
+                            });
+                            if used_outside {
+                                hoisted_declare_names.push(n.clone());
+                                hoisted_declare_skip.insert(i);
+                                self.hoisted_declare_instr_ids.insert(instr.id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Find the scope's start block: the scope block with no predecessors from other scope blocks.
         let start_block = if scope_block_set.len() > 1 {
@@ -2433,10 +2555,17 @@ impl<'a> Codegen<'a> {
         if body_str_opt.is_none() {
             for (i, instr) in instrs.iter().enumerate() {
                 if skip_set.contains(&i) { continue; }
+                if hoisted_declare_skip.contains(&i) { continue; }
                 if inlined_ids.contains(&instr.lvalue.identifier.0) && !intra_set.contains(&i) {
                     continue;
                 }
-                let target_list = if i > max_skip_idx && !skip_set.is_empty() {
+                // Only StoreLocal instructions go to post_scope_lines (e.g. `const arr = t1;`
+                // after the scope block). Side effects (StoreProp, Call, etc.) must stay
+                // inside the scope body even if they appear after the main output StoreLocal.
+                let is_post_scope_store = i > max_skip_idx
+                    && !skip_set.is_empty()
+                    && matches!(&instr.value, InstructionValue::StoreLocal { .. });
+                let target_list = if is_post_scope_store {
                     &mut post_scope_lines
                 } else {
                     &mut body_lines
@@ -2483,7 +2612,11 @@ impl<'a> Codegen<'a> {
                     let _ = writeln!(out, "{pad}const {hoisted} = {orig};");
                 }
             }
-            // Emit `let` for regular outputs first, then sentinel last.
+            // Emit hoisted DeclareLocal declarations first (they precede the scope logically).
+            for name in &hoisted_declare_names {
+                let _ = writeln!(out, "{pad}let {name};");
+            }
+            // Emit `let` for regular outputs, then sentinel last.
             for cache_var in &output_cache_vars {
                 if !declared_names.contains(cache_var) {
                     let _ = writeln!(out, "{pad}let {cache_var};");
@@ -2581,7 +2714,11 @@ impl<'a> Codegen<'a> {
                 }
             }
         } else {
-            // Emit `let` for regular outputs first, then sentinel last.
+            // Emit hoisted DeclareLocal declarations first (they precede the scope logically).
+            for name in &hoisted_declare_names {
+                let _ = writeln!(out, "{pad}let {name};");
+            }
+            // Emit `let` for regular outputs, then sentinel last.
             for cache_var in &output_cache_vars {
                 if !declared_names.contains(cache_var) {
                     let _ = writeln!(out, "{pad}let {cache_var};");
@@ -2760,6 +2897,8 @@ impl<'a> Codegen<'a> {
         for instr in &block.instructions {
             if !scope_instr_set.contains(&instr.id) { continue; }
             if skip_instr_set.contains(&instr.id) { continue; }
+            // Skip DeclareLocal instructions that were hoisted to before the scope block.
+            if self.hoisted_declare_instr_ids.contains(&instr.id) { continue; }
             let lv_id = instr.lvalue.identifier.0;
             // Skip inlined-only temporaries unless they're intra-scope StoreLocals.
             if inlined_ids.contains(&lv_id) && !intra_instr_ids.contains(&instr.id) { continue; }
@@ -3506,6 +3645,19 @@ impl<'a> Codegen<'a> {
                         LogicalOperator::NullishCoalescing => "??",
                     };
 
+                    // Add parentheses around a logical sub-expression when it appears
+                    // as an operand of another logical expression. This matches the TS
+                    // compiler's output and preserves the user's original intent.
+                    // e.g. `a && b` inside `|| c` → `(a && b) || c`
+                    let left_needs_parens = left_expr.contains(" && ")
+                        || left_expr.contains(" || ")
+                        || left_expr.contains(" ?? ");
+                    let left_expr = if left_needs_parens {
+                        format!("({left_expr})")
+                    } else {
+                        left_expr
+                    };
+
                     let combined = format!("{left_expr} {op_str} {right_expr}");
                     logical_phi_ids.insert(phi.place.identifier.0);
                     new_entries.push((phi.place.identifier.0, combined.clone()));
@@ -3656,13 +3808,15 @@ impl<'a> Codegen<'a> {
                             let outer_is_and = result.ends_with(" && ") || after.starts_with(" && ");
                             let outer_is_or  = result.ends_with(" || ") || after.starts_with(" || ");
                             let outer_is_nc  = result.ends_with(" ?? ") || after.starts_with(" ?? ");
-                            // Need parens when inner operator has lower precedence than outer:
-                            // - || or ?? inside && context
-                            // - ?? inside || context
+                            // Need parens when inner operator has lower (or different)
+                            // precedence than outer. Also add for && inside || for clarity,
+                            // matching the TS compiler's behavior of preserving user parens:
+                            // - || or ?? inside && context (semantic need)
+                            // - && or ?? inside || context (&& for clarity, ?? semantic need)
                             // - && or || inside ?? context (can't mix with ??)
                             let needs_parens =
                                 (outer_is_and && (inner_has_or || inner_has_nc))
-                                || (outer_is_or && inner_has_nc)
+                                || (outer_is_or && (inner_has_and || inner_has_nc))
                                 || (outer_is_nc && (inner_has_and || inner_has_or));
                             if needs_parens {
                                 result.push('(');
@@ -3958,16 +4112,23 @@ impl<'a> Codegen<'a> {
         &mut self,
         ordered: &[Instruction],
         inlined_ids: &std::collections::HashSet<u32>,
+        instr_scope: &HashMap<crate::hir::hir::InstructionId, ScopeId>,
     ) -> usize {
         use crate::hir::hir::IdentifierName;
 
-        // Collect all scope declaration identifier IDs — these are handled by
-        // scope_output_names during scope emission, so skip them here.
-        let scope_decl_ids: std::collections::HashSet<u32> = self.env.scopes.values()
-            .flat_map(|s| s.declarations.keys().map(|id| id.0))
+        // Collect scope declaration identifier IDs — only for scopes that are actually
+        // emitted (appear in instr_scope). Pruned/merged scopes still exist in self.env.scopes
+        // but their declarations should be renamed like normal temps.
+        let active_scope_ids: std::collections::HashSet<ScopeId> =
+            instr_scope.values().copied().collect();
+        let scope_decl_ids: std::collections::HashSet<u32> = self.env.scopes.iter()
+            .filter(|(sid, _)| active_scope_ids.contains(sid))
+            .flat_map(|(_, s)| s.declarations.keys().map(|id| id.0))
             .collect();
 
-        let mut counter: usize = 0;
+        // Start counter after param slots so body temps don't collide with promoted params.
+        // e.g. if param_name_offset=1 (one param named t0), body temps start at t1.
+        let mut counter: usize = self.param_name_offset;
         // Track which DeclarationIds have already been assigned a name (to give
         // all SSA copies of the same variable the same tN name).
         let mut decl_seen: std::collections::HashMap<crate::hir::hir::DeclarationId, String> = std::collections::HashMap::new();
@@ -4053,7 +4214,9 @@ impl<'a> Codegen<'a> {
                 }
             }
         }
-        counter
+        // Return the count of body temps assigned (not the final counter value).
+        // scope_index starts at this count, and scope temps are t{scope_index + param_name_offset}.
+        counter - self.param_name_offset
     }
 
     // -----------------------------------------------------------------------
@@ -5246,6 +5409,10 @@ impl<'a> Codegen<'a> {
                         while items.last().map_or(false, |s| s.is_empty()) {
                             items.pop();
                         }
+                        // Skip empty array destructures (all holes/unused) — no bindings to extract.
+                        if items.is_empty() && !kw.is_empty() {
+                            return None;
+                        }
                         Some(format!("{}[{}] = {val};", prefix, items.join(", ")))
                     }
                     Pattern::Object(op) => {
@@ -5274,7 +5441,8 @@ impl<'a> Codegen<'a> {
                                 Some(format!("({{ {props_str} }} = {val});"))
                             }
                         } else if props_str.is_empty() {
-                            Some(format!("{}{{}} = {val};", prefix))
+                            // Skip empty object destructures (const {} = val) — no bindings to extract.
+                            None
                         } else {
                             Some(format!("{}{{ {props_str} }} = {val};", prefix))
                         }

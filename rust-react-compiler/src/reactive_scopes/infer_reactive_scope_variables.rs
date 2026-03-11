@@ -7,7 +7,7 @@ use crate::hir::environment::Environment;
 use crate::hir::hir::{
     ArrayElement, DeclarationId, HIRFunction, IdentifierId, InstructionId,
     InstructionValue, MutableRange, NonLocalBinding, ObjectPatternProperty, Pattern,
-    ReactiveScope, ReactiveScopeDeclaration, ScopeId, SourceLocation,
+    ReactiveScope, ReactiveScopeDeclaration, ScopeId, SourceLocation, Terminal,
 };
 use crate::hir::visitors::each_instruction_value_operand;
 use crate::utils::disjoint_set::DisjointSet;
@@ -162,12 +162,34 @@ fn find_disjoint_mutable_values(
         }
     }
 
+    // Collect phi places that are results of logical expressions (&&, ||, ??).
+    // These are phi nodes in the fallthrough block of Logical/Branch(logical_op) terminals.
+    // Logical expression results select between existing memoized values — they do NOT
+    // create new allocations. Memoizing them adds no value and creates spurious scopes.
+    let mut logical_phi_ids: HashSet<IdentifierId> = HashSet::new();
+    for (_, block) in &hir.body.blocks {
+        let fallthrough_of_logical = match &block.terminal {
+            Terminal::Logical { fallthrough, .. } => Some(*fallthrough),
+            Terminal::Branch { logical_op: Some(_), fallthrough, .. } => Some(*fallthrough),
+            _ => None,
+        };
+        if let Some(ft_block_id) = fallthrough_of_logical {
+            if let Some(ft_block) = hir.body.blocks.get(&ft_block_id) {
+                for phi in &ft_block.phis {
+                    logical_phi_ids.insert(phi.place.identifier);
+                }
+            }
+        }
+    }
+
     // Propagate ident_allocates through LoadLocal/LoadContext chains and phi nodes.
     // When `t = LoadLocal(arr)` and `arr` allocates, `t` should also be
     // considered allocating. This matters for default parameter patterns where
     // `arr = [-1, 1]` (allocates) → `t = LoadLocal(arr)` → `StoreLocal(x, t)`.
     // Similarly, if a phi node `x = phi(arr, _T0)` where `arr` allocates,
     // then `x` should be considered allocating.
+    // Exception: phi nodes from logical expressions are NOT propagated — they
+    // select between existing values, not create new allocations.
     {
         let mut changed = true;
         while changed {
@@ -196,6 +218,10 @@ fn find_disjoint_mutable_values(
                     }
                 }
                 for phi in &block.phis {
+                    // Skip logical expression phi nodes — they don't allocate.
+                    if logical_phi_ids.contains(&phi.place.identifier) {
+                        continue;
+                    }
                     if !ident_allocates.contains(&phi.place.identifier) {
                         let any_alloc = phi.operands.values()
                             .any(|op| ident_allocates.contains(&op.identifier));
@@ -211,6 +237,11 @@ fn find_disjoint_mutable_values(
 
     for (_, block) in &hir.body.blocks {
         for phi in &block.phis {
+            // Logical expression phi nodes (&&, ||, ??) do not create new allocations —
+            // they select between existing memoized values. Skip them entirely.
+            if logical_phi_ids.contains(&phi.place.identifier) {
+                continue;
+            }
             let phi_range = env
                 .get_identifier(phi.place.identifier)
                 .map(|i| i.mutable_range.clone())

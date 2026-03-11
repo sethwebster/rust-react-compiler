@@ -39,13 +39,26 @@ pub fn run_with_env(hir: &mut HIRFunction, env: &mut Environment) {
                 InstructionValue::PropertyLoad { property, .. } => {
                     global_names.insert(instr.lvalue.identifier, property.clone());
                 }
+                // Track local variable names (e.g. locally-defined hook functions like `useX`)
+                InstructionValue::LoadLocal { place, .. } => {
+                    if let Some(ident) = env.identifiers.get(&place.identifier) {
+                        if let Some(name) = &ident.name {
+                            global_names.insert(instr.lvalue.identifier, name.value().to_string());
+                        }
+                    }
+                }
                 _ => {}
             }
         }
     }
 
     let is_hook_name = |name: &str| -> bool {
-        name.starts_with("use") && name[3..].chars().next().map_or(false, |c| c.is_uppercase())
+        // Direct hook name: useX, useState, etc.
+        let direct = name.starts_with("use") && name[3..].chars().next().map_or(false, |c| c.is_uppercase());
+        if direct { return true; }
+        // Aliased import like `import { useState as _useState }` — strip leading `_`
+        let stripped = name.strip_prefix('_').unwrap_or(name);
+        stripped.starts_with("use") && stripped[3..].chars().next().map_or(false, |c| c.is_uppercase())
     };
 
     // Find scopes that contain hook calls.

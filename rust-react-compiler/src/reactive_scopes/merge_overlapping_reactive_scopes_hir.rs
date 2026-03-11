@@ -19,9 +19,173 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::hir::environment::Environment;
-use crate::hir::hir::{DeclarationId, HIRFunction, IdentifierId, InstructionValue, ScopeId};
+use crate::hir::hir::{
+    ArrayElement, CallArg, DeclarationId, HIRFunction, IdentifierId, InstructionValue,
+    JsxAttribute, JsxTag, ObjectExpressionProperty, ScopeId,
+};
 
 pub fn run(_hir: &mut HIRFunction) {}
+
+/// Collect all Place identifier IDs that an instruction reads as inputs (not outputs).
+/// Used to determine if one scope is dependent on another's declarations.
+fn instruction_place_reads(value: &InstructionValue) -> Vec<IdentifierId> {
+    let mut reads = Vec::new();
+    match value {
+        InstructionValue::LoadLocal { place, .. }
+        | InstructionValue::LoadContext { place, .. } => {
+            reads.push(place.identifier);
+        }
+        InstructionValue::StoreLocal { value, .. } => {
+            reads.push(value.identifier);
+        }
+        InstructionValue::StoreContext { value, .. } => {
+            reads.push(value.identifier);
+        }
+        InstructionValue::StoreGlobal { value, .. } => {
+            reads.push(value.identifier);
+        }
+        InstructionValue::Destructure { value, .. } => {
+            reads.push(value.identifier);
+        }
+        InstructionValue::BinaryExpression { left, right, .. } => {
+            reads.push(left.identifier);
+            reads.push(right.identifier);
+        }
+        InstructionValue::TernaryExpression { test, consequent, alternate, .. } => {
+            reads.push(test.identifier);
+            reads.push(consequent.identifier);
+            reads.push(alternate.identifier);
+        }
+        InstructionValue::UnaryExpression { value, .. }
+        | InstructionValue::TypeCastExpression { value, .. }
+        | InstructionValue::Await { value, .. }
+        | InstructionValue::NextPropertyOf { value, .. } => {
+            reads.push(value.identifier);
+        }
+        InstructionValue::CallExpression { callee, args, .. } => {
+            reads.push(callee.identifier);
+            for arg in args {
+                match arg {
+                    CallArg::Place(p) => reads.push(p.identifier),
+                    CallArg::Spread(s) => reads.push(s.place.identifier),
+                }
+            }
+        }
+        InstructionValue::MethodCall { receiver, property, args, .. } => {
+            reads.push(receiver.identifier);
+            reads.push(property.identifier);
+            for arg in args {
+                match arg {
+                    CallArg::Place(p) => reads.push(p.identifier),
+                    CallArg::Spread(s) => reads.push(s.place.identifier),
+                }
+            }
+        }
+        InstructionValue::NewExpression { callee, args, .. } => {
+            reads.push(callee.identifier);
+            for arg in args {
+                match arg {
+                    CallArg::Place(p) => reads.push(p.identifier),
+                    CallArg::Spread(s) => reads.push(s.place.identifier),
+                }
+            }
+        }
+        InstructionValue::ObjectExpression { properties, .. } => {
+            for prop in properties {
+                match prop {
+                    ObjectExpressionProperty::Property(p) => {
+                        reads.push(p.place.identifier);
+                        if let crate::hir::hir::ObjectPropertyKey::Computed(key_place) = &p.key {
+                            reads.push(key_place.identifier);
+                        }
+                    }
+                    ObjectExpressionProperty::Spread(s) => reads.push(s.place.identifier),
+                }
+            }
+        }
+        InstructionValue::ArrayExpression { elements, .. } => {
+            for elem in elements {
+                match elem {
+                    ArrayElement::Place(p) => reads.push(p.identifier),
+                    ArrayElement::Spread(s) => reads.push(s.place.identifier),
+                    ArrayElement::Hole => {}
+                }
+            }
+        }
+        InstructionValue::PropertyLoad { object, .. }
+        | InstructionValue::PropertyDelete { object, .. } => {
+            reads.push(object.identifier);
+        }
+        InstructionValue::PropertyStore { object, value, .. } => {
+            reads.push(object.identifier);
+            reads.push(value.identifier);
+        }
+        InstructionValue::ComputedLoad { object, property, .. }
+        | InstructionValue::ComputedDelete { object, property, .. } => {
+            reads.push(object.identifier);
+            reads.push(property.identifier);
+        }
+        InstructionValue::ComputedStore { object, property, value, .. } => {
+            reads.push(object.identifier);
+            reads.push(property.identifier);
+            reads.push(value.identifier);
+        }
+        InstructionValue::JsxExpression { tag, props, children, .. } => {
+            if let JsxTag::Place(p) = tag {
+                reads.push(p.identifier);
+            }
+            for prop in props {
+                match prop {
+                    JsxAttribute::Spread { argument } => reads.push(argument.identifier),
+                    JsxAttribute::Attribute { place, .. } => reads.push(place.identifier),
+                }
+            }
+            if let Some(children) = children {
+                for child in children {
+                    reads.push(child.identifier);
+                }
+            }
+        }
+        InstructionValue::JsxFragment { children, .. } => {
+            for child in children {
+                reads.push(child.identifier);
+            }
+        }
+        InstructionValue::FunctionExpression { lowered_func, .. }
+        | InstructionValue::ObjectMethod { lowered_func, .. } => {
+            for ctx in &lowered_func.func.context {
+                reads.push(ctx.identifier);
+            }
+        }
+        InstructionValue::TemplateLiteral { subexprs, .. } => {
+            for s in subexprs {
+                reads.push(s.identifier);
+            }
+        }
+        InstructionValue::TaggedTemplateExpression { tag, .. } => {
+            reads.push(tag.identifier);
+        }
+        InstructionValue::GetIterator { collection, .. } => {
+            reads.push(collection.identifier);
+        }
+        InstructionValue::IteratorNext { iterator, collection, .. } => {
+            reads.push(iterator.identifier);
+            reads.push(collection.identifier);
+        }
+        InstructionValue::PrefixUpdate { lvalue, value, .. }
+        | InstructionValue::PostfixUpdate { lvalue, value, .. } => {
+            reads.push(lvalue.identifier);
+            reads.push(value.identifier);
+        }
+        InstructionValue::FinishMemoize { decl, .. } => {
+            reads.push(decl.identifier);
+        }
+        // No inputs: LoadGlobal, DeclareLocal, DeclareContext, Primitive, JsxText,
+        // RegExpLiteral, MetaProperty, Debugger, StartMemoize, InlineJs, etc.
+        _ => {}
+    }
+    reads
+}
 
 pub fn run_with_env(hir: &mut HIRFunction, env: &mut Environment) {
     if env.scopes.len() <= 1 {
@@ -103,8 +267,14 @@ pub fn run_with_env(hir: &mut HIRFunction, env: &mut Environment) {
                     | InstructionValue::BinaryExpression { .. }
                     | InstructionValue::TernaryExpression { .. }
                     | InstructionValue::UnaryExpression { .. }
-                    | InstructionValue::PropertyLoad { .. }
+            ) || (
+                // PropertyLoad/ComputedLoad are always-inv only when their result is NOT reactive.
+                // A reactive property load like `props.b` (where props is reactive) IS reactive
+                // and should not be treated as always-inv (it's a real dep for memoization).
+                matches!(&instr.value,
+                    InstructionValue::PropertyLoad { .. }
                     | InstructionValue::ComputedLoad { .. }
+                ) && !instr.lvalue.reactive
             );
             ident_is_always_inv.insert(instr.lvalue.identifier, always_inv);
         }
@@ -139,6 +309,22 @@ pub fn run_with_env(hir: &mut HIRFunction, env: &mut Environment) {
                         }
                     }
                     _ => {}
+                }
+            }
+        }
+    }
+
+    // Single-pass demotion: after fixpoint, mark any identifier that is ever assigned
+    // a non-always-inv value (via StoreLocal) as NOT always-inv. This handles cases like
+    // `y = {}; y = x[0]` where y is first marked always-inv but then overwritten.
+    // This is safe (no oscillation) because we only set false, never true.
+    for (_, block) in &hir.body.blocks {
+        for instr in &block.instructions {
+            if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
+                let val_always_inv = ident_is_always_inv.get(&value.identifier).copied().unwrap_or(false);
+                if !val_always_inv {
+                    ident_is_always_inv.insert(lvalue.place.identifier, false);
+                    ident_is_always_inv.insert(instr.lvalue.identifier, false);
                 }
             }
         }

@@ -38,6 +38,8 @@ pub struct EnvironmentConfig {
     pub validate_exhaustive_memoization_dependencies: bool,
     /// Assert valid mutable ranges
     pub assert_valid_mutable_ranges: bool,
+    /// @ignoreUseNoForget pragma: compile functions with "use no forget" and preserve directive in output
+    pub ignore_use_no_forget: bool,
 }
 
 impl Default for EnvironmentConfig {
@@ -56,6 +58,7 @@ impl Default for EnvironmentConfig {
             validate_no_set_state_in_render: false,
             validate_exhaustive_memoization_dependencies: false,
             assert_valid_mutable_ranges: false,
+            ignore_use_no_forget: false,
         }
     }
 }

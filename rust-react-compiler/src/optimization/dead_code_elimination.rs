@@ -101,43 +101,10 @@ fn remove_dead_phis(hir: &mut HIRFunction) {
         }
     }
 
-    // Collect blocks that are loop headers or test blocks — preserve their phis
-    // to avoid disrupting for/while/do-while codegen structure.
-    let mut loop_blocks: HashSet<BlockId> = HashSet::new();
-    for block in hir.body.blocks.values() {
-        match &block.terminal {
-            Terminal::For { test, init, update, loop_, .. } => {
-                loop_blocks.insert(*test);
-                loop_blocks.insert(*init);
-                if let Some(update) = update { loop_blocks.insert(*update); }
-                loop_blocks.insert(*loop_);
-            }
-            Terminal::While { test, loop_, .. } => {
-                loop_blocks.insert(*test);
-                loop_blocks.insert(*loop_);
-            }
-            Terminal::DoWhile { test, loop_, .. } => {
-                loop_blocks.insert(*test);
-                loop_blocks.insert(*loop_);
-            }
-            Terminal::ForOf { loop_, init, test, .. } => {
-                loop_blocks.insert(*loop_);
-                loop_blocks.insert(*init);
-                loop_blocks.insert(*test);
-            }
-            Terminal::ForIn { loop_, init, .. } => {
-                loop_blocks.insert(*loop_);
-                loop_blocks.insert(*init);
-            }
-            _ => {}
-        }
-    }
-
-    // Step 3: Remove dead phis, but skip loop-related blocks.
-    for (block_id, block) in hir.body.blocks.iter_mut() {
-        if loop_blocks.contains(block_id) {
-            continue; // Preserve loop phis for codegen structure.
-        }
+    // Step 3: Remove dead phis.
+    // Liveness analysis above correctly propagates liveness through phi chains,
+    // so phis in loop headers are removed only if their output is truly unused.
+    for block in hir.body.blocks.values_mut() {
         block.phis.retain(|phi| live_phis.contains(&phi.place.identifier));
     }
 }
@@ -378,8 +345,26 @@ fn remove_dead_instructions(hir: &mut HIRFunction, env: Option<&Environment>) {
             if let InstructionValue::PostfixUpdate { lvalue: update_lv, .. }
             | InstructionValue::PrefixUpdate { lvalue: update_lv, .. } = &instr.value
             {
-                return used.contains(&instr.lvalue.identifier)
-                    || used.contains(&update_lv.identifier);
+                if used.contains(&instr.lvalue.identifier) {
+                    return true;
+                }
+                // Use loaded_vars (not `used`) to avoid the circular liveness dependency:
+                // PostfixUpdate.value references the same place as update_lv, so
+                // `used.contains(&update_lv.identifier)` is always true.
+                if loaded_vars.contains(&update_lv.identifier) {
+                    return true;
+                }
+                // SSA alias check: a different SSA version of the same variable may be loaded.
+                if let Some(env) = env {
+                    if let Some(decl_id) = env.get_identifier(update_lv.identifier)
+                        .map(|i| i.declaration_id)
+                    {
+                        if loaded_decl_ids.contains(&decl_id) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
             }
             used.contains(&instr.lvalue.identifier) || has_side_effects(&instr.value)
         });

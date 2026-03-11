@@ -437,6 +437,14 @@ fn can_merge_scopes(
     // i.e., every dep of B is (a) always-invalidating AND (b) declared by scope A.
     // TS requires dep.path.length === 0 — dep must be a DIRECT reference, not a
     // property access like `x.map`. Only direct refs can be produced by scope A.
+    //
+    // NOTE: We do NOT use store_local_value to bridge named-var deps to their SSA
+    // temps. In TS, the dep's declarationId and A's declaration's declarationId
+    // must match directly. The bridge would incorrectly merge cases like:
+    //   scope A: t1 = FunctionExpression(...)  [declares t1]
+    //   gap:     const onClick = t1             [gap StoreLocal, NOT in A's declarations]
+    //   scope B: JSX uses onClick              [dep = onClick, NOT declared by A directly]
+    // In TS, onClick and t1 have different declarationIds, so Case 2 fails → no merge.
     if !scope_b.dependencies.is_empty()
         && scope_b.dependencies.iter().all(|dep| {
             // Path must be empty (TS: dep.path.length === 0).
@@ -445,6 +453,8 @@ fn can_merge_scopes(
                 return false;
             }
             let dep_id = dep.place.identifier;
+            // Check always-inv: both via direct id and via store_local_value bridge
+            // (for the always-inv check only, not for the declarations check).
             let val_id = store_local_value.get(&dep_id).copied().unwrap_or(dep_id);
             let always_inv = is_always_invalidating.get(&val_id).copied().unwrap_or(false)
                 || is_always_invalidating.get(&dep_id).copied().unwrap_or(false);

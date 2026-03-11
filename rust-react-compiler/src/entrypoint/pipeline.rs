@@ -95,7 +95,7 @@ pub fn compile(source: &str, mut options: CompileOptions) -> Result<CodegenOutpu
     if fn_spans.is_empty() {
         // No compilable functions — passthrough the whole file.
         let js = emit_passthrough(source, source_type);
-        return Ok(CodegenOutput { js });
+        return Ok(CodegenOutput { js, outlines: Vec::new() });
     }
 
     // Compile each function. Track whether any produced cache slots.
@@ -210,7 +210,7 @@ pub fn compile(source: &str, mut options: CompileOptions) -> Result<CodegenOutpu
     // Reconstruct the file by splicing compiled outputs into the original source.
     // For non-function spans, use oxc_codegen passthrough.
     let reconstructed = splice_compiled_fns(source, source_type, &compiled_fns);
-    Ok(CodegenOutput { js: reconstructed })
+    Ok(CodegenOutput { js: reconstructed, outlines: Vec::new() })
 }
 
 /// Parse the source and return byte spans (start, end) of each top-level
@@ -854,5 +854,5 @@ pub fn run_with_environment(
 
     // --- Codegen ---
     let js = crate::codegen::hir_codegen::codegen_hir_function(hir, env);
-    Ok(CodegenOutput { js })
+    Ok(CodegenOutput { js, outlines: Vec::new() })
 }

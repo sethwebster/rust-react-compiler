@@ -628,9 +628,26 @@ pub fn infer_mutation_aliasing_ranges(
                 } else {
                     None
                 };
+            // EXCEPTION 3: ArrayExpression, ObjectExpression, JsxExpression, JsxFragment
+            // capture their operands IMMUTABLY (ImmutableCapture in TS semantics).
+            // They do NOT extend operand mutable ranges — only Capture/MutateTransitive
+            // effects do. Skipping liveness extension here prevents e.g. `t0=foo()` from
+            // having its range extended to the containing `[t0]` ArrayExpression instruction,
+            // which would cause the two scopes to appear overlapping and get incorrectly merged.
+            let is_immutable_capture_instr = matches!(&instr.value,
+                InstructionValue::ArrayExpression { .. }
+                | InstructionValue::ObjectExpression { .. }
+                | InstructionValue::JsxExpression { .. }
+                | InstructionValue::JsxFragment { .. }
+            );
             for op in each_instruction_value_operand(&instr.value) {
                 if store_value_id == Some(op.identifier) {
                     // Skip: this is a pure read of the value being stored.
+                    continue;
+                }
+                if is_immutable_capture_instr {
+                    // Skip: operands of immutable-capture instructions (Array/Object/JSX)
+                    // are captured by value, not mutated. Don't extend their liveness.
                     continue;
                 }
                 if hook_arg_ids.as_ref().map(|s| s.contains(&op.identifier)).unwrap_or(false) {
