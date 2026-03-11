@@ -35,8 +35,8 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.6% (1419/1717 all fixtures) |
-| Correct rate | **31.3% (537/1717)** — as of commit `94474d0` |
-| Uncommitted changes | +1152/-101 across 13 files (see Current Task) |
+| Correct rate | **32.8% (564/1717)** — uncommitted working copy |
+| Uncommitted changes | +1171/-99 across 13 files (see Current Task) |
 | Fixture denominator | **1717** (recursive scan of all subdirs) |
 
 ---
@@ -61,7 +61,7 @@ Update the following before stopping:
 - `infer_reactive_scope_variables.rs` +33 — scope inference improvements
 - `flatten_scopes_with_hooks_or_use_hir.rs`, `pipeline.rs`, `lower/core.rs`, `environment.rs`, `infer_mutation_aliasing_ranges.rs`, `merge_reactive_scopes_that_invalidate_together.rs` — various fixes
 
-**Next step**: Run suite on uncommitted changes, commit if score > 537, then continue flat codegen improvements.
+**Next step**: Investigate score regression (expected 604 from session summary, actual 564 measured). Determine if the working copy is net-positive vs committed baseline (537), commit if so, then continue improvements.
 
 Recent commits (newest first):
 - 94474d0: fix: populate declared_names_before_scope for flat codegen
@@ -305,3 +305,4 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-08 | 82.6 | **26.8** | — | 18 | 28 | JSX scope barrier fix: prune_non_escaping_scopes barrier for JSX statement expressions (+2, 460/1717) |
 | 2026-03-09 | 82.6 | **29.5** | — | 18 | 28 | Flat codegen parity + normalize_js fixes (bracket spacing, label/forof, paren/JSX, semicolon, as-const) (507/1717) |
 | 2026-03-09 | 82.6 | **31.3** | — | 18 | 28 | Early_return sentinel pattern in flat CFG codegen (+77, 537/1717); declared_names_before_scope |
+| 2026-03-11 | 82.6 | **32.8** | — | 18 | 28 | Uncommitted: hir_codegen +227, merge_overlapping +190, tests/fixtures +371, DCE +63, scope inference +33 (564/1717, not yet committed) |
