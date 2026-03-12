@@ -35,15 +35,15 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.6% (1419/1717 all fixtures) |
-| Correct rate | **32.8% (564/1717)** — uncommitted working copy |
-| Uncommitted changes | +1171/-99 across 13 files (see Current Task) |
+| Correct rate | **35.6% (~611/1717)** |
+| Uncommitted changes | See git diff HEAD --stat |
 | Fixture denominator | **1717** (recursive scan of all subdirs) |
 
 ---
 
 ## Current Task
 
-**Active work**: Flat codegen improvements — `build_promoted_temp_names`, `declared_names_before_scope`, `inlined_exprs` rebuild.
+**Active work**: Flat CFG codegen improvements — for-loop update expression, phi resolution, and general codegen fixes.
 
 **Progress since architecture reset (2026-03-08 baseline 460/1717)**:
 - `5c5fd81`: reach flat codegen parity (26.8%, 460/1717)
@@ -52,16 +52,9 @@ Update the following before stopping:
 - `196d3ff`: early_return sentinel pattern in flat CFG codegen (+77, **537/1717=31.3%**)
 - `243c17a`: tree codegen for-of dedup and destructuring header fix
 - `94474d0`: populate `declared_names_before_scope` for flat codegen
+- **2026-03-12**: for-loop update expression fix — ternary phi (Phase 3/4), loop-carried phi, trailing LoadLocal, ternary-in-arithmetic parens (**~611/1717=35.6%**)
 
-**Uncommitted work in progress (+1152/-101 across 13 files)**:
-- `hir_codegen.rs` +227 — `build_promoted_temp_names` + `inlined_exprs` rebuild + `ident_name` update
-- `merge_overlapping_reactive_scopes_hir.rs` +190 — scope merging improvements
-- `tests/fixtures.rs` +371 — additional normalizations
-- `dead_code_elimination.rs` +63 — DCE improvements
-- `infer_reactive_scope_variables.rs` +33 — scope inference improvements
-- `flatten_scopes_with_hooks_or_use_hir.rs`, `pipeline.rs`, `lower/core.rs`, `environment.rs`, `infer_mutation_aliasing_ranges.rs`, `merge_reactive_scopes_that_invalidate_together.rs` — various fixes
-
-**Next step**: Investigate score regression (expected 604 from session summary, actual 564 measured). Determine if the working copy is net-positive vs committed baseline (537), commit if so, then continue improvements.
+**Next step**: Commit for-loop fix, then investigate remaining fixture failures.
 
 Recent commits (newest first):
 - 94474d0: fix: populate declared_names_before_scope for flat codegen
@@ -306,3 +299,4 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-09 | 82.6 | **29.5** | — | 18 | 28 | Flat codegen parity + normalize_js fixes (bracket spacing, label/forof, paren/JSX, semicolon, as-const) (507/1717) |
 | 2026-03-09 | 82.6 | **31.3** | — | 18 | 28 | Early_return sentinel pattern in flat CFG codegen (+77, 537/1717); declared_names_before_scope |
 | 2026-03-11 | 82.6 | **32.8** | — | 18 | 28 | Uncommitted: hir_codegen +227, merge_overlapping +190, tests/fixtures +371, DCE +63, scope inference +33 (564/1717, not yet committed) |
+| 2026-03-12 | 82.6 | **35.6** | — | 18 | 28 | for-loop update expression fix: ternary phi resolution (Phase 3/4), loop-carried phi resolution, trailing LoadLocal detection, ternary-in-arithmetic parens (~611/1717) |
