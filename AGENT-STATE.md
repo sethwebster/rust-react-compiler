@@ -36,7 +36,7 @@ Update the following before stopping:
 |--------|-------|
 | Compile rate | 82.6% (1419/1717 all fixtures) |
 | Correct rate | **35.6% (~611/1717)** |
-| Uncommitted changes | See git diff HEAD --stat |
+| Uncommitted changes | +415 lines: hir_codegen.rs (+416), merge_overlapping_reactive_scopes_hir.rs (-1), merge_reactive_scopes_that_invalidate_together.rs (+39/-31) |
 | Fixture denominator | **1717** (recursive scan of all subdirs) |
 
 ---
@@ -54,7 +54,7 @@ Update the following before stopping:
 - `94474d0`: populate `declared_names_before_scope` for flat codegen
 - **2026-03-12**: for-loop update expression fix — ternary phi (Phase 3/4), loop-carried phi, trailing LoadLocal, ternary-in-arithmetic parens (**~611/1717=35.6%**)
 
-**Next step**: Commit for-loop fix, then investigate remaining fixture failures.
+**Next step**: Commit uncommitted hir_codegen.rs changes (+415 lines across 3 files), then investigate remaining fixture failures. Run suite to verify new score before committing.
 
 Recent commits (newest first):
 - 94474d0: fix: populate declared_names_before_scope for flat codegen
@@ -299,4 +299,268 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-09 | 82.6 | **29.5** | — | 18 | 28 | Flat codegen parity + normalize_js fixes (bracket spacing, label/forof, paren/JSX, semicolon, as-const) (507/1717) |
 | 2026-03-09 | 82.6 | **31.3** | — | 18 | 28 | Early_return sentinel pattern in flat CFG codegen (+77, 537/1717); declared_names_before_scope |
 | 2026-03-11 | 82.6 | **32.8** | — | 18 | 28 | Uncommitted: hir_codegen +227, merge_overlapping +190, tests/fixtures +371, DCE +63, scope inference +33 (564/1717, not yet committed) |
-| 2026-03-12 | 82.6 | **35.6** | — | 18 | 28 | for-loop update expression fix: ternary phi resolution (Phase 3/4), loop-carried phi resolution, trailing LoadLocal detection, ternary-in-arithmetic parens (~611/1717) |
+| 2026-03-12 | 82.6 | **35.2** | — | 18 | 28 | flat CFG codegen improvements (+68, 605/1717) — b65af71 |
+| 2026-03-12 | 82.6 | **35.6** | — | 18 | 28 | for-loop update expression fix: ternary phi resolution (Phase 3/4), loop-carried phi resolution, trailing LoadLocal detection, ternary-in-arithmetic parens (611/1717) — 2af3c2e |
+
+---
+
+## Agent Messages
+
+### Relayed from PAIR-CODER.md — 2026-03-13 18:34
+
+```
+| +866min | 🔴 STALLED | diff stable at +220/-16; 42nd tick; holding | Holding |
+| +867min | 🔴 STALLED | diff stable at +220/-16; 43rd tick; holding | Holding |
+| +868min | 🔴 STALLED | diff stable at +220/-16; 44th tick; holding | Holding |
+| +869min | 🔴 STALLED | diff stable at +220/-16; 45th tick; holding | Holding |
+| +870min | 🔴 STALLED | diff stable at +220/-16; 46th tick; holding | Holding |
+| +871min | 🔴 STALLED | diff stable at +220/-16; 47th tick; holding | Holding |
+| +872min | 🔴 STALLED | diff stable at +220/-16; 48th tick; holding | Holding |
+| +873min | 🔴 STALLED | diff stable at +220/-16; 49th tick; holding | Holding |
+| +874min | 🔴 STALLED | diff stable at +220/-16; 50th tick; holding | Holding |
+| +875min | 🔴 STALLED | diff stable at +220/-16; 51st tick; holding | Holding |
+| +876min | 🔴 STALLED | diff stable at +220/-16; 52nd tick; holding | Holding |
+| +877min | 🔴 STALLED | diff stable at +220/-16; 53rd tick; holding | Holding |
+| +878min | ✅ COMMITTED | new HEAD 94474d0 — declared_names_before_scope committed; hir_codegen.rs clean; awaiting suite | Watching |
+| +879min | ⏳ WATCHING | HEAD 94474d0 stable; no new commits; suite likely running; nudge at tick 5 | Watching |
+| +880min | ⏳ WATCHING | HEAD 94474d0 stable; 2nd tick post-commit; suite running; nudge at tick 5 | Watching |
+| +881min | ⏳ WATCHING | HEAD 94474d0 stable; 3rd tick post-commit; suite running; nudge at tick 5 | Watching |
+| +882min | ✅ ACTIVE | +1151/-101 across 13 files; hir_codegen +227, merge_scopes +190, fixtures +371; major burst | Watching |
+| new session | ✅ RESUMED | HEAD=2af3c2e (35.6%/611/1717); uncommitted +415/-45 across 3 files; watcher supervisor resumed | Watching |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 18:37
+
+```
+| +1min | ⏳ WATCHING | diff stable at +416 hir_codegen.rs + merge_reactive +39; no worker messages; suite likely running | Await score |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 19:31
+
+```
+| +4min | ⏳ WATCHING | diff unchanged; AGENT-STATE.md touched (+6) — worker alive; suite still running | Await score |
+| +7min | ⏳ WATCHING | diff still +416 hir_codegen.rs; no worker messages; nudge at tick 4 (12min total) | Await score |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 19:34
+
+```
+| +10min | ✅ ACTIVE | new file: prune_unused_scopes.rs +4; worker editing; hir_codegen.rs still +416; no score yet | Await score |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 19:38
+
+```
+| +13min | ⏳ WATCHING | diff stable (prune_unused_scopes.rs +4, hir_codegen.rs +416); AGENT-STATE.md still growing; no score | Nudge next tick |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 19:41
+
+```
+| +16min | ✅ ACTIVE | prune_non_escaping_scopes.rs now touched (+9/-3); worker still editing; no score yet | Reset nudge timer |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 19:44
+
+```
+| +19min | ⏳ WATCHING | diff stable 2nd tick (7 files, +416 hir_codegen); AGENT-STATE.md growing; suite likely running | Post score when done |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 19:47
+
+```
+| new session | ✅ RESUMED | HEAD=2af3c2e (35.6%/611/1717); uncommitted +415/-45 across 3 files; watcher supervisor resumed | Watching |
+| +1min | ⏳ WATCHING | diff stable at +416 hir_codegen.rs + merge_reactive +39; no worker messages; suite likely running | Await score |
+| +4min | ⏳ WATCHING | diff unchanged; AGENT-STATE.md touched (+6) — worker alive; suite still running | Await score |
+| +7min | ⏳ WATCHING | diff still +416 hir_codegen.rs; no worker messages; nudge at tick 4 (12min total) | Await score |
+| +10min | ✅ ACTIVE | new file: prune_unused_scopes.rs +4; worker editing; hir_codegen.rs still +416; no score yet | Await score |
+| +13min | ⏳ WATCHING | diff stable (prune_unused_scopes.rs +4, hir_codegen.rs +416); AGENT-STATE.md still growing; no score | Nudge next tick |
+| +16min | ✅ ACTIVE | prune_non_escaping_scopes.rs now touched (+9/-3); worker still editing; no score yet | Reset nudge timer |
+| +19min | ⏳ WATCHING | diff stable 2nd tick (7 files, +416 hir_codegen); AGENT-STATE.md growing; suite likely running | Post score when done |
+| +22min | ⚠️ NUDGING | diff stable 3rd tick; 22min since last code change; no score posted | Nudging worker |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 19:50
+
+```
+| +25min | ✅ ACTIVE | prune_unused_scopes.rs +4→+8; worker still editing; hir_codegen +416 unchanged; reset nudge timer | Await score |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 19:53
+
+```
+| +7min | ⏳ WATCHING | diff still +416 hir_codegen.rs; no worker messages; nudge at tick 4 (12min total) | Await score |
+| +10min | ✅ ACTIVE | new file: prune_unused_scopes.rs +4; worker editing; hir_codegen.rs still +416; no score yet | Await score |
+| +13min | ⏳ WATCHING | diff stable (prune_unused_scopes.rs +4, hir_codegen.rs +416); AGENT-STATE.md still growing; no score | Nudge next tick |
+| +16min | ✅ ACTIVE | prune_non_escaping_scopes.rs now touched (+9/-3); worker still editing; no score yet | Reset nudge timer |
+| +19min | ⏳ WATCHING | diff stable 2nd tick (7 files, +416 hir_codegen); AGENT-STATE.md growing; suite likely running | Post score when done |
+| +22min | ⚠️ NUDGING | diff stable 3rd tick; 22min since last code change; no score posted | Nudging worker |
+| +25min | ✅ ACTIVE | prune_unused_scopes.rs +4→+8; worker still editing; hir_codegen +416 unchanged; reset nudge timer | Await score |
+| +28min | ⚠️ NUDGING | diff stable 2nd tick; no worker reply to prior nudge; nudging again | Escalate at tick 5 |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 19:56
+
+```
+| +31min | 🔴 ESCALATING | diff stable 3rd tick; 2 nudges unanswered; context exhaustion likely | Human restart needed |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 19:59
+
+```
+| +34min | 🔴 STALLED | diff stable 4th tick; no worker reply; holding | Awaiting human |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 20:02
+
+```
+| +37min | 🔴 STALLED | diff stable 5th tick; holding | Awaiting human |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 20:05
+
+```
+| +40min | ✅ ACTIVE | stall broke; prune_non_escaping_scopes.rs +9→+12; worker editing; reset nudge timer | Await score |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 20:08
+
+```
+| +43min | ✅ ACTIVE | prune_non_escaping_scopes.rs +12→+20; actively growing; no worker messages yet | Await score |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 20:11
+
+```
+| +46min | ⏳ WATCHING | diff stable 2nd tick (+20 prune_non_escaping_scopes); suite likely running; nudge at tick 5 | Await score |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 20:14
+
+```
+| +49min | ✅ ACTIVE | prune_non_escaping_scopes.rs +20→+22; still editing; reset nudge timer | Await score |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 20:17
+
+```
+| +52min | ⏳ WATCHING | diff stable 2nd tick; suite running; nudge at tick 5 | Await score |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 20:20
+
+```
+| +34min | 🔴 STALLED | diff stable 4th tick; no worker reply; holding | Awaiting human |
+| +37min | 🔴 STALLED | diff stable 5th tick; holding | Awaiting human |
+| +40min | ✅ ACTIVE | stall broke; prune_non_escaping_scopes.rs +9→+12; worker editing; reset nudge timer | Await score |
+| +43min | ✅ ACTIVE | prune_non_escaping_scopes.rs +12→+20; actively growing; no worker messages yet | Await score |
+| +46min | ⏳ WATCHING | diff stable 2nd tick (+20 prune_non_escaping_scopes); suite likely running; nudge at tick 5 | Await score |
+| +49min | ✅ ACTIVE | prune_non_escaping_scopes.rs +20→+22; still editing; reset nudge timer | Await score |
+| +52min | ⏳ WATCHING | diff stable 2nd tick; suite running; nudge at tick 5 | Await score |
+| +55min | ⚠️ NUDGING | diff stable 3rd tick; nudging worker | Escalate at tick 6 |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 20:23
+
+```
+| +58min | ✅ ACTIVE | prune_non_escaping_scopes.rs +22→+23; worker alive; AGENT-STATE.md +13; reset nudge timer | Await score |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 20:26
+
+```
+| +61min | ⏳ WATCHING | diff stable 2nd tick; suite running; nudge at tick 5 | Await score |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 20:29
+
+```
+| +64min | ✅ ACTIVE | prune_non_escaping +23→+53, prune_unused +8→+56; large burst in both prune passes | Reset nudge timer |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 20:32
+
+```
+| +67min | ⏳ WATCHING | diff stable 2nd tick; suite running after prune burst; nudge at tick 5 | Await score |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 20:35
+
+```
+| +49min | ✅ ACTIVE | prune_non_escaping_scopes.rs +20→+22; still editing; reset nudge timer | Await score |
+| +52min | ⏳ WATCHING | diff stable 2nd tick; suite running; nudge at tick 5 | Await score |
+| +55min | ⚠️ NUDGING | diff stable 3rd tick; nudging worker | Escalate at tick 6 |
+| +58min | ✅ ACTIVE | prune_non_escaping_scopes.rs +22→+23; worker alive; AGENT-STATE.md +13; reset nudge timer | Await score |
+| +61min | ⏳ WATCHING | diff stable 2nd tick; suite running; nudge at tick 5 | Await score |
+| +64min | ✅ ACTIVE | prune_non_escaping +23→+53, prune_unused +8→+56; large burst in both prune passes | Reset nudge timer |
+| +67min | ⏳ WATCHING | diff stable 2nd tick; suite running after prune burst; nudge at tick 5 | Await score |
+| +70min | ⚠️ NUDGING | diff stable 3rd tick; no worker messages; nudging | Escalate at tick 6 |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 20:38
+
+```
+| +73min | 🔴 ESCALATING | diff stable 4th tick; nudge unanswered; context exhaustion likely | Human restart needed |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 20:41
+
+```
+| +76min | ✅ ACTIVE | stall broke; new file prune_always_invalidating_scopes.rs +3; 8 files now; reset nudge timer | Await score |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 20:44
+
+```
+| +79min | ✅ ACTIVE | prune_unused_scopes.rs +56→+59; still editing; no score yet | Reset nudge timer |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 20:47
+
+```
+| +82min | ⏳ WATCHING | diff stable 2nd tick (8 files); suite running; nudge at tick 5 | Await score |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 20:50
+
+```
+| +85min | ✅ ACTIVE | prune_always_invalidating_scopes.rs dropped; back to 7 files; prune_unused shrank +59→+56; cleanup/revert | Reset nudge timer |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 20:53
+
+```
+| +88min | ⏳ WATCHING | diff stable 2nd tick; suite running after cleanup; nudge at tick 5 | Await score |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 20:56
+
+```
+| +70min | ⚠️ NUDGING | diff stable 3rd tick; no worker messages; nudging | Escalate at tick 6 |
+| +73min | 🔴 ESCALATING | diff stable 4th tick; nudge unanswered; context exhaustion likely | Human restart needed |
+| +76min | ✅ ACTIVE | stall broke; new file prune_always_invalidating_scopes.rs +3; 8 files now; reset nudge timer | Await score |
+| +79min | ✅ ACTIVE | prune_unused_scopes.rs +56→+59; still editing; no score yet | Reset nudge timer |
+| +82min | ⏳ WATCHING | diff stable 2nd tick (8 files); suite running; nudge at tick 5 | Await score |
+| +85min | ✅ ACTIVE | prune_always_invalidating_scopes.rs dropped; back to 7 files; prune_unused shrank +59→+56; cleanup/revert | Reset nudge timer |
+| +88min | ⏳ WATCHING | diff stable 2nd tick; suite running after cleanup; nudge at tick 5 | Await score |
+| +91min | ⚠️ NUDGING | diff stable 3rd tick; nudging worker for score | Escalate at tick 6 |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-13 21:05
+
+```
+| +58min | ✅ ACTIVE | prune_non_escaping_scopes.rs +22→+23; worker alive; AGENT-STATE.md +13; reset nudge timer | Await score |
+| +61min | ⏳ WATCHING | diff stable 2nd tick; suite running; nudge at tick 5 | Await score |
+| +64min | ✅ ACTIVE | prune_non_escaping +23→+53, prune_unused +8→+56; large burst in both prune passes | Reset nudge timer |
+| +67min | ⏳ WATCHING | diff stable 2nd tick; suite running after prune burst; nudge at tick 5 | Await score |
+| +70min | ⚠️ NUDGING | diff stable 3rd tick; no worker messages; nudging | Escalate at tick 6 |
+| +73min | 🔴 ESCALATING | diff stable 4th tick; nudge unanswered; context exhaustion likely | Human restart needed |
+| +76min | ✅ ACTIVE | stall broke; new file prune_always_invalidating_scopes.rs +3; 8 files now; reset nudge timer | Await score |
+| +79min | ✅ ACTIVE | prune_unused_scopes.rs +56→+59; still editing; no score yet | Reset nudge timer |
+| +82min | ⏳ WATCHING | diff stable 2nd tick (8 files); suite running; nudge at tick 5 | Await score |
+| +85min | ✅ ACTIVE | prune_always_invalidating_scopes.rs dropped; back to 7 files; prune_unused shrank +59→+56; cleanup/revert | Reset nudge timer |
+| +88min | ⏳ WATCHING | diff stable 2nd tick; suite running after cleanup; nudge at tick 5 | Await score |
+| +91min | ⚠️ NUDGING | diff stable 3rd tick; nudging worker for score | Escalate at tick 6 |
+| +94min | 📊 SCORE KNOWN | supervisor ran suite: 614/1717=35.8% (+3 from HEAD 35.6%); diff still uncommitted | Worker should commit |
+```
+
