@@ -83,9 +83,12 @@ fn instruction_memo_level(value: &InstructionValue) -> MemoLevel {
         | InstructionValue::FinishMemoize { .. }
         | InstructionValue::UnsupportedNode { .. } => MemoLevel::Unmemoized,
 
-        // InlineJs (optional chaining) — Conditional so backward traversal propagates
-        // through the synthetic dep added during node building.
-        InstructionValue::InlineJs { .. } => MemoLevel::Conditional,
+        // InlineJs (optional chaining):
+        // All optional chains (`?.`) are treated as Memoized — they may produce
+        // allocated values (via optional calls `?.(` or computed member `?.[expr]`
+        // containing function calls), and the TS compiler always memoizes them
+        // when they are reactive (depend on props/state).
+        InstructionValue::InlineJs { .. } => MemoLevel::Memoized,
 
         // TernaryExpression: Conditional — its branches may return allocating values
         // (e.g., `cond ? [-1, 1] : param`), so backward traversal must propagate through it.
@@ -141,19 +144,43 @@ pub fn run_with_env(hir: &HIRFunction, env: &mut Environment) {
         id_to_decl.get(&iid).copied().unwrap_or(DeclarationId(iid.0))
     };
 
-    // Build global name map for hook detection.
+    // Build IdentifierId → hook name map for hook detection.
+    // Covers both imported hooks (LoadGlobal) and locally-defined hooks (LoadLocal of a named var).
     let mut id_to_global_name: HashMap<IdentifierId, String> = HashMap::new();
+
+    // Build identifier name map from env for LoadLocal hook detection.
+    let id_to_name: HashMap<IdentifierId, String> = env
+        .identifiers
+        .iter()
+        .filter_map(|(&iid, ident)| {
+            ident.name.as_ref().map(|n| (iid, n.value().to_string()))
+        })
+        .collect();
+
     for (_, block) in &hir.body.blocks {
         for instr in &block.instructions {
-            if let InstructionValue::LoadGlobal { binding, .. } = &instr.value {
-                let name = match binding {
-                    NonLocalBinding::Global { name } => name.clone(),
-                    NonLocalBinding::ModuleLocal { name } => name.clone(),
-                    NonLocalBinding::ImportDefault { name, .. }
-                    | NonLocalBinding::ImportNamespace { name, .. }
-                    | NonLocalBinding::ImportSpecifier { name, .. } => name.clone(),
-                };
-                id_to_global_name.insert(instr.lvalue.identifier, name);
+            match &instr.value {
+                InstructionValue::LoadGlobal { binding, .. } => {
+                    let name = match binding {
+                        NonLocalBinding::Global { name } => name.clone(),
+                        NonLocalBinding::ModuleLocal { name } => name.clone(),
+                        NonLocalBinding::ImportDefault { name, .. }
+                        | NonLocalBinding::ImportNamespace { name, .. }
+                        | NonLocalBinding::ImportSpecifier { name, .. } => name.clone(),
+                    };
+                    id_to_global_name.insert(instr.lvalue.identifier, name);
+                }
+                InstructionValue::LoadLocal { place, .. }
+                | InstructionValue::LoadContext { place, .. } => {
+                    // Local functions (e.g. `useFoo` defined in same file) are loaded via
+                    // LoadLocal. Check if the source identifier has a hook name.
+                    if let Some(name) = id_to_name.get(&place.identifier) {
+                        if is_hook_name(name) {
+                            id_to_global_name.insert(instr.lvalue.identifier, name.clone());
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }

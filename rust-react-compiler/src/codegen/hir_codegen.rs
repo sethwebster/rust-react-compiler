@@ -978,6 +978,30 @@ impl<'a> Codegen<'a> {
         self.inlined_exprs.clear();
         self.build_inline_map(&ordered);
         self.resolve_logical_phis();
+        // Substitute any stale $tN references in build_inline_map entries.
+        // build_inline_map ran before resolve_logical_phis, so BinaryExpression
+        // inlined values like "x + $t471" may reference ternary phi results that
+        // are now in inlined_exprs. Substitute them using the ID-keyed map.
+        // Note: "$tN" in expression strings uses N = IdentifierId.0 (the raw u32),
+        // which is the same as the inlined_exprs map key.
+        {
+            let keys: Vec<u32> = self.inlined_exprs.keys().copied().collect();
+            for _ in 0..8 {
+                let mut changed = false;
+                for &k in &keys {
+                    let expr = match self.inlined_exprs.get(&k) {
+                        Some(e) if e.contains("$t") => e.clone(),
+                        _ => continue,
+                    };
+                    let new_expr = Self::substitute_temp_refs_in_str(&expr, &self.inlined_exprs);
+                    if new_expr != expr {
+                        self.inlined_exprs.insert(k, new_expr);
+                        changed = true;
+                    }
+                }
+                if !changed { break; }
+            }
+        }
 
         let mut out = String::new();
 
@@ -1647,50 +1671,64 @@ impl<'a> Codegen<'a> {
                         parts.join(", ")
                     }).unwrap_or_default();
 
-                    let test_expr = self.hir.body.blocks.get(&test_bid).and_then(|b| {
-                        if let Terminal::Branch { test, .. } = &b.terminal {
-                            Some(self.expr(test))
-                        } else {
-                            None
-                        }
-                    }).unwrap_or_else(|| "true".to_string());
+                    // Use do_while_test_expr to handle logical-chain conditions (&&/||).
+                    // The For.test block may itself be a logical-op branch; follow the
+                    // chain to the final Branch with the resolved phi result.
+                    let test_expr = if self.hir.body.blocks.get(&test_bid)
+                        .map(|b| matches!(&b.terminal, Terminal::Branch { .. }))
+                        .unwrap_or(false)
+                    {
+                        self.do_while_test_expr(test_bid)
+                    } else {
+                        "true".to_string()
+                    };
 
-                    // Reconstruct update expression from the update block.
-                    // Find the last emittable instruction (typically StoreLocal i = i + 1).
-                    // For Primitive instructions (from const-prop), emit just the value
-                    // rather than a declaration.
-                    let update_expr = update_bid.and_then(|ubid| {
-                        self.hir.body.blocks.get(&ubid).and_then(|b| {
-                            let mut last = None;
-                            for instr in &b.instructions {
-                                // In for-loop update position, use expression form
-                                // for Primitives and LoadLocals instead of declarations.
-                                match &instr.value {
-                                    InstructionValue::Primitive { value, .. } => {
-                                        last = Some(primitive_expr(value));
-                                    }
-                                    InstructionValue::LoadLocal { place, .. } => {
-                                        last = Some(self.expr(place));
-                                    }
-                                    InstructionValue::LoadGlobal { .. } => {
-                                        last = Some(self.expr(&instr.lvalue));
-                                    }
-                                    _ => {
-                                        if let Some(s) = self.emit_stmt(instr, None, &[]) {
-                                            last = Some(s.trim_end_matches(';').to_string());
-                                        }
-                                    }
-                                }
-                            }
-                            last
-                        })
-                    }).unwrap_or_default();
+                    // Reconstruct update expression by walking the entire update sub-CFG
+                    // (from update_bid to just before test_bid). Complex updates (ternary
+                    // conditionals) span multiple blocks; collect all non-inlined instructions
+                    // and join as comma-separated expressions.
+                    let update_expr = if let Some(ubid) = update_bid {
+                        let exprs = self.collect_for_update_exprs(ubid, test_bid);
+                        exprs.join(", ")
+                    } else {
+                        String::new()
+                    };
 
                     let _ = writeln!(out, "{pad}for ({init_expr}; {test_expr}; {update_expr}) {{");
                     let body_pad = indent + 1;
                     let mut vis2 = visited.clone();
-                    if let Some(ubid) = update_bid { vis2.insert(ubid); }
-                    vis2.insert(test_bid);
+                    // Mark entire test sub-CFG (logical chain) as visited.
+                    {
+                        let mut tb = test_bid;
+                        for _ in 0..32 {
+                            vis2.insert(tb);
+                            let next = self.hir.body.blocks.get(&tb).and_then(|b| {
+                                if let Terminal::Branch { fallthrough, logical_op: Some(_), .. } = &b.terminal {
+                                    Some(*fallthrough)
+                                } else {
+                                    None
+                                }
+                            });
+                            match next { Some(n) => tb = n, None => break }
+                        }
+                    }
+                    // Mark entire update sub-CFG as visited.
+                    if let Some(ubid) = update_bid {
+                        use std::collections::VecDeque;
+                        let mut q: VecDeque<crate::hir::hir::BlockId> = VecDeque::new();
+                        q.push_back(ubid);
+                        while let Some(bid) = q.pop_front() {
+                            if vis2.contains(&bid) || bid == test_bid { continue; }
+                            vis2.insert(bid);
+                            if let Some(b) = self.hir.body.blocks.get(&bid) {
+                                for succ in b.terminal.successors() {
+                                    if succ != test_bid && !vis2.contains(&succ) {
+                                        q.push_back(succ);
+                                    }
+                                }
+                            }
+                        }
+                    }
                     // stop_at = update block (if present), so the body's implicit
                     // continue to the update block doesn't emit a spurious `continue;`.
                     let body_stop = update_bid.unwrap_or(test_bid);
@@ -3803,21 +3841,31 @@ impl<'a> Codegen<'a> {
                             let inner_has_or = resolved.contains(" || ");
                             let inner_has_and = resolved.contains(" && ");
                             let inner_has_nc = resolved.contains(" ?? ");
+                            let inner_has_ternary = resolved.contains(" ? ");
                             let after = &expr[j..];
                             // Determine outer operator from context (before and after $tN)
                             let outer_is_and = result.ends_with(" && ") || after.starts_with(" && ");
                             let outer_is_or  = result.ends_with(" || ") || after.starts_with(" || ");
                             let outer_is_nc  = result.ends_with(" ?? ") || after.starts_with(" ?? ");
+                            // Check for arithmetic operators in context (+ - * / etc.)
+                            let outer_has_arith = {
+                                let trimmed_before = result.trim_end_matches(' ');
+                                trimmed_before.ends_with('+') || trimmed_before.ends_with('-')
+                                    || trimmed_before.ends_with('*') || trimmed_before.ends_with('/')
+                                    || trimmed_before.ends_with('%')
+                            };
                             // Need parens when inner operator has lower (or different)
                             // precedence than outer. Also add for && inside || for clarity,
                             // matching the TS compiler's behavior of preserving user parens:
                             // - || or ?? inside && context (semantic need)
                             // - && or ?? inside || context (&& for clarity, ?? semantic need)
                             // - && or || inside ?? context (can't mix with ??)
+                            // - ternary inside any binary operator context (lowest precedence)
                             let needs_parens =
                                 (outer_is_and && (inner_has_or || inner_has_nc))
                                 || (outer_is_or && (inner_has_and || inner_has_nc))
-                                || (outer_is_nc && (inner_has_and || inner_has_or));
+                                || (outer_is_nc && (inner_has_and || inner_has_or))
+                                || (inner_has_ternary && (outer_is_and || outer_is_or || outer_is_nc || outer_has_arith));
                             if needs_parens {
                                 result.push('(');
                                 result.push_str(resolved);
@@ -5598,6 +5646,294 @@ impl<'a> Codegen<'a> {
             return s.clone();
         }
         self.ident_name(place.identifier)
+    }
+
+    /// Collect update expressions for a for-loop update block.
+    /// Walks the entire sub-CFG from `start` to just before `stop` (exclusive),
+    /// collecting all non-inlined instructions and emitting them as expressions.
+    /// Returns them as comma-separated strings (e.g. "x = x + t, x").
+    fn collect_for_update_exprs(&mut self, start: crate::hir::hir::BlockId, stop: crate::hir::hir::BlockId) -> Vec<String> {
+        use std::collections::{HashSet, VecDeque};
+
+        // BFS to collect all blocks in update sub-CFG (stopping at `stop`).
+        let mut visited_bfs: HashSet<crate::hir::hir::BlockId> = HashSet::new();
+        let mut queue: VecDeque<crate::hir::hir::BlockId> = VecDeque::new();
+        let mut blocks_in_order: Vec<crate::hir::hir::BlockId> = Vec::new();
+        queue.push_back(start);
+        while let Some(bid) = queue.pop_front() {
+            if visited_bfs.contains(&bid) || bid == stop { continue; }
+            visited_bfs.insert(bid);
+            blocks_in_order.push(bid);
+            let block = match self.hir.body.blocks.get(&bid) {
+                Some(b) => b,
+                None => continue,
+            };
+            for succ in block.terminal.successors() {
+                if succ != stop && !visited_bfs.contains(&succ) {
+                    queue.push_back(succ);
+                }
+            }
+        }
+
+        // Build a local inlining map for the update sub-CFG so that temps can
+        // be resolved to their expressions without relying on the possibly-stale
+        // global inlined_exprs map. Process blocks in order to inline in sequence.
+        let mut local_exprs: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+
+        // Helper: resolve a place's expression using local_exprs first, then global.
+        // This avoids stale global entries for cross-block temps.
+        let mut resolve = |place: &crate::hir::hir::Place,
+                           local: &std::collections::HashMap<u32, String>,
+                           global: &std::collections::HashMap<u32, String>,
+                           ident_fn: &dyn Fn(crate::hir::hir::IdentifierId) -> String| -> String {
+            if let Some(e) = local.get(&place.identifier.0) { return e.clone(); }
+            if let Some(e) = global.get(&place.identifier.0) { return e.clone(); }
+            ident_fn(place.identifier)
+        };
+        let _ = resolve; // used below via closure
+
+        // Populate local_exprs by iterating all instructions in the sub-CFG.
+        // For each block, compute inline expressions for all instructions.
+        for bid in &blocks_in_order {
+            let instrs: Vec<crate::hir::hir::Instruction> = self.hir.body.blocks.get(bid)
+                .map(|b| b.instructions.clone())
+                .unwrap_or_default();
+            // Also handle phi nodes in this block (they represent join points like ternary results).
+            let phis: Vec<crate::hir::hir::Phi> = self.hir.body.blocks.get(bid)
+                .map(|b| b.phis.clone())
+                .unwrap_or_default();
+            // Phi results: use the global inlined_exprs (set by resolve_logical_phis).
+            for phi in &phis {
+                if let Some(e) = self.inlined_exprs.get(&phi.place.identifier.0) {
+                    local_exprs.insert(phi.place.identifier.0, e.clone());
+                }
+                // Also: if the phi has a named user variable as an identifier, use that name.
+                // This handles loop-carried phis where ident_name is a user variable.
+                if !local_exprs.contains_key(&phi.place.identifier.0) {
+                    let phi_name = self.ident_name(phi.place.identifier);
+                    if !phi_name.starts_with("$t") && !phi_name.starts_with("$T") {
+                        local_exprs.insert(phi.place.identifier.0, phi_name);
+                    }
+                }
+            }
+            for instr in &instrs {
+                let id = instr.lvalue.identifier.0;
+                // Compute fresh expression for this instruction.
+                let expr = match &instr.value {
+                    InstructionValue::Primitive { value, .. } => {
+                        Some(primitive_expr(value))
+                    }
+                    InstructionValue::LoadLocal { place, .. } => {
+                        // Resolve from local first (handles SSA temps), then global, then name.
+                        let e = local_exprs.get(&place.identifier.0)
+                            .or_else(|| self.inlined_exprs.get(&place.identifier.0))
+                            .cloned()
+                            .unwrap_or_else(|| self.ident_name(place.identifier));
+                        Some(e)
+                    }
+                    InstructionValue::LoadGlobal { .. } => {
+                        Some(self.ident_name(instr.lvalue.identifier))
+                    }
+                    InstructionValue::PropertyLoad { object, property, .. } => {
+                        let obj = local_exprs.get(&object.identifier.0)
+                            .or_else(|| self.inlined_exprs.get(&object.identifier.0))
+                            .cloned()
+                            .unwrap_or_else(|| self.ident_name(object.identifier));
+                        Some(format!("{obj}.{property}"))
+                    }
+                    InstructionValue::BinaryExpression { operator, left, right, .. } => {
+                        let op = binary_op_str(operator);
+                        let l = local_exprs.get(&left.identifier.0)
+                            .or_else(|| self.inlined_exprs.get(&left.identifier.0))
+                            .cloned()
+                            .unwrap_or_else(|| self.ident_name(left.identifier));
+                        let r = local_exprs.get(&right.identifier.0)
+                            .or_else(|| self.inlined_exprs.get(&right.identifier.0))
+                            .cloned()
+                            .unwrap_or_else(|| self.ident_name(right.identifier));
+                        Some(format!("{l} {op} {r}"))
+                    }
+                    _ => None, // other instructions handled below
+                };
+                if let Some(e) = expr {
+                    local_exprs.insert(id, e);
+                }
+            }
+        }
+
+        // Phase 3: Resolve ternary phi nodes.
+        // For each block whose terminal is Branch(logical_op: None), the fallthrough
+        // block has phi nodes representing the ternary result. Compute the ternary
+        // expression from test/consequent/alternate and add to local_exprs.
+        {
+            use crate::hir::hir::Terminal as UpdTerm;
+            for bid_idx in 0..blocks_in_order.len() {
+                let bid = blocks_in_order[bid_idx];
+                let (test_place, cons_bid, alt_bid, fall_bid) = {
+                    let block = match self.hir.body.blocks.get(&bid) { Some(b) => b, None => continue };
+                    match &block.terminal {
+                        UpdTerm::Branch { test, consequent, alternate, fallthrough, logical_op: None, .. } => {
+                            (test.clone(), *consequent, *alternate, *fallthrough)
+                        }
+                        _ => continue,
+                    }
+                };
+                // Only handle if fallthrough is in our update sub-CFG region.
+                if !visited_bfs.contains(&fall_bid) { continue; }
+                let test_expr = local_exprs.get(&test_place.identifier.0)
+                    .or_else(|| self.inlined_exprs.get(&test_place.identifier.0))
+                    .cloned()
+                    .unwrap_or_else(|| self.ident_name(test_place.identifier));
+                let fall_phis: Vec<crate::hir::hir::Phi> = self.hir.body.blocks.get(&fall_bid)
+                    .map(|b| b.phis.clone())
+                    .unwrap_or_default();
+                for phi in &fall_phis {
+                    if local_exprs.contains_key(&phi.place.identifier.0) { continue; }
+                    let mut cons_expr: Option<String> = None;
+                    let mut alt_expr: Option<String> = None;
+                    for (pred_bid, op_place) in &phi.operands {
+                        let expr = local_exprs.get(&op_place.identifier.0)
+                            .or_else(|| self.inlined_exprs.get(&op_place.identifier.0))
+                            .cloned()
+                            .unwrap_or_else(|| self.ident_name(op_place.identifier));
+                        if *pred_bid == cons_bid {
+                            cons_expr = Some(expr);
+                        } else if *pred_bid == alt_bid {
+                            alt_expr = Some(expr);
+                        }
+                    }
+                    if let (Some(cv), Some(av)) = (cons_expr, alt_expr) {
+                        local_exprs.insert(phi.place.identifier.0, format!("{test_expr} ? {cv} : {av}"));
+                    }
+                }
+            }
+        }
+
+        // Phase 4: Resolve loop-carried phi nodes (multi-pass).
+        // For phi nodes not yet resolved, try to find an operand that is already
+        // in local_exprs, inlined_exprs, or has a user-visible name.
+        for _ in 0..16 {
+            let mut changed = false;
+            for &bid in &blocks_in_order {
+                let phis: Vec<crate::hir::hir::Phi> = self.hir.body.blocks.get(&bid)
+                    .map(|b| b.phis.clone())
+                    .unwrap_or_default();
+                for phi in &phis {
+                    if local_exprs.contains_key(&phi.place.identifier.0) { continue; }
+                    // Try each operand.
+                    for (_, op_place) in &phi.operands {
+                        // Prefer already-resolved expressions.
+                        if let Some(e) = local_exprs.get(&op_place.identifier.0) {
+                            local_exprs.insert(phi.place.identifier.0, e.clone());
+                            changed = true;
+                            break;
+                        }
+                        if let Some(e) = self.inlined_exprs.get(&op_place.identifier.0) {
+                            local_exprs.insert(phi.place.identifier.0, e.clone());
+                            changed = true;
+                            break;
+                        }
+                        // Use any named user variable among operands.
+                        let name = self.ident_name(op_place.identifier);
+                        if !name.starts_with("$t") && !name.starts_with("$T") {
+                            local_exprs.insert(phi.place.identifier.0, name);
+                            changed = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if !changed { break; }
+        }
+
+        // Phase 4b: Substitute newly-resolved phi expressions into existing local_exprs entries.
+        // Phase 2 computed BinaryExpression etc. using ident_name("$t466") before phases 3/4
+        // resolved those phis. Now update any stale "$tN" references using the resolved local_exprs.
+        for _ in 0..8 {
+            let mut changed = false;
+            let keys: Vec<u32> = local_exprs.keys().copied().collect();
+            for k in keys {
+                let expr = local_exprs[&k].clone();
+                if !expr.contains("$t") && !expr.contains("$T") { continue; }
+                let new_expr = Self::substitute_temp_refs_in_str(&expr, &local_exprs);
+                if new_expr != expr {
+                    local_exprs.insert(k, new_expr);
+                    changed = true;
+                }
+            }
+            if !changed { break; }
+        }
+
+        // Build set of identifier IDs that are consumed as operands by instructions
+        // in the update sub-CFG. Used to detect trailing LoadLocals.
+        let mut used_in_update: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for &bid in &blocks_in_order {
+            let instrs = self.hir.body.blocks.get(&bid).map(|b| b.instructions.clone()).unwrap_or_default();
+            for instr in &instrs {
+                use crate::hir::visitors::each_instruction_value_operand;
+                for place in each_instruction_value_operand(&instr.value) {
+                    used_in_update.insert(place.identifier.0);
+                }
+            }
+        }
+
+        // Collect non-inlined side-effecting instructions (StoreLocals, calls, etc.)
+        // from all blocks as update expressions.
+        let mut exprs: Vec<String> = Vec::new();
+        for bid in &blocks_in_order {
+            let instrs: Vec<crate::hir::hir::Instruction> = self.hir.body.blocks.get(bid)
+                .map(|b| b.instructions.clone())
+                .unwrap_or_default();
+            for instr in &instrs {
+                // Skip instructions whose result is already inlined (consumed as a temp
+                // by another instruction). Exclude LoadLocal so trailing reads can be emitted.
+                let is_load_local = matches!(&instr.value, InstructionValue::LoadLocal { .. });
+                if !is_load_local
+                    && local_exprs.contains_key(&instr.lvalue.identifier.0)
+                    && self.inlined_exprs.contains_key(&instr.lvalue.identifier.0)
+                {
+                    continue;
+                }
+                // Emit side-effectful instructions as expressions.
+                match &instr.value {
+                    InstructionValue::StoreLocal { lvalue, value, .. } => {
+                        let lname = self.env.get_identifier(lvalue.place.identifier)
+                            .and_then(|i| i.name.as_ref())
+                            .map(|n| n.value().to_string());
+                        if let Some(name) = lname {
+                            let val_expr = local_exprs.get(&value.identifier.0)
+                                .or_else(|| self.inlined_exprs.get(&value.identifier.0))
+                                .cloned()
+                                .unwrap_or_else(|| self.ident_name(value.identifier));
+                            if name != val_expr {
+                                exprs.push(format!("{name} = {val_expr}"));
+                            }
+                        }
+                    }
+                    InstructionValue::LoadLocal { place, .. } => {
+                        // A naked LoadLocal in the update that is NOT consumed by another
+                        // instruction in the update sub-CFG is a trailing "read" that should
+                        // be emitted as part of the comma expression (e.g., `x = expr, x`).
+                        if !used_in_update.contains(&instr.lvalue.identifier.0) {
+                            let e = local_exprs.get(&place.identifier.0)
+                                .or_else(|| self.inlined_exprs.get(&place.identifier.0))
+                                .cloned()
+                                .unwrap_or_else(|| self.ident_name(place.identifier));
+                            exprs.push(e);
+                        }
+                    }
+                    _ => {
+                        // For other instructions not in local_exprs, try emit_stmt.
+                        if !local_exprs.contains_key(&instr.lvalue.identifier.0) {
+                            if let Some(s) = self.emit_stmt(instr, None, &[]) {
+                                exprs.push(s.trim_end_matches(';').to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        exprs
     }
 
     /// Get the test expression for a do-while loop test block.

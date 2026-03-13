@@ -422,10 +422,7 @@ pub fn run_with_env(hir: &mut HIRFunction, env: &mut Environment) {
                 }
                 // If new scope is fully contained within an always-invalidating survivor, merge it.
                 // This handles hoisting cases where a sub-expression scope (e.g., ObjectExpression
-                // containing a Primitive) is nested inside an always-invalidating parent scope
-                // (e.g., one that declares a FunctionExpression capturing the object). The sub-scope's
-                // declarations will always invalidate together with the parent since they have no
-                // independent deps — merging them produces correct single-slot output.
+                // containing a Primitive) is nested inside an always-invalidating parent scope.
                 if survivor_always_inv && s >= ss && e <= se {
                     if std::env::var("RC_DEBUG").is_ok() {
                         eprintln!(

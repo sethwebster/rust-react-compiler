@@ -172,22 +172,46 @@ pub fn run_with_env(hir: &HIRFunction, env: &mut Environment) {
     // Scopes with NO live members are pruned.
     // -----------------------------------------------------------------------
 
-    // Detect LoadGlobal names so we can identify hook callees.
+    // Detect LoadGlobal and LoadLocal-of-hook names so we can identify hook callees.
+    // This covers both imported hooks (LoadGlobal) and locally-defined hooks (LoadLocal).
     let mut id_to_global_name: HashMap<IdentifierId, String> = HashMap::new();
+
+    // Build identifier name map for local hook detection.
+    let id_to_ident_name: HashMap<IdentifierId, String> = env
+        .identifiers
+        .iter()
+        .filter_map(|(&iid, ident)| {
+            ident.name.as_ref().map(|n| (iid, n.value().to_string()))
+        })
+        .collect();
+
     for (_, block) in &hir.body.blocks {
         for instr in &block.instructions {
-            if let InstructionValue::LoadGlobal { binding, .. } = &instr.value {
-                use crate::hir::hir::NonLocalBinding;
-                let name = match binding {
-                    NonLocalBinding::Global { name } => Some(name.clone()),
-                    NonLocalBinding::ModuleLocal { name } => Some(name.clone()),
-                    NonLocalBinding::ImportDefault { name, .. }
-                    | NonLocalBinding::ImportNamespace { name, .. }
-                    | NonLocalBinding::ImportSpecifier { name, .. } => Some(name.clone()),
-                };
-                if let Some(n) = name {
-                    id_to_global_name.insert(instr.lvalue.identifier, n);
+            match &instr.value {
+                InstructionValue::LoadGlobal { binding, .. } => {
+                    use crate::hir::hir::NonLocalBinding;
+                    let name = match binding {
+                        NonLocalBinding::Global { name } => Some(name.clone()),
+                        NonLocalBinding::ModuleLocal { name } => Some(name.clone()),
+                        NonLocalBinding::ImportDefault { name, .. }
+                        | NonLocalBinding::ImportNamespace { name, .. }
+                        | NonLocalBinding::ImportSpecifier { name, .. } => Some(name.clone()),
+                    };
+                    if let Some(n) = name {
+                        id_to_global_name.insert(instr.lvalue.identifier, n);
+                    }
                 }
+                InstructionValue::LoadLocal { place, .. }
+                | InstructionValue::LoadContext { place, .. } => {
+                    // Local hook functions (e.g. `useFoo` defined in same file) are loaded
+                    // via LoadLocal. Propagate hook name if the source has one.
+                    if let Some(name) = id_to_ident_name.get(&place.identifier) {
+                        if is_hook_name(name) {
+                            id_to_global_name.insert(instr.lvalue.identifier, name.clone());
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -385,6 +409,14 @@ fn is_allocating_instruction(value: &InstructionValue) -> bool {
         if name_hint.is_some() {
             return false; // Outlined — stable, not worth caching.
         }
+    }
+    // InlineJs covers optional chaining (`?.`). These may allocate:
+    // - Optional calls `?.(` definitely allocate.
+    // - Optional property access `?.` may return values from calls within the chain
+    //   (e.g., `x?.[foo(y)]` where `foo(y)` allocates). Treat ALL optional chains
+    //   as potentially allocating to match TS compiler behavior.
+    if let InstructionValue::InlineJs { source, .. } = value {
+        return source.contains("?.");
     }
     matches!(
         value,

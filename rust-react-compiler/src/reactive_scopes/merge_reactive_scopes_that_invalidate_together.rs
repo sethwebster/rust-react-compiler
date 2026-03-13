@@ -132,7 +132,35 @@ pub fn run_with_env(hir: &mut HIRFunction, env: &mut Environment) {
             }
         }
     }
-    // Second pass: identify hook call instructions.
+    // Second pass: propagate always-invalidating status through MethodCalls.
+    // If the receiver of a MethodCall is always-invalidating (e.g. a fresh Array),
+    // the result is also always-invalidating (e.g. .map() returns a new Array).
+    // Also, if the receiver is a global object (like Object, Array, JSON, Math),
+    // the result is always-invalidating (e.g. Object.entries() returns new Array).
+    // Repeat until fixpoint to handle chains like arr.filter(...).map(...).
+    loop {
+        let mut changed = false;
+        for (_, block) in &hir.body.blocks {
+            for instr in &block.instructions {
+                if let InstructionValue::MethodCall { receiver, .. } = &instr.value {
+                    let already = is_always_invalidating.get(&instr.lvalue.identifier).copied().unwrap_or(false);
+                    if !already {
+                        let recv_inv = is_always_invalidating.get(&receiver.identifier).copied().unwrap_or(false);
+                        // A MethodCall on a global object (Object.entries, Array.from, etc.)
+                        // always produces a new value.
+                        let recv_is_global = global_name_of.contains_key(&receiver.identifier);
+                        if recv_inv || recv_is_global {
+                            is_always_invalidating.insert(instr.lvalue.identifier, true);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        if !changed { break; }
+    }
+
+    // Third pass: identify hook call instructions.
     for (_, block) in &hir.body.blocks {
         for instr in &block.instructions {
             if let InstructionValue::CallExpression { callee, .. } = &instr.value {
@@ -428,6 +456,14 @@ fn can_merge_scopes(
     store_local_value: &HashMap<IdentifierId, IdentifierId>,
     is_always_invalidating: &HashMap<IdentifierId, bool>,
 ) -> bool {
+    // Don't merge scopes with reassignments (mirrors TS compiler check).
+    // Reassignments are mutable variables declared outside the scope but written
+    // inside it. Merging such scopes would incorrectly make the reassignment
+    // conditional on the cache check.
+    if !scope_a.reassignments.is_empty() || !scope_b.reassignments.is_empty() {
+        return false;
+    }
+
     // Case 1: Equal deps (including both empty → sentinel-sentinel merge).
     if deps_are_equal(scope_a, scope_b) {
         return true;
@@ -459,6 +495,7 @@ fn can_merge_scopes(
             let always_inv = is_always_invalidating.get(&val_id).copied().unwrap_or(false)
                 || is_always_invalidating.get(&dep_id).copied().unwrap_or(false);
             if !always_inv {
+                if std::env::var("RC_DEBUG").is_ok() { eprintln!("[can_merge] Case2 fail: not always_inv dep={} val={}", dep_id.0, val_id.0); }
                 return false;
             }
             // The dep must be produced within scope A (declared by A).
