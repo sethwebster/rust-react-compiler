@@ -1728,8 +1728,25 @@ fn normalize_for_update_comma(input: &str) -> String {
                 // (the second semicolon in the for-loop header)
                 let before = &input[..i];
                 if before.rfind("; ").map_or(false, |semi_pos| {
-                    // Ensure there's a `for` somewhere before the semicolons
-                    before[..semi_pos].contains("for (") || before[..semi_pos].contains("for(")
+                    // Ensure there's a `for` keyword (not `Symbol.for`) before the semicolons.
+                    // We check that `for (` or `for(` is preceded by a non-alphanumeric,
+                    // non-`.` character to avoid matching `Symbol.for(`.
+                    let content = &before[..semi_pos];
+                    let has_for_kw = |pat: &str| -> bool {
+                        let mut pos = 0;
+                        while let Some(found) = content[pos..].find(pat) {
+                            let abs = pos + found;
+                            // Check the character before `for`: must not be `.` or alphanumeric
+                            let preceded_ok = abs == 0 || {
+                                let b = content.as_bytes()[abs - 1];
+                                b != b'.' && !b.is_ascii_alphanumeric() && b != b'_'
+                            };
+                            if preceded_ok { return true; }
+                            pos = abs + pat.len();
+                        }
+                        false
+                    };
+                    has_for_kw("for (") || has_for_kw("for(")
                 }) {
                     // Skip `, IDENT` (and trailing spaces up to `)`)
                     // Add a space before `)` to match tokenized format (` ) `)
