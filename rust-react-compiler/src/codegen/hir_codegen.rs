@@ -3916,14 +3916,26 @@ impl<'a> Codegen<'a> {
                         LogicalOperator::NullishCoalescing => "??",
                     };
 
-                    // Add parentheses around a logical sub-expression when it appears
-                    // as an operand of another logical expression. This matches the TS
-                    // compiler's output and preserves the user's original intent.
-                    // e.g. `a && b` inside `|| c` → `(a && b) || c`
-                    let left_needs_parens = left_expr.contains(" && ")
-                        || left_expr.contains(" || ")
-                        || left_expr.contains(" ?? ");
-                    let left_expr = if left_needs_parens {
+                    // Add parentheses around a logical sub-expression when the left operand
+                    // uses a DIFFERENT logical operator than the outer expression.
+                    // Same-operator chains (e.g. `a && b && c`) don't need parens due to
+                    // left-associativity. But different operators always get parens to be
+                    // explicit (matching TS compiler style):
+                    //   - `(a && b) || c` → parens added (different operators)
+                    //   - `(a || b) && c` → parens added (different operators)
+                    //   - `a && b && c` → no parens (same operator, left-assoc)
+                    let left_has_different_logical = match op {
+                        LogicalOperator::And => {
+                            left_expr.contains(" || ") || left_expr.contains(" ?? ")
+                        }
+                        LogicalOperator::Or => {
+                            left_expr.contains(" && ") || left_expr.contains(" ?? ")
+                        }
+                        LogicalOperator::NullishCoalescing => {
+                            left_expr.contains(" && ") || left_expr.contains(" || ")
+                        }
+                    };
+                    let left_expr = if left_has_different_logical {
                         format!("({left_expr})")
                     } else {
                         left_expr
@@ -6679,11 +6691,26 @@ impl<'a> Codegen<'a> {
                 continue;
             }
 
+            // Detect `let s = null;` pattern: StoreLocal with Let/HoistedLet kind where
+            // the value has no scope. This is a pre-scope declaration (initial assignment
+            // before the scope body) and should NOT be tagged to any scope — the scope
+            // output mechanism handles the `let s;` declaration separately.
+            let is_let_decl_with_unscoped_value = match &instr.value {
+                InstructionValue::StoreLocal { lvalue, value, .. }
+                    if matches!(lvalue.kind, InstructionKind::Let | InstructionKind::HoistedLet) =>
+                {
+                    self.env.get_identifier(value.identifier).and_then(|i| i.scope).is_none()
+                }
+                _ => false,
+            };
+
             // 1. Check the instruction's own lvalue identifier.
-            if let Some(ident) = self.env.get_identifier(instr.lvalue.identifier) {
-                if let Some(sid) = ident.scope {
-                    map.insert(instr.id, sid);
-                    continue;
+            if !is_let_decl_with_unscoped_value {
+                if let Some(ident) = self.env.get_identifier(instr.lvalue.identifier) {
+                    if let Some(sid) = ident.scope {
+                        map.insert(instr.id, sid);
+                        continue;
+                    }
                 }
             }
             // 2. For StoreLocal/StoreContext: check the stored VALUE's scope,
@@ -6696,8 +6723,16 @@ impl<'a> Codegen<'a> {
                         None // Outlined function ref — do not place in a scope.
                     } else {
                         // Check value identifier's scope first.
-                        self.env.get_identifier(value.identifier).and_then(|i| i.scope)
-                            .or_else(|| self.env.get_identifier(lvalue.place.identifier).and_then(|i| i.scope))
+                        let value_scope = self.env.get_identifier(value.identifier).and_then(|i| i.scope);
+                        if value_scope.is_some() {
+                            value_scope
+                        } else if matches!(lvalue.kind, InstructionKind::Let | InstructionKind::HoistedLet) {
+                            // For Let-kind declarations with unscoped values, don't fall
+                            // back to the place's scope — this is a pre-scope declaration.
+                            None
+                        } else {
+                            self.env.get_identifier(lvalue.place.identifier).and_then(|i| i.scope)
+                        }
                     }
                 }
                 InstructionValue::StoreContext { lvalue, value, .. } => {
@@ -6774,7 +6809,7 @@ impl<'a> Codegen<'a> {
                 }
                 _ => false,
             };
-            if !is_excluded {
+            if !is_excluded && !is_let_decl_with_unscoped_value {
                 for (sid, scope) in &self.env.scopes {
                     let range_nonempty = scope.range.end > scope.range.start;
                     if range_nonempty && instr.id >= scope.range.start && instr.id < scope.range.end {
