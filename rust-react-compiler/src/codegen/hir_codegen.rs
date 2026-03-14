@@ -3868,7 +3868,8 @@ impl<'a> Codegen<'a> {
 
                     let combined = format!("{left_expr} {op_str} {right_expr}");
                     logical_phi_ids.insert(phi.place.identifier.0);
-                    new_entries.push((phi.place.identifier.0, combined.clone()));
+                    // Insert immediately so later entries in the same round can use this result.
+                    self.inlined_exprs.insert(phi.place.identifier.0, combined.clone());
                     // Also map any use of the pre-SSA phi result to the combined expression.
                     // Because enter_ssa doesn't rename pre-existing phi results, the terminal
                     // that uses the phi result may have a different SSA id from phi.place.identifier.
@@ -3876,7 +3877,7 @@ impl<'a> Codegen<'a> {
                     if let Terminal::Branch { test: fall_test, logical_op: None, .. } = &fall_block.terminal {
                         if fall_test.identifier.0 != phi.place.identifier.0 {
                             logical_phi_ids.insert(fall_test.identifier.0);
-                            new_entries.push((fall_test.identifier.0, combined));
+                            self.inlined_exprs.insert(fall_test.identifier.0, combined);
                         }
                     }
                     added_this_round += 1;
@@ -3936,17 +3937,31 @@ impl<'a> Codegen<'a> {
                     // Only resolve if operands are fully resolved (no raw $tN).
                     if consq_expr.contains("$t") || alt_expr.contains("$t") { continue; }
 
+                    // Wrap consequent in parens if it contains a ternary (nested ternary in
+                    // consequent position needs parens to preserve right-associativity).
+                    let consq_expr = if consq_expr.contains(" ? ") {
+                        format!("({consq_expr})")
+                    } else {
+                        consq_expr
+                    };
+                    // Wrap alternate in parens if it contains ?? (nullish coalescing in
+                    // alternate position; TS compiler adds parens for clarity).
+                    let alt_expr = if alt_expr.contains(" ?? ") {
+                        format!("({alt_expr})")
+                    } else {
+                        alt_expr
+                    };
+
                     let combined = format!("{test_expr} ? {consq_expr} : {alt_expr}");
                     logical_phi_ids.insert(phi.place.identifier.0);
-                    new_entries.push((phi.place.identifier.0, combined));
+                    // Insert immediately so later entries in the same round can use this result.
+                    self.inlined_exprs.insert(phi.place.identifier.0, combined);
                     added_this_round += 1;
                 }
             }
 
-            // Apply collected entries.
-            for (id, expr) in new_entries.drain(..) {
-                self.inlined_exprs.insert(id, expr);
-            }
+            // Entries were already inserted into inlined_exprs immediately above.
+            new_entries.clear(); // no-op but kept for clarity
 
             if added_this_round == 0 {
                 break;
@@ -4477,10 +4492,21 @@ impl<'a> Codegen<'a> {
                     .map(|_| self.ident_name(var_id));
                 // Prefer fresh try_inline_instr over potentially-stale inlined_exprs entry
                 // from build_inline_map (which computed expressions before prior scopes emitted).
-                let value_expr = instrs.iter()
-                    .find(|i| i.lvalue.identifier == value.identifier)
+                let value_instr = instrs.iter().find(|i| i.lvalue.identifier == value.identifier);
+                let mut value_expr = value_instr
                     .and_then(|vi| self.try_inline_instr(vi))
                     .unwrap_or_else(|| self.expr(value));
+                // Method shorthand bodies (e.g. `() { return x; }` from `y() {...}`) start with
+                // `(` but lack the `function` keyword — they are only valid inside object literals.
+                // When emitted as standalone scope-output expressions, prepend `function `.
+                if let Some(vi) = value_instr {
+                    if let InstructionValue::FunctionExpression { fn_type: FunctionExpressionType::Expression, lowered_func, .. } = &vi.value {
+                        let async_kw = if lowered_func.func.async_ { "async " } else { "" };
+                        if value_expr.starts_with('(') && !value_expr.contains("=>") {
+                            value_expr = format!("{async_kw}function {value_expr}");
+                        }
+                    }
+                }
                 let mut used_outside = self.is_var_used_outside_scope(var_id, &scope_lvalue_ids);
                 // For loop-wrapped scopes: if the StoreLocal is in the fallthrough block
                 // (the block executed after the loop terminates), it IS a scope output.
@@ -4812,13 +4838,21 @@ impl<'a> Codegen<'a> {
             // Prefer try_inline_instr (fresh at emission time, uses current inlined_exprs
             // with post-scope-emission codegen names) over the potentially-stale
             // build_inline_map entry.
-            let cache_expr = if let Some(computed) = self.try_inline_instr(instr) {
+            let mut cache_expr = if let Some(computed) = self.try_inline_instr(instr) {
                 computed
             } else if let Some(inlined) = self.inlined_exprs.get(&instr.lvalue.identifier.0) {
                 inlined.clone()
             } else {
                 self.expr(&instr.lvalue)
             };
+            // Method shorthand bodies (e.g. `() { return x; }`) start with `(` but
+            // lack `function` keyword — prepend it for valid standalone emission.
+            if let InstructionValue::FunctionExpression { fn_type: FunctionExpressionType::Expression, lowered_func, .. } = &instr.value {
+                let async_kw = if lowered_func.func.async_ { "async " } else { "" };
+                if cache_expr.starts_with('(') && !cache_expr.contains("=>") {
+                    cache_expr = format!("{async_kw}function {cache_expr}");
+                }
+            }
             multi_outputs.push(ScopeOutputItem {
                 skip_idx: Some(idx),
                 cache_expr,
@@ -4870,13 +4904,21 @@ impl<'a> Codegen<'a> {
                 };
             }
             // Prefer fresh try_inline_instr over stale build_inline_map entry.
-            let cache_expr = if let Some(computed) = self.try_inline_instr(instr) {
+            let mut cache_expr = if let Some(computed) = self.try_inline_instr(instr) {
                 computed
             } else if let Some(inlined) = self.inlined_exprs.get(&instr.lvalue.identifier.0) {
                 inlined.clone()
             } else {
                 self.expr(&instr.lvalue)
             };
+            // Method shorthand bodies (e.g. `() { return x; }`) start with `(` but
+            // lack `function` keyword — prepend it for valid standalone emission.
+            if let InstructionValue::FunctionExpression { fn_type: FunctionExpressionType::Expression, lowered_func, .. } = &instr.value {
+                let async_kw = if lowered_func.func.async_ { "async " } else { "" };
+                if cache_expr.starts_with('(') && !cache_expr.contains("=>") {
+                    cache_expr = format!("{async_kw}function {cache_expr}");
+                }
+            }
             return ScopeOutput {
                 outputs: vec![ScopeOutputItem {
                     skip_idx: Some(idx),
