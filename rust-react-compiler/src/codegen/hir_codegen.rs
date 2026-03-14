@@ -377,6 +377,9 @@ struct Codegen<'a> {
     /// Set of InstructionIds for DeclareLocal instructions that have been hoisted to before
     /// the scope block. When emit_scope_body_cfg_walk encounters these, it skips them.
     hoisted_declare_instr_ids: std::collections::HashSet<InstructionId>,
+    /// Set of BlockIds for label body blocks that were already emitted inside a scope body.
+    /// When emit_cfg_region hits a Label terminal, it checks this set to avoid double-emission.
+    scope_emitted_label_bodies: std::collections::HashSet<BlockId>,
 }
 
 /// Traverse blocks reachable from `start` (not crossing `fall_bid`) and check
@@ -918,6 +921,7 @@ impl<'a> Codegen<'a> {
             active_early_return: None,
             early_return_handled_blocks: std::collections::HashSet::new(),
             hoisted_declare_instr_ids: std::collections::HashSet::new(),
+            scope_emitted_label_bodies: std::collections::HashSet::new(),
         }
     }
 
@@ -2075,6 +2079,14 @@ impl<'a> Codegen<'a> {
                 Terminal::Label { block: body, fallthrough, .. } => {
                     let body_bid = *body;
                     let fall_bid = *fallthrough;
+                    // Skip if the label body was already emitted by emit_scope_body_cfg_walk.
+                    if self.scope_emitted_label_bodies.contains(&body_bid) {
+                        if Some(fall_bid) == stop_at {
+                            return;
+                        }
+                        current = fall_bid;
+                        continue;
+                    }
                     let label_opt = self.switch_fallthrough_labels.get(&fall_bid).cloned();
                     if let Some(ref label) = label_opt {
                         // Emit body to a temp buffer first to check if it's a single compound statement.
@@ -3028,7 +3040,25 @@ impl<'a> Codegen<'a> {
                     (None, None)
                 };
 
-                if consq_has || alt_has || consq_early_ret.is_some() || alt_early_ret.is_some() {
+                // Check for labeled-break pattern: a branch that is a direct Goto to stop_at
+                // (the label's fallthrough block). e.g. `if (props.b) { break bb0; }`
+                // where the consequent block is just `Goto(label_fallthrough)`.
+                let break_label = stop_at.and_then(|sa| self.switch_fallthrough_labels.get(&sa).cloned());
+                let consq_is_labeled_break = !consq_has && consq_early_ret.is_none() && {
+                    if let Some(sa) = stop_at {
+                        self.block_is_direct_goto_to(*consequent, sa)
+                    } else { false }
+                };
+                let alt_is_labeled_break = *alternate != *fallthrough && !alt_has && alt_early_ret.is_none() && {
+                    if let Some(sa) = stop_at {
+                        self.block_is_direct_goto_to(*alternate, sa)
+                    } else { false }
+                };
+
+                if consq_has || alt_has || consq_early_ret.is_some() || alt_early_ret.is_some()
+                    || (consq_is_labeled_break && break_label.is_some())
+                    || (alt_is_labeled_break && break_label.is_some())
+                {
                     let test_expr = self.expr(test);
                     // Use fallthrough as the stop point for branch walks so they don't
                     // cross into the shared continuation block.
@@ -3044,6 +3074,11 @@ impl<'a> Codegen<'a> {
                         );
                     } else if let Some(ref stmt) = consq_early_ret {
                         if_body.push_str(stmt);
+                    } else if consq_is_labeled_break {
+                        if let Some(ref lbl) = break_label {
+                            let inner_pad_str = "  ".repeat(body_indent);
+                            let _ = writeln!(if_body, "{inner_pad_str}break {lbl};");
+                        }
                     }
 
                     let mut else_body = String::new();
@@ -3056,6 +3091,11 @@ impl<'a> Codegen<'a> {
                         );
                     } else if let Some(ref stmt) = alt_early_ret {
                         else_body.push_str(stmt);
+                    } else if alt_is_labeled_break {
+                        if let Some(ref lbl) = break_label {
+                            let inner_pad_str = "  ".repeat(body_indent);
+                            let _ = writeln!(else_body, "{inner_pad_str}break {lbl};");
+                        }
                     }
 
                     if !if_body.is_empty() || !else_body.is_empty() {
@@ -3119,6 +3159,63 @@ impl<'a> Codegen<'a> {
                     indent, stop_at, visited, out,
                 );
             }
+            Terminal::Label { block: body, fallthrough, .. } => {
+                let body_bid = *body;
+                let fall_bid = *fallthrough;
+                if stop_at == Some(fall_bid) {
+                    // If fallthrough is our stop point, just walk the label body.
+                    if scope_block_set.contains(&body_bid) {
+                        let label_opt = self.switch_fallthrough_labels.get(&fall_bid).cloned();
+                        if let Some(ref label) = label_opt {
+                            let _ = writeln!(out, "{pad}{label}: {{");
+                            let mut vis2 = visited.clone();
+                            self.emit_scope_body_cfg_walk(
+                                body_bid, scope_block_set, scope_instr_set, intra_instr_ids,
+                                skip_instr_set, inlined_ids, all_out_names, scope_id,
+                                indent + 1, Some(fall_bid), &mut vis2, out,
+                            );
+                            let _ = writeln!(out, "{pad}}}");
+                        } else {
+                            let mut vis2 = visited.clone();
+                            self.emit_scope_body_cfg_walk(
+                                body_bid, scope_block_set, scope_instr_set, intra_instr_ids,
+                                skip_instr_set, inlined_ids, all_out_names, scope_id,
+                                indent, Some(fall_bid), &mut vis2, out,
+                            );
+                        }
+                        self.scope_emitted_label_bodies.insert(body_bid);
+                    }
+                    return;
+                }
+                // Walk the label body (with label wrapping if one exists).
+                let label_opt = self.switch_fallthrough_labels.get(&fall_bid).cloned();
+                if scope_block_set.contains(&body_bid) {
+                    if let Some(ref label) = label_opt {
+                        let _ = writeln!(out, "{pad}{label}: {{");
+                        let mut vis2 = visited.clone();
+                        self.emit_scope_body_cfg_walk(
+                            body_bid, scope_block_set, scope_instr_set, intra_instr_ids,
+                            skip_instr_set, inlined_ids, all_out_names, scope_id,
+                            indent + 1, Some(fall_bid), &mut vis2, out,
+                        );
+                        let _ = writeln!(out, "{pad}}}");
+                    } else {
+                        let mut vis2 = visited.clone();
+                        self.emit_scope_body_cfg_walk(
+                            body_bid, scope_block_set, scope_instr_set, intra_instr_ids,
+                            skip_instr_set, inlined_ids, all_out_names, scope_id,
+                            indent, Some(fall_bid), &mut vis2, out,
+                        );
+                    }
+                    self.scope_emitted_label_bodies.insert(body_bid);
+                }
+                // Continue at fallthrough.
+                self.emit_scope_body_cfg_walk(
+                    fall_bid, scope_block_set, scope_instr_set, intra_instr_ids,
+                    skip_instr_set, inlined_ids, all_out_names, scope_id,
+                    indent, stop_at, visited, out,
+                );
+            }
             // If inside an early-return scope and we see a Return terminal directly,
             // transform it: sentinel = val; break label.
             Terminal::Return { value, .. } => {
@@ -3138,6 +3235,19 @@ impl<'a> Codegen<'a> {
 
     /// For an early-return branch: if `bid` directly leads to a Return terminal
     /// (possibly through a chain of empty Goto blocks), return the transformed statement.
+    /// Returns true if the block at `bid` is an empty block whose only terminal is
+    /// `Goto { block: target }`. Used to detect labeled-break patterns.
+    fn block_is_direct_goto_to(&self, bid: BlockId, target: BlockId) -> bool {
+        if let Some(block) = self.hir.body.blocks.get(&bid) {
+            if block.instructions.is_empty() && block.phis.is_empty() {
+                if let Terminal::Goto { block: next, .. } = &block.terminal {
+                    return *next == target;
+                }
+            }
+        }
+        false
+    }
+
     fn early_return_branch_stmt(&mut self, bid: BlockId, sentinel_var: &str, label: &str, indent: usize) -> Option<String> {
         let pad = "  ".repeat(indent);
         let mut current = bid;
