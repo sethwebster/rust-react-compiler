@@ -2054,19 +2054,57 @@ impl<'a> Codegen<'a> {
                     }
                     let body_pad = indent + 1;
                     let case_pad = "  ".repeat(body_pad);
-                    let inner_pad = "  ".repeat(body_pad + 1);
+                    // Emit each case body into a temp buffer for collapsing.
+                    // Consecutive cases with identical bodies get collapsed into:
+                    //   case A:
+                    //   case B: { shared_body }
+                    // Empty bodies collapse into:
+                    //   case A:
+                    //   case B:
+                    //   default:
+                    let mut case_labels: Vec<String> = Vec::new();
+                    let mut case_bodies: Vec<String> = Vec::new();
                     for case in cases {
-                        if let Some(t) = &case.test {
-                            let _ = writeln!(out, "{case_pad}case {}: {{", self.expr(t));
+                        let label = if let Some(t) = &case.test {
+                            format!("case {}:", self.expr(t))
                         } else {
-                            let _ = writeln!(out, "{case_pad}default: {{");
-                        }
+                            "default:".to_string()
+                        };
+                        let mut body_buf = String::new();
                         let mut vis2 = visited.clone();
                         self.emit_cfg_region(
-                            case.block, Some(fall_bid), body_pad + 1, out,
+                            case.block, Some(fall_bid), body_pad + 1, &mut body_buf,
                             &mut vis2, emitted_scopes, scope_index, instr_scope, inlined_ids, scope_instrs,
                         );
-                        let _ = writeln!(out, "{case_pad}}}");
+                        case_labels.push(label);
+                        case_bodies.push(body_buf);
+                    }
+                    // Group consecutive cases with the same body for collapsing.
+                    let n_cases = case_labels.len();
+                    let mut i = 0;
+                    while i < n_cases {
+                        // Find the run of cases with the same body starting at i.
+                        let mut j = i + 1;
+                        while j < n_cases && case_bodies[j] == case_bodies[i] {
+                            j += 1;
+                        }
+                        // Cases i..j all share the same body.
+                        // Emit i..j-1 as fallthrough labels (no body), then j-1 with body.
+                        for k in i..j - 1 {
+                            let _ = writeln!(out, "{case_pad}{}", case_labels[k]);
+                        }
+                        let last_label = &case_labels[j - 1];
+                        let body = &case_bodies[i];
+                        let body_trimmed = body.trim();
+                        if body_trimmed.is_empty() {
+                            // Empty body: emit label without braces.
+                            let _ = writeln!(out, "{case_pad}{last_label}");
+                        } else {
+                            let _ = writeln!(out, "{case_pad}{last_label} {{");
+                            out.push_str(body);
+                            let _ = writeln!(out, "{case_pad}}}");
+                        }
+                        i = j;
                     }
                     let _ = writeln!(out, "{pad}}}");
                     if Some(fall_bid) == stop_at {
