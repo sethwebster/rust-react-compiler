@@ -273,18 +273,16 @@ pub fn run_with_env(hir: &mut HIRFunction, env: &mut Environment) {
                                             if !a_decl_ids.contains(&instr.lvalue.identifier) {
                                                 cur.lvalues.insert(instr.lvalue.identifier);
                                             }
-                                            if let InstructionValue::StoreLocal { lvalue, value, .. } =
+                                            if let InstructionValue::StoreLocal { lvalue, .. } =
                                                 &instr.value
                                             {
-                                                // Skip binding targets that are scope A's own
-                                                // declarations — they are scope outputs and remain
-                                                // accessible outside scope B after merging.
-                                                // Also skip bindings whose stored value (SSA temp)
-                                                // was produced inside scope A's range — these are
-                                                // scope A output extractions (e.g. `const x = t0`
-                                                // where t0 was built inside scope A).
-                                                let value_from_a = a_range_lvalue_ids.contains(&value.identifier);
-                                                if !a_decl_ids.contains(&lvalue.place.identifier) && !value_from_a {
+                                                // Always track the named binding (lvalue.place)
+                                                // in cur.lvalues so areLValuesLastUsedByScope can
+                                                // check whether it is last-used within scope B.
+                                                // TS's eachInstructionLValue adds ALL lvalues
+                                                // unconditionally — do not skip based on where
+                                                // the stored value came from.
+                                                if !a_decl_ids.contains(&lvalue.place.identifier) {
                                                     cur.lvalues.insert(lvalue.place.identifier);
                                                 }
                                             }
