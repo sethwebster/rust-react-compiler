@@ -1036,15 +1036,17 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
         }
 
         // Sort deps alphabetically by "name.path" (mirrors TS compiler sort).
+        // Unnamed deps (SSA temps, scope outputs without user-visible names) sort
+        // after named deps using "\xFF" as a high sentinel value.
         dep_list.sort_by(|a, b| {
             let name_a = env.get_identifier(a.place.identifier)
                 .and_then(|id| id.name.as_ref())
                 .map(|n| n.value().to_string())
-                .unwrap_or_default();
+                .unwrap_or_else(|| "\u{FFFF}".to_string());
             let name_b = env.get_identifier(b.place.identifier)
                 .and_then(|id| id.name.as_ref())
                 .map(|n| n.value().to_string())
-                .unwrap_or_default();
+                .unwrap_or_else(|| "\u{FFFF}".to_string());
             let path_a: String = a.path.iter().map(|e| e.property.as_str()).collect::<Vec<_>>().join(".");
             let path_b: String = b.path.iter().map(|e| e.property.as_str()).collect::<Vec<_>>().join(".");
             let key_a = format!("{}.{}", name_a, path_a);

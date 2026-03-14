@@ -828,7 +828,7 @@ pub fn run_with_environment(
     merge_reactive_scopes_that_invalidate_together(hir, env);
     prune_non_reactive_dependencies(hir, env);
     prune_always_invalidating_scopes(hir, env);
-    prune_unused_lvalues(hir);
+    prune_unused_lvalues(hir, Some(env));
     promote_used_temporaries(hir, env);
     extract_scope_declarations_from_destructuring(hir);
     stabilize_block_ids(hir);

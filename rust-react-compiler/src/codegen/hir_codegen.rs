@@ -313,6 +313,9 @@ struct Codegen<'a> {
     instr_map: HashMap<u32, Instruction>,
     /// Use count: how many times each identifier is used as an operand.
     use_count: HashMap<u32, u32>,
+    /// Sum of use counts across all SSA versions of the same declared variable.
+    /// Key is DeclarationId.0. Used for SSA-version-aware usage checks in destructuring.
+    decl_id_use_count: HashMap<u32, u32>,
     /// Maps an inlined instruction's identifier id → temp name (tN) that should
     /// replace it in the terminal emitter. Set when a scope captures a return value.
     terminal_replacement: HashMap<u32, String>,
@@ -690,6 +693,17 @@ impl<'a> Codegen<'a> {
             }
         }
 
+        // Build declaration_id -> total use count for SSA-version-aware usage checks.
+        // When SSA creates phi nodes for variables captured in closures, the phi ids
+        // may have use_count > 0 but the Destructure-created ids may have use_count == 0.
+        // Using declaration_id sums use counts across all SSA versions of the same variable.
+        let mut decl_id_use_count: HashMap<u32, u32> = HashMap::new();
+        for (&raw_id, &cnt) in &use_count {
+            if let Some(ident) = env.get_identifier(crate::hir::hir::IdentifierId(raw_id)) {
+                *decl_id_use_count.entry(ident.declaration_id.0).or_insert(0) += cnt;
+            }
+        }
+
         // Count how many function params were promoted to tN names.
         // Scope result temps in codegen start from this offset to avoid collision.
         let param_name_offset = hir.params.iter().filter(|p| {
@@ -886,6 +900,7 @@ impl<'a> Codegen<'a> {
             promoted_temp_count: 0, // will be set after build_promoted_temp_names
             instr_map,
             use_count,
+            decl_id_use_count,
             terminal_replacement: HashMap::new(),
             ssa_value_to_name,
             instr_to_block,
@@ -2402,6 +2417,37 @@ impl<'a> Codegen<'a> {
                     if let Some(instr) = instrs.get(skip_idx) {
                         if let InstructionValue::StoreLocal { value, .. } = &instr.value {
                             self.scope_output_names.insert(value.identifier.0, t.clone());
+                            // Also update inlined_exprs if this id's value is a complex expression.
+                            // This ensures that post-scope StoreLocals using this value get `t` not stale body.
+                            if let Some(old_val) = self.inlined_exprs.get(&value.identifier.0).cloned() {
+                                if !old_val.starts_with("$t") {
+                                    // old_val is a complex expression — also update other inlined_exprs
+                                    // entries that have the same expression body (duplicate SSA ids).
+                                    let cache_var = t.clone();
+                                    let entries_to_update: Vec<u32> = self.inlined_exprs.iter()
+                                        .filter(|(_, v)| *v == &old_val)
+                                        .map(|(k, _)| *k)
+                                        .collect();
+                                    for k in entries_to_update {
+                                        self.inlined_exprs.insert(k, cache_var.clone());
+                                    }
+                                }
+                            }
+                        }
+                        // Also propagate: if inlined_exprs[lv_id] has a complex body, update
+                        // other inlined_exprs entries with the same body (e.g. duplicate FunctionExpression ids).
+                        let lv_id = instr.lvalue.identifier.0;
+                        if let Some(old_val) = self.inlined_exprs.get(&lv_id).cloned() {
+                            if !old_val.starts_with("$t") {
+                                let cache_var = t.clone();
+                                let entries_to_update: Vec<u32> = self.inlined_exprs.iter()
+                                    .filter(|(k, v)| **k != lv_id && *v == &old_val)
+                                    .map(|(k, _)| *k)
+                                    .collect();
+                                for k in entries_to_update {
+                                    self.inlined_exprs.insert(k, cache_var.clone());
+                                }
+                            }
                         }
                         self.scope_output_names.insert(instr.lvalue.identifier.0, t.clone());
                     }
@@ -2860,8 +2906,27 @@ impl<'a> Codegen<'a> {
             if let Some(skip_i) = output.skip_idx {
                 if let Some(skip_instr) = instrs.get(skip_i) {
                     let old_name = format!("$t{}", skip_instr.lvalue.identifier.0);
+                    if std::env::var("RC_DEBUG_STORE").is_ok() {
+                        eprintln!("[scope emit] skip_instr lv.id={} old_name={:?} cache_var={:?}", skip_instr.lvalue.identifier.0, old_name, cache_var);
+                        let old_val = self.inlined_exprs.get(&skip_instr.lvalue.identifier.0).cloned().unwrap_or_default();
+                        eprintln!("  old inlined_exprs val={:?}", &old_val[..old_val.len().min(60)]);
+                    }
                     old_to_new.push((old_name, cache_var.clone()));
+                    // Also add the OLD inlined expression value to old_to_new for
+                    // expression-body propagation. If `inlined_exprs[skip_id]` was the full
+                    // lambda/expression body (not just a `$tN` reference), other inlined_exprs
+                    // entries that contain the same expression body should also be updated to
+                    // use the scope output var name (e.g. duplicate FunctionExpression ids).
+                    let old_inlined_val = self.inlined_exprs.get(&skip_instr.lvalue.identifier.0).cloned();
                     self.inlined_exprs.insert(skip_instr.lvalue.identifier.0, cache_var.clone());
+                    if let Some(old_val) = old_inlined_val {
+                        if old_val != cache_var && !old_val.starts_with("$t") {
+                            // old_val is a complex expression (lambda body, etc.) — not just a $tN ref.
+                            // Add to old_to_new so the propagation step will update other entries
+                            // that have the same expression body.
+                            old_to_new.push((old_val, cache_var.clone()));
+                        }
+                    }
                     // Special case: if the skipped instruction is a Destructure, also map
                     // the Destructure's VALUE to the scope output var. This allows the
                     // post-scope Destructure emission to use `self.expr(value)` → scope var.
@@ -5058,6 +5123,15 @@ impl<'a> Codegen<'a> {
                     None
                 };
                 let val_expr = self.expr(value);
+                if std::env::var("RC_DEBUG_STORE").is_ok() {
+                    let lv_name = self.env.get_identifier(lvalue.place.identifier)
+                        .and_then(|i| i.name.as_ref())
+                        .map(|n| n.value().to_string())
+                        .unwrap_or_else(|| format!("$t{}", lvalue.place.identifier.0));
+                    eprintln!("[emit_stmt StoreLocal] lvalue={} value.id={} val_expr={:?}", lv_name, value.identifier.0, &val_expr[..val_expr.len().min(60)]);
+                    eprintln!("  scope_output_names.has_value={}", self.scope_output_names.contains_key(&value.identifier.0));
+                    eprintln!("  inlined_exprs.has_value={}", self.inlined_exprs.contains_key(&value.identifier.0));
+                }
                 // Pure reassignment.
                 if let InstructionKind::Reassign = lvalue.kind {
                     if let Some(n) = name {
@@ -5443,8 +5517,15 @@ impl<'a> Codegen<'a> {
                     Pattern::Array(ap) => {
                         let mut items: Vec<String> = ap.items.iter().map(|e| match e {
                             ArrayElement::Place(p) => {
-                                // Emit as hole if the identifier is unused (use_count == 0).
-                                if *self.use_count.get(&p.identifier.0).unwrap_or(&0) == 0 {
+                                // Emit as hole if the identifier is unused.
+                                // Check both direct use_count and declaration_id-based count
+                                // to handle SSA phi chains (e.g., closures capturing loop vars).
+                                let direct_cnt = *self.use_count.get(&p.identifier.0).unwrap_or(&0);
+                                let decl_cnt = self.env.get_identifier(p.identifier)
+                                    .and_then(|i| self.decl_id_use_count.get(&i.declaration_id.0))
+                                    .copied()
+                                    .unwrap_or(0);
+                                if direct_cnt == 0 && decl_cnt == 0 {
                                     String::new()
                                 } else {
                                     self.ident_name(p.identifier)
@@ -5642,6 +5723,13 @@ impl<'a> Codegen<'a> {
 
     /// Resolve a Place to its JS expression, using inlined_exprs if available.
     fn expr(&self, place: &Place) -> String {
+        // scope_output_names takes priority over inlined_exprs:
+        // if this identifier was assigned to a scope output (t0, t1, ...) during
+        // scope emission, references to it outside the scope must use tN, not the
+        // inlined expression (which would re-emit the full lambda/expression).
+        if let Some(name) = self.scope_output_names.get(&place.identifier.0) {
+            return name.clone();
+        }
         if let Some(s) = self.inlined_exprs.get(&place.identifier.0) {
             return s.clone();
         }

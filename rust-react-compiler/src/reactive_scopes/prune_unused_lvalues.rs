@@ -1,6 +1,8 @@
 use std::collections::HashSet;
+use crate::hir::environment::Environment;
 use crate::hir::hir::{
-    ArrayElement, HIRFunction, IdentifierId, InstructionValue, ObjectPatternProperty, Pattern,
+    ArrayElement, DeclarationId, HIRFunction, IdentifierId, InstructionValue,
+    ObjectPatternProperty, Pattern,
 };
 use crate::hir::visitors::{each_instruction_value_operand, each_terminal_operand};
 
@@ -10,7 +12,13 @@ use crate::hir::visitors::{each_instruction_value_operand, each_terminal_operand
 /// anywhere in the function (instructions, terminals, phi nodes, context captures,
 /// scope dependencies). Removing unused elements matches TS compiler behavior and
 /// produces cleaner output.
-pub fn run(hir: &mut HIRFunction) {
+///
+/// Uses declaration_id-based tracking to handle SSA-renamed identifiers: if any
+/// SSA version of a variable is used, the corresponding Destructure pattern element
+/// is kept. This is necessary because SSA may create cyclic phi nodes for variables
+/// captured in closures (e.g. after a while loop), and those phis share a
+/// declaration_id with the Destructure-created identifier.
+pub fn run(hir: &mut HIRFunction, env: Option<&Environment>) {
     // Build the set of all "used" identifiers: identifiers that appear as VALUE operands
     // (reads) somewhere in the function.
     let mut used: HashSet<IdentifierId> = HashSet::new();
@@ -42,8 +50,12 @@ pub fn run(hir: &mut HIRFunction) {
     // Params (always considered used).
     for param in &hir.params {
         match param {
-            crate::hir::hir::Param::Place(p) => { used.insert(p.identifier); }
-            crate::hir::hir::Param::Spread(s) => { used.insert(s.place.identifier); }
+            crate::hir::hir::Param::Place(p) => {
+                used.insert(p.identifier);
+            }
+            crate::hir::hir::Param::Spread(s) => {
+                used.insert(s.place.identifier);
+            }
         }
     }
 
@@ -61,6 +73,31 @@ pub fn run(hir: &mut HIRFunction) {
         }
     }
 
+    // Build declaration_id set for SSA-version-aware usage checks.
+    // When SSA creates cyclic phi nodes for captured variables (e.g. in while loops),
+    // the phi ids end up in `used` but the Destructure-created ids do not. Using
+    // declaration_id allows us to match across all SSA versions of the same variable.
+    let used_decl_ids: HashSet<DeclarationId> = if let Some(env) = env {
+        used.iter()
+            .filter_map(|&id| env.get_identifier(id))
+            .map(|i| i.declaration_id)
+            .collect()
+    } else {
+        HashSet::new()
+    };
+
+    let is_id_used = |id: IdentifierId| -> bool {
+        if used.contains(&id) {
+            return true;
+        }
+        if let Some(env) = env {
+            if let Some(ident) = env.get_identifier(id) {
+                return used_decl_ids.contains(&ident.declaration_id);
+            }
+        }
+        false
+    };
+
     // Now prune unused elements from Destructure patterns.
     for block in hir.body.blocks.values_mut() {
         for instr in block.instructions.iter_mut() {
@@ -74,7 +111,7 @@ pub fn run(hir: &mut HIRFunction) {
                             ObjectPatternProperty::Property(p) => p.place.identifier,
                             ObjectPatternProperty::Spread(s) => s.place.identifier,
                         };
-                        used.contains(&id)
+                        is_id_used(id)
                     });
                 }
                 Pattern::Array(arr) => {
@@ -83,12 +120,12 @@ pub fn run(hir: &mut HIRFunction) {
                     // But trailing holes after the last used element can be removed.
                     for elem in arr.items.iter_mut() {
                         if let ArrayElement::Place(p) = elem {
-                            if !used.contains(&p.identifier) {
+                            if !is_id_used(p.identifier) {
                                 // Replace unused place with a Hole to preserve positions.
                                 *elem = ArrayElement::Hole;
                             }
                         } else if let ArrayElement::Spread(s) = elem {
-                            if !used.contains(&s.place.identifier) {
+                            if !is_id_used(s.place.identifier) {
                                 *elem = ArrayElement::Hole;
                             }
                         }
