@@ -2062,41 +2062,60 @@ impl<'a> Codegen<'a> {
                     //   case A:
                     //   case B:
                     //   default:
+                    // Collect case labels, body blocks (for grouping), and emitted body strings.
+                    // We group consecutive cases that point to the SAME block (natural fallthrough
+                    // in the CFG means the case body is just the next case's entry block).
+                    // This mirrors how Babel collapses switch cases with empty consequents.
                     let mut case_labels: Vec<String> = Vec::new();
+                    let mut case_block_ids: Vec<crate::hir::hir::BlockId> = Vec::new();
                     let mut case_bodies: Vec<String> = Vec::new();
+                    // Track which blocks we've already emitted a body for (to avoid double-emit
+                    // when multiple cases share the same block).
+                    let mut emitted_case_blocks: std::collections::HashSet<crate::hir::hir::BlockId> = std::collections::HashSet::new();
                     for case in cases {
                         let label = if let Some(t) = &case.test {
                             format!("case {}:", self.expr(t))
                         } else {
                             "default:".to_string()
                         };
-                        let mut body_buf = String::new();
-                        let mut vis2 = visited.clone();
-                        self.emit_cfg_region(
-                            case.block, Some(fall_bid), body_pad + 1, &mut body_buf,
-                            &mut vis2, emitted_scopes, scope_index, instr_scope, inlined_ids, scope_instrs,
-                        );
+                        // Only emit body for the first case with this block; subsequent cases
+                        // pointing to the same block get an empty body (they are fallthrough labels).
+                        let body_buf = if emitted_case_blocks.contains(&case.block) {
+                            String::new()
+                        } else {
+                            emitted_case_blocks.insert(case.block);
+                            let mut buf = String::new();
+                            let mut vis2 = visited.clone();
+                            self.emit_cfg_region(
+                                case.block, Some(fall_bid), body_pad + 1, &mut buf,
+                                &mut vis2, emitted_scopes, scope_index, instr_scope, inlined_ids, scope_instrs,
+                            );
+                            buf
+                        };
                         case_labels.push(label);
+                        case_block_ids.push(case.block);
                         case_bodies.push(body_buf);
                     }
-                    // Group consecutive cases with the same body for collapsing.
+                    // Group consecutive cases with the same block for collapsing.
+                    // Case[i] is a fallthrough label if it shares its block with a later case.
                     let n_cases = case_labels.len();
                     let mut i = 0;
                     while i < n_cases {
-                        // Find the run of cases with the same body starting at i.
+                        // Find the run of cases with the same block starting at i.
                         let mut j = i + 1;
-                        while j < n_cases && case_bodies[j] == case_bodies[i] {
+                        while j < n_cases && case_block_ids[j] == case_block_ids[i] {
                             j += 1;
                         }
-                        // Cases i..j all share the same body.
+                        // Cases i..j all share the same block.
                         // Emit i..j-1 as fallthrough labels (no body), then j-1 with body.
                         for k in i..j - 1 {
                             let _ = writeln!(out, "{case_pad}{}", case_labels[k]);
                         }
                         let last_label = &case_labels[j - 1];
-                        let body = &case_bodies[i];
-                        let body_trimmed = body.trim();
-                        if body_trimmed.is_empty() {
+                        // Use the body from the first case in the group (others have empty bodies
+                        // because we only emit once per block).
+                        let body = case_bodies[i..j].iter().find(|b| !b.is_empty()).map(|s| s.as_str()).unwrap_or("");
+                        if body.trim().is_empty() {
                             // Empty body: emit label without braces.
                             let _ = writeln!(out, "{case_pad}{last_label}");
                         } else {
