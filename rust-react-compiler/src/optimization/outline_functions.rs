@@ -276,10 +276,32 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
 
                 // Build the function declaration.
                 let params_str = final_param_names.join(", ");
+                // For arrow functions with expression bodies, strip outer parens from the
+                // body text before wrapping in `return ...`. An arrow like `(x) => ({...x})`
+                // has body text `({...x})` — the parens are syntactically required in arrow
+                // position but become redundant when wrapped in a `return` statement.
+                let return_body = if info.is_expr_body
+                    && renamed_body.starts_with('(')
+                    && renamed_body.ends_with(')')
+                {
+                    let inner = &renamed_body[1..renamed_body.len() - 1];
+                    let balanced = inner.chars().fold(0i32, |d, c| match c {
+                        '(' => d + 1,
+                        ')' => d - 1,
+                        _ => d,
+                    }) == 0;
+                    if balanced {
+                        inner.to_string()
+                    } else {
+                        renamed_body.clone()
+                    }
+                } else {
+                    renamed_body.clone()
+                };
                 let decl = if info.is_expr_body {
                     format!(
                         "function {}({}) {{\n  return {};\n}}",
-                        temp_name, params_str, renamed_body
+                        temp_name, params_str, return_body
                     )
                 } else {
                     // Block body already includes `{ ... }`.
