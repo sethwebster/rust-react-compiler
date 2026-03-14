@@ -4335,7 +4335,12 @@ impl<'a> Codegen<'a> {
                                     }
                                 }
                                 format!("{name}={{'{result}'}}")
+                            } else if inner.contains('\\') {
+                                // Any backslash escape (\\n, \\t, \\\\, etc.) would be
+                                // misinterpreted in a JSX string attribute. Use JS expression.
+                                format!("{name}={{{val}}}")
                             } else {
+                                // Plain string without any backslashes: safe as bare string attr.
                                 format!("{name}={val}")
                             }
                         } else {
@@ -5354,6 +5359,22 @@ impl<'a> Codegen<'a> {
                     None
                 };
                 let val_expr = self.expr(value);
+                // Skip pre-scope declarations: Let-kind StoreLocal where the value has no
+                // scope and the target variable is in a scope's reassignments.
+                // e.g. `let s = null;` before a scope that reassigns `s = {}` inside.
+                // The scope output mechanism emits `let s;` and `s = $[N];` instead.
+                if matches!(lvalue.kind, InstructionKind::Let | InstructionKind::HoistedLet) {
+                    let value_has_scope = self.env.get_identifier(value.identifier)
+                        .and_then(|i| i.scope).is_some();
+                    if !value_has_scope {
+                        let place_id = lvalue.place.identifier;
+                        let in_reassignments = self.env.scopes.values()
+                            .any(|scope| scope.reassignments.contains(&place_id));
+                        if in_reassignments {
+                            return None;
+                        }
+                    }
+                }
                 // Pure reassignment.
                 if let InstructionKind::Reassign = lvalue.kind {
                     if let Some(n) = name {
@@ -5603,7 +5624,12 @@ impl<'a> Codegen<'a> {
                                     }
                                 }
                                 format!("{name}={{'{result}'}}")
+                            } else if inner.contains('\\') {
+                                // Any backslash escape (\\n, \\t, \\\\, etc.) would be
+                                // misinterpreted in a JSX string attribute. Use JS expression.
+                                format!("{name}={{{val}}}")
                             } else {
+                                // Plain string without any backslashes: safe as bare string attr.
                                 format!("{name}={val}")
                             }
                         } else {
@@ -6692,14 +6718,25 @@ impl<'a> Codegen<'a> {
             }
 
             // Detect `let s = null;` pattern: StoreLocal with Let/HoistedLet kind where
-            // the value has no scope. This is a pre-scope declaration (initial assignment
-            // before the scope body) and should NOT be tagged to any scope — the scope
-            // output mechanism handles the `let s;` declaration separately.
+            // the value has no scope AND the target variable is in a scope's reassignments.
+            // This represents a pre-scope declaration (e.g., `let s = null;` before a scope
+            // that later reassigns `s = {}`). Such instructions must NOT be tagged to any
+            // scope — the scope output mechanism handles `let s;` via its reassignment output.
+            // NOTE: Only applies when the place is in reassignments, NOT declarations.
+            // Scope output declarations (e.g., `let t0 = callExpr();`) must still be tagged.
             let is_let_decl_with_unscoped_value = match &instr.value {
                 InstructionValue::StoreLocal { lvalue, value, .. }
                     if matches!(lvalue.kind, InstructionKind::Let | InstructionKind::HoistedLet) =>
                 {
-                    self.env.get_identifier(value.identifier).and_then(|i| i.scope).is_none()
+                    let value_unscoped = self.env.get_identifier(value.identifier)
+                        .and_then(|i| i.scope).is_none();
+                    if !value_unscoped { false } else {
+                        // Only treat as pre-scope declaration if the place is in some
+                        // scope's reassignments (not declarations). Declarations need to be
+                        // tagged to their scope so they're emitted inside the scope body.
+                        let place_id = lvalue.place.identifier;
+                        self.env.scopes.values().any(|scope| scope.reassignments.contains(&place_id))
+                    }
                 }
                 _ => false,
             };
