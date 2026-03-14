@@ -2425,7 +2425,7 @@ impl<'a> Codegen<'a> {
                                     // entries that have the same expression body (duplicate SSA ids).
                                     let cache_var = t.clone();
                                     let entries_to_update: Vec<u32> = self.inlined_exprs.iter()
-                                        .filter(|(_, v)| *v == &old_val)
+                                        .filter(|(_, v)| v.as_str() == old_val.as_str())
                                         .map(|(k, _)| *k)
                                         .collect();
                                     for k in entries_to_update {
@@ -2441,7 +2441,7 @@ impl<'a> Codegen<'a> {
                             if !old_val.starts_with("$t") {
                                 let cache_var = t.clone();
                                 let entries_to_update: Vec<u32> = self.inlined_exprs.iter()
-                                    .filter(|(k, v)| **k != lv_id && *v == &old_val)
+                                    .filter(|(k, v)| **k != lv_id && v.as_str() == old_val.as_str())
                                     .map(|(k, _)| *k)
                                     .collect();
                                 for k in entries_to_update {
@@ -2906,11 +2906,6 @@ impl<'a> Codegen<'a> {
             if let Some(skip_i) = output.skip_idx {
                 if let Some(skip_instr) = instrs.get(skip_i) {
                     let old_name = format!("$t{}", skip_instr.lvalue.identifier.0);
-                    if std::env::var("RC_DEBUG_STORE").is_ok() {
-                        eprintln!("[scope emit] skip_instr lv.id={} old_name={:?} cache_var={:?}", skip_instr.lvalue.identifier.0, old_name, cache_var);
-                        let old_val = self.inlined_exprs.get(&skip_instr.lvalue.identifier.0).cloned().unwrap_or_default();
-                        eprintln!("  old inlined_exprs val={:?}", &old_val[..old_val.len().min(60)]);
-                    }
                     old_to_new.push((old_name, cache_var.clone()));
                     // Also add the OLD inlined expression value to old_to_new for
                     // expression-body propagation. If `inlined_exprs[skip_id]` was the full
@@ -2920,7 +2915,7 @@ impl<'a> Codegen<'a> {
                     let old_inlined_val = self.inlined_exprs.get(&skip_instr.lvalue.identifier.0).cloned();
                     self.inlined_exprs.insert(skip_instr.lvalue.identifier.0, cache_var.clone());
                     if let Some(old_val) = old_inlined_val {
-                        if old_val != cache_var && !old_val.starts_with("$t") {
+                        if old_val.as_str() != cache_var.as_str() && !old_val.starts_with("$t") {
                             // old_val is a complex expression (lambda body, etc.) — not just a $tN ref.
                             // Add to old_to_new so the propagation step will update other entries
                             // that have the same expression body.
@@ -5123,15 +5118,6 @@ impl<'a> Codegen<'a> {
                     None
                 };
                 let val_expr = self.expr(value);
-                if std::env::var("RC_DEBUG_STORE").is_ok() {
-                    let lv_name = self.env.get_identifier(lvalue.place.identifier)
-                        .and_then(|i| i.name.as_ref())
-                        .map(|n| n.value().to_string())
-                        .unwrap_or_else(|| format!("$t{}", lvalue.place.identifier.0));
-                    eprintln!("[emit_stmt StoreLocal] lvalue={} value.id={} val_expr={:?}", lv_name, value.identifier.0, &val_expr[..val_expr.len().min(60)]);
-                    eprintln!("  scope_output_names.has_value={}", self.scope_output_names.contains_key(&value.identifier.0));
-                    eprintln!("  inlined_exprs.has_value={}", self.inlined_exprs.contains_key(&value.identifier.0));
-                }
                 // Pure reassignment.
                 if let InstructionKind::Reassign = lvalue.kind {
                     if let Some(n) = name {
