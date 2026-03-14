@@ -6,6 +6,43 @@ Also read [AGENT-STATE.md](./AGENT-STATE.md), which tracks live session metrics,
 
 ---
 
+## Fix Methodology (mandatory — follow this every time)
+
+**Rule: one pass at a time. One fixture at a time.**
+
+Do not attempt broad multi-pass fixes. Do not batch-fix many fixtures at once. Each fix cycle is:
+
+1. **Pick one failing fixture** from the mismatch list
+2. **Get TS ground truth** — dump the TS compiler's HIR at every pass:
+   ```bash
+   node /home/claude-code/development/rust-react-compiler/dump_ts_hir.js \
+     react/compiler/packages/babel-plugin-react-compiler/src/__tests__/fixtures/compiler/<fixture>
+   # Output: /tmp/ts_hir/<fixture>/<PassName>.txt for every pass
+   ```
+3. **Get Rust output** for the same fixture:
+   ```bash
+   FIXTURE="<fixture>.js" cargo test --test fixtures fixture_print_single -- --nocapture 2>&1 | tail -40
+   ```
+4. **Find the first diverging pass** — compare TS HIR at each pass against what the Rust pass should produce. Key passes to check in order:
+   - `InferReactiveScopeVariables.txt` — scope boundaries correct?
+   - `MergeOverlappingReactiveScopesHIR.txt` — scopes merged correctly?
+   - `PropagateScopeDependenciesHIR.txt` — deps propagated correctly?
+   - `RenameVariables.txt` — final structure before codegen?
+5. **Fix only the one diverging pass** — read the TS source for that pass, fix the Rust port
+6. **Verify the single fixture passes**, then run the full suite to count improvement
+7. **Commit** the fix with count: `fix: <pass> — <description> (+N, M/1717)`
+8. **Repeat** from step 1 with the next fixture
+
+### Why one at a time?
+
+Multi-fixture fixes tend to over-fit to the specific cases examined and break others. A single-pass fix that's correct will automatically fix all fixtures that hit that same pass bug. The suite score is the signal — trust it.
+
+### TS HIR dump script
+
+`/home/claude-code/development/rust-react-compiler/dump_ts_hir.js` — uses the pre-built compiler at `/home/claude-code/development/pepper/node_modules/babel-plugin-react-compiler/`. Works for `.js`, `.ts`, `.tsx` fixtures. Extension is auto-detected.
+
+---
+
 ## Session Protocol
 
 ### On Session Start (mandatory, in order)
