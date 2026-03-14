@@ -4031,11 +4031,13 @@ impl<'a> Codegen<'a> {
                             // - && or ?? inside || context (&& for clarity, ?? semantic need)
                             // - && or || inside ?? context (can't mix with ??)
                             // - ternary inside any binary operator context (lowest precedence)
+                            // - ternary as consequent of another ternary: `x ? $tN : y` where $tN is ternary
+                            let outer_is_ternary_consequent = result.ends_with(" ? ");
                             let needs_parens =
                                 (outer_is_and && (inner_has_or || inner_has_nc))
                                 || (outer_is_or && (inner_has_and || inner_has_nc))
                                 || (outer_is_nc && (inner_has_and || inner_has_or))
-                                || (inner_has_ternary && (outer_is_and || outer_is_or || outer_is_nc || outer_has_arith));
+                                || (inner_has_ternary && (outer_is_and || outer_is_or || outer_is_nc || outer_has_arith || outer_is_ternary_consequent));
                             if needs_parens {
                                 result.push('(');
                                 result.push_str(resolved);
@@ -4135,7 +4137,14 @@ impl<'a> Codegen<'a> {
                 let t = self.expr(test);
                 let c = self.expr(consequent);
                 let a = self.expr(alternate);
-                Some(format!("{t} ? {c} : {a}"))
+                // Wrap consequent in parens if it contains a nested ternary, to
+                // match TS compiler output: `test ? (a ? b : c) : alt`
+                let c_wrapped = if c.contains(" ? ") {
+                    format!("({c})")
+                } else {
+                    c
+                };
+                Some(format!("{t} ? {c_wrapped} : {a}"))
             }
             InstructionValue::UnaryExpression { operator, value, .. } => {
                 let v = self.expr(value);
@@ -5371,7 +5380,9 @@ impl<'a> Codegen<'a> {
                     return None;
                 }
                 let lv = self.lvalue_name(&instr.lvalue);
-                Some(format!("const {lv} = {} ? {} : {};", self.expr(test), self.expr(consequent), self.expr(alternate)))
+                let c = self.expr(consequent);
+                let c_wrapped = if c.contains(" ? ") { format!("({c})") } else { c };
+                Some(format!("const {lv} = {} ? {c_wrapped} : {};", self.expr(test), self.expr(alternate)))
             }
 
             InstructionValue::UnaryExpression { operator, value, .. } => {
