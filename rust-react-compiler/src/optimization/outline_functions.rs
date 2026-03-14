@@ -208,7 +208,29 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
                     }
                 });
                 if has_local_capture {
-                    continue; // Captures component-local vars — cannot outline.
+                    // Cannot outline the outer function, but try to outline any
+                    // inner pure arrow functions found in its source text.
+                    let outer_caps: HashSet<String> = lowered_func.func.context.iter()
+                        .filter_map(|p| env.get_identifier(p.identifier)
+                            .and_then(|id| id.name.as_ref())
+                            .map(|n| n.value().to_string()))
+                        .collect();
+                    let mut forbidden: HashSet<String> = outer_caps;
+                    forbidden.extend(info.param_names.iter().cloned());
+                    forbidden.extend(outer_local_names.iter().cloned());
+                    forbidden.retain(|n| !module_names.contains(n)
+                        && !const_local_to_global.contains_key(n)
+                        && !const_name_to_primitive.contains_key(n));
+                    let patched = outline_inner_arrows_in_source(
+                        &src, &info.param_names, &forbidden,
+                        &outer_local_names, &module_names,
+                        &const_local_to_global, &const_name_to_primitive,
+                        env, &mut temp_counter,
+                    );
+                    if patched != src {
+                        lowered_func.func.original_source = patched;
+                    }
+                    continue;
                 }
                 // Source-text free-variable analysis for renaming const-from-global
                 // captures in the outlined body (still needed for body rewriting).
@@ -775,6 +797,195 @@ fn strip_type_annotations(src: &str) -> String {
     for (start, end) in removals {
         if start < result.len() && end <= result.len() {
             result = format!("{}{}", &result[..start], &result[end..]);
+        }
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Inner arrow function outliner (source-text level)
+// ---------------------------------------------------------------------------
+
+/// Walk the outer function's source text, find inner pure arrow functions
+/// (those whose free variables don't include any `forbidden` names), outline
+/// them, and return the patched source. If nothing changed, returns original.
+#[allow(clippy::too_many_arguments)]
+fn outline_inner_arrows_in_source(
+    src: &str,
+    outer_param_names: &[String],
+    forbidden: &HashSet<String>,
+    outer_local_names: &HashSet<String>,
+    module_names: &HashSet<String>,
+    const_local_to_global: &std::collections::HashMap<String, String>,
+    const_name_to_primitive: &std::collections::HashMap<String, PrimitiveValue>,
+    env: &mut crate::hir::environment::Environment,
+    temp_counter: &mut usize,
+) -> String {
+    use oxc_allocator::Allocator;
+    use oxc_ast::ast::{Expression, Statement};
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    let alloc = Allocator::default();
+    let stmt_src = format!("let _ = {};", src);
+    let parsed = Parser::new(&alloc, &stmt_src, SourceType::tsx()).parse();
+    if !parsed.errors.is_empty() {
+        return src.to_string();
+    }
+    let prefix_len: usize = "let _ = ".len();
+
+    fn collect_arrows<'a>(
+        expr: &Expression<'a>,
+        src: &str,
+        pl: usize,
+        forbidden: &HashSet<String>,
+        module_names: &HashSet<String>,
+        ctg: &std::collections::HashMap<String, String>,
+        ctp: &std::collections::HashMap<String, PrimitiveValue>,
+        out: &mut Vec<(usize, usize, String)>,
+    ) {
+        match expr {
+            Expression::ArrowFunctionExpression(arrow) => {
+                let s = arrow.span.start as usize;
+                let e = arrow.span.end as usize;
+                if s < pl || e <= s { return; }
+                let ss = s - pl;
+                let se = e - pl;
+                if se > src.len() || ss >= se { return; }
+                let asrc = &src[ss..se];
+                let mut params: Vec<String> = Vec::new();
+                for p in &arrow.params.items { collect_binding_names(&p.pattern.kind, &mut params); }
+                if let Some(r) = &arrow.params.rest { collect_binding_names(&r.argument.kind, &mut params); }
+                let bs = (arrow.body.span.start as usize).saturating_sub(s);
+                let be = (arrow.body.span.end as usize).saturating_sub(s);
+                let body_text = asrc.get(bs..be).unwrap_or(asrc);
+                let free = extract_free_variables(body_text, &params);
+                let bad = free.iter().any(|v| forbidden.contains(v) && !module_names.contains(v) && !ctg.contains_key(v) && !ctp.contains_key(v));
+                if !bad {
+                    out.push((ss, se, asrc.to_string()));
+                } else {
+                    // Recurse into body statements to find inner pure arrows.
+                    for st in &arrow.body.statements {
+                        collect_stmts(st, src, pl, forbidden, module_names, ctg, ctp, out);
+                    }
+                }
+            }
+            Expression::CallExpression(c) => {
+                collect_arrows(&c.callee, src, pl, forbidden, module_names, ctg, ctp, out);
+                for a in &c.arguments {
+                    match a {
+                        oxc_ast::ast::Argument::SpreadElement(se) => {
+                            collect_arrows(&se.argument, src, pl, forbidden, module_names, ctg, ctp, out);
+                        }
+                        _ => {
+                            // Argument inherits Expression variants via macro.
+                            // For arrow function arguments, cast via pointer.
+                            if let oxc_ast::ast::Argument::ArrowFunctionExpression(_) = a {
+                                #[allow(clippy::transmute_ptr_to_ptr)]
+                                let arg_expr: &Expression<'_> = unsafe {
+                                    &*(a as *const oxc_ast::ast::Argument<'_> as *const Expression<'_>)
+                                };
+                                collect_arrows(arg_expr, src, pl, forbidden, module_names, ctg, ctp, out);
+                            }
+                        }
+                    }
+                }
+            }
+            Expression::AssignmentExpression(a) => collect_arrows(&a.right, src, pl, forbidden, module_names, ctg, ctp, out),
+            Expression::SequenceExpression(sq) => { for ex in &sq.expressions { collect_arrows(ex, src, pl, forbidden, module_names, ctg, ctp, out); } }
+            Expression::ConditionalExpression(c) => {
+                collect_arrows(&c.test, src, pl, forbidden, module_names, ctg, ctp, out);
+                collect_arrows(&c.consequent, src, pl, forbidden, module_names, ctg, ctp, out);
+                collect_arrows(&c.alternate, src, pl, forbidden, module_names, ctg, ctp, out);
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_stmts<'a>(
+        stmt: &Statement<'a>, src: &str, pl: usize,
+        forbidden: &HashSet<String>, module_names: &HashSet<String>,
+        ctg: &std::collections::HashMap<String, String>,
+        ctp: &std::collections::HashMap<String, PrimitiveValue>,
+        out: &mut Vec<(usize, usize, String)>,
+    ) {
+        match stmt {
+            Statement::ExpressionStatement(es) => collect_arrows(&es.expression, src, pl, forbidden, module_names, ctg, ctp, out),
+            Statement::ReturnStatement(r) => { if let Some(a) = &r.argument { collect_arrows(a, src, pl, forbidden, module_names, ctg, ctp, out); } }
+            Statement::VariableDeclaration(vd) => { for d in &vd.declarations { if let Some(i) = &d.init { collect_arrows(i, src, pl, forbidden, module_names, ctg, ctp, out); } } }
+            Statement::BlockStatement(b) => { for s in &b.body { collect_stmts(s, src, pl, forbidden, module_names, ctg, ctp, out); } }
+            Statement::IfStatement(i) => {
+                collect_arrows(&i.test, src, pl, forbidden, module_names, ctg, ctp, out);
+                collect_stmts(&i.consequent, src, pl, forbidden, module_names, ctg, ctp, out);
+                if let Some(a) = &i.alternate { collect_stmts(a, src, pl, forbidden, module_names, ctg, ctp, out); }
+            }
+            _ => {}
+        }
+    }
+
+    let mut to_outline: Vec<(usize, usize, String)> = Vec::new();
+    if let Some(stmt) = parsed.program.body.first() {
+        if let Statement::VariableDeclaration(vd) = stmt {
+            if let Some(decl) = vd.declarations.first() {
+                if let Some(init) = &decl.init {
+                    match init {
+                        Expression::ArrowFunctionExpression(arrow) => {
+                            for s in &arrow.body.statements {
+                                collect_stmts(s, src, prefix_len, forbidden, module_names, const_local_to_global, const_name_to_primitive, &mut to_outline);
+                            }
+                        }
+                        Expression::FunctionExpression(f) => {
+                            if let Some(b) = &f.body {
+                                for s in &b.statements {
+                                    collect_stmts(s, src, prefix_len, forbidden, module_names, const_local_to_global, const_name_to_primitive, &mut to_outline);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    if to_outline.is_empty() { return src.to_string(); }
+
+    to_outline.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut seen: HashSet<usize> = HashSet::new();
+    let mut result = src.to_string();
+
+    for (start, end, arrow_src) in to_outline {
+        if !seen.insert(start) { continue; }
+        let Some(info) = parse_arrow_info(&arrow_src) else { continue };
+        let final_params: Vec<String> = info.param_names.iter().map(|p| {
+            if outer_param_names.contains(p) || outer_local_names.contains(p.as_str()) { format!("{}_0", p) } else { p.clone() }
+        }).collect();
+        let fv = extract_free_variables(&info.body_text, &info.param_names);
+        let mut body = info.body_text.clone();
+        for v in &fv {
+            if let Some(g) = const_local_to_global.get(v.as_str()) { body = rename_word(&body, v, g); }
+        }
+        for v in &fv {
+            if let Some(prim) = const_name_to_primitive.get(v.as_str()) { body = rename_word(&body, v, &primitive_to_literal(prim)); }
+        }
+        for (orig, ren) in info.param_names.iter().zip(final_params.iter()) {
+            if orig != ren { body = rename_word(&body, orig, ren); }
+        }
+        let name = if *temp_counter == 0 { "_temp".to_string() } else { format!("_temp{}", temp_counter) };
+        *temp_counter += 1;
+        let ps = final_params.join(", ");
+        let rb = if info.is_expr_body && body.starts_with('(') && body.ends_with(')') {
+            let inner = &body[1..body.len()-1];
+            if inner.chars().fold(0i32, |d,c| match c { '(' => d+1, ')' => d-1, _ => d }) == 0 { inner.to_string() } else { body.clone() }
+        } else { body.clone() };
+        let decl = if info.is_expr_body {
+            format!("function {}({}) {{\n  return {};\n}}", name, ps, rb)
+        } else {
+            format!("function {}({}) {}", name, ps, body)
+        };
+        env.outlined_functions.push((name.clone(), decl));
+        if end <= result.len() && start < end {
+            result = format!("{}{}{}", &result[..start], name, &result[end..]);
         }
     }
     result

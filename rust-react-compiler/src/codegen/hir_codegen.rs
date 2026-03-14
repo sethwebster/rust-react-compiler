@@ -1497,6 +1497,12 @@ impl<'a> Codegen<'a> {
                     if emit_else {
                         // Emit else body to temp buffer; skip if empty.
                         let mut vis3 = visited.clone();
+                        // Pre-mark early-return handled blocks as visited so
+                        // emit_cfg_region doesn't re-emit Return terminals that were
+                        // already transformed inside an early-return scope body.
+                        for &bid in &self.early_return_handled_blocks.clone() {
+                            vis3.insert(bid);
+                        }
                         self.emit_cfg_region(
                             *alternate, Some(*fallthrough), body_pad, &mut else_buf,
                             &mut vis3, emitted_scopes, scope_index, instr_scope, inlined_ids, scope_instrs,
