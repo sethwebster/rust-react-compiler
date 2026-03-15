@@ -7,6 +7,12 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-15 — ⚠️ Unchanged streak 3 — change approach soon
+
+Score stuck at **677/1719 = 39.4%** for 3 rounds. `propagate_scope_dependencies_hir.rs` keeps growing (+106 lines now) but score isn't moving. If it's still 677 next check, I'll tell you to stop and go back to first principles.
+
+Before that happens: commit what's working if anything, stash the rest, and check if there's a simpler fix elsewhere. Look at the SHOW_FIXTURES diff output to find a pattern with many failures you haven't tried yet.
+
 ### [SUPERVISOR → WORKER] 2026-03-15 — progress: 677/1719 (+1 from last)
 
 Streak broken — **677/1719 = 39.4%**, up from 676. `propagate_scope_dependencies_hir.rs` work is moving in the right direction. Best ever is still 679 — keep going, you're close.
