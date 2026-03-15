@@ -105,18 +105,29 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
 
     // Build a map of local name → primitive value for const locals assigned from primitives.
     // This allows outlining functions that capture `const x = 42;` by inlining the literal.
+    // Also track flat instruction indices to detect hoisting (const defined after function).
     let mut const_name_to_primitive: std::collections::HashMap<String, PrimitiveValue> = std::collections::HashMap::new();
+    // Maps local const name → flat instruction index of its StoreLocal.
+    let mut const_name_to_instr_idx: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    // Maps FunctionExpression lvalue identifier.0 → flat instruction index.
+    let mut fn_expr_to_instr_idx: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
     {
-        // Build ident_id → primitive value from Primitive instructions.
+        // Build ident_id → (primitive value, flat index) from Primitive instructions.
         let mut id_to_prim: std::collections::HashMap<u32, PrimitiveValue> = std::collections::HashMap::new();
+        let mut flat_idx: usize = 0;
         for (_, block) in &hir.body.blocks {
             for instr in &block.instructions {
                 if let InstructionValue::Primitive { value, .. } = &instr.value {
                     id_to_prim.insert(instr.lvalue.identifier.0, value.clone());
                 }
+                if matches!(instr.value, InstructionValue::FunctionExpression { .. }) {
+                    fn_expr_to_instr_idx.insert(instr.lvalue.identifier.0, flat_idx);
+                }
+                flat_idx += 1;
             }
         }
         // Find StoreLocal(const, local_name, value) where value → primitive.
+        flat_idx = 0;
         for (_, block) in &hir.body.blocks {
             for instr in &block.instructions {
                 if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
@@ -126,11 +137,13 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
                                 .and_then(|i| i.name.as_ref())
                                 .map(|n| n.value().to_string())
                             {
-                                const_name_to_primitive.insert(local_name, prim.clone());
+                                const_name_to_primitive.insert(local_name.clone(), prim.clone());
+                                const_name_to_instr_idx.insert(local_name, flat_idx);
                             }
                         }
                     }
                 }
+                flat_idx += 1;
             }
         }
     }
@@ -199,14 +212,25 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
                 // (including const-from-primitive locals) prevents outlining.
                 // Const-from-global and module-level captures are allowed since those
                 // are stable references not tied to the component instance.
+                // Flat instruction index of this FunctionExpression (for hoisting detection).
+                let fn_instr_idx = fn_expr_to_instr_idx.get(&instr.lvalue.identifier.0).copied().unwrap_or(usize::MAX);
                 let has_local_capture = lowered_func.func.context.iter().any(|place| {
                     if let Some(name) = env.get_identifier(place.identifier)
                         .and_then(|id| id.name.as_ref())
                         .map(|n| n.value().to_string())
                     {
-                        outer_local_names.contains(name.as_str())
-                            && !module_names.contains(name.as_str())
-                            && !const_local_to_global.contains_key(name.as_str())
+                        if !outer_local_names.contains(name.as_str())
+                            || module_names.contains(name.as_str())
+                            || const_local_to_global.contains_key(name.as_str())
+                        {
+                            return false;
+                        }
+                        // A const-from-primitive is safe to inline only if defined
+                        // BEFORE the function expression (no temporal dead zone).
+                        if let Some(&prim_idx) = const_name_to_instr_idx.get(name.as_str()) {
+                            return prim_idx >= fn_instr_idx;
+                        }
+                        true
                     } else {
                         false
                     }

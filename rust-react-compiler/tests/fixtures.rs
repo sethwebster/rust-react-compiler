@@ -330,6 +330,9 @@ fn normalize_js(js: &str) -> String {
     let result = remove_dead_init_then_overwrite(&result);
     // Normalize compound assignments: `x = x + y` → `x += y`.
     let result = normalize_compound_assignment(&result);
+    // Collapse `X .Y` → `X.Y` for member access chains split across lines.
+    // oxc_codegen may emit `.call(` on a new line which collapses to ` .call(`.
+    let result = normalize_member_access_spaces(&result);
     // Normalize disambig suffixes: `x_0` → `x`. The TS compiler appends `_0` to
     // disambiguate same-named variables; our compiler preserves original names.
     let result = normalize_disambig_suffix(&result);
