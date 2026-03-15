@@ -146,9 +146,12 @@ pub fn run_with_env(hir: &mut HIRFunction, env: &mut Environment) {
                     let already = is_always_invalidating.get(&instr.lvalue.identifier).copied().unwrap_or(false);
                     if !already {
                         let recv_inv = is_always_invalidating.get(&receiver.identifier).copied().unwrap_or(false);
-                        // A MethodCall on a global object (Object.entries, Array.from, etc.)
-                        // always produces a new value.
-                        let recv_is_global = global_name_of.contains_key(&receiver.identifier);
+                        // A MethodCall on a data-producing global (Object.entries, Array.from, etc.)
+                        // always produces a new value. Restrict to known data-producing globals
+                        // to avoid false positives from React.useMemo etc.
+                        static ALWAYS_INV_GLOBALS: &[&str] = &["Object", "Array", "Promise", "JSON", "Math", "Number", "String", "Symbol", "Date", "Map", "Set", "RegExp"];
+                        let recv_is_global = global_name_of.get(&receiver.identifier)
+                            .map_or(false, |name| ALWAYS_INV_GLOBALS.contains(&name.as_str()));
                         if recv_inv || recv_is_global {
                             is_always_invalidating.insert(instr.lvalue.identifier, true);
                             changed = true;
