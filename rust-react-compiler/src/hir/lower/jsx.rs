@@ -201,7 +201,7 @@ fn lower_jsx_tag<'a>(
         JSXElementName::MemberExpression(member) => {
             // e.g. `Foo.Bar` or `A.B.C` — always a component reference.
             let loc = SourceLocation::source(member.span.start, member.span.end);
-            let name_str = jsx_member_expr_to_string(member);
+            let name_str = jsx_member_expr_to_string_resolved(member, semantic);
             let place = ctx.push(
                 InstructionValue::LoadGlobal {
                     binding: NonLocalBinding::Global { name: name_str },
@@ -264,6 +264,69 @@ fn jsx_member_expr_to_string(member: &JSXMemberExpression) -> String {
         JSXMemberExpressionObject::ThisExpression(_) => "this".to_string(),
     };
     format!("{}.{}", object_str, member.property.name)
+}
+
+/// Like `jsx_member_expr_to_string` but resolves the root identifier through
+/// local aliases. If the root identifier (e.g., `MyLocal`) is a const variable
+/// initialized to another identifier that is an import (e.g., `const MyLocal = SharedRuntime`),
+/// the returned string uses the resolved name (e.g., `SharedRuntime.Text`).
+fn jsx_member_expr_to_string_resolved<'a>(member: &JSXMemberExpression<'a>, semantic: &Semantic<'a>) -> String {
+    use oxc_semantic::SymbolFlags;
+    // Get the root object string, resolving local aliases if possible.
+    let object_str = match &member.object {
+        JSXMemberExpressionObject::IdentifierReference(id) => {
+            // Try to resolve through a local alias: if `id` is a non-import symbol
+            // declared as `const id = SomeImport`, return `SomeImport` instead.
+            let resolved = try_resolve_namespace_alias(id, semantic);
+            resolved.unwrap_or_else(|| id.name.to_string())
+        }
+        JSXMemberExpressionObject::MemberExpression(nested) => {
+            jsx_member_expr_to_string_resolved(nested, semantic)
+        }
+        JSXMemberExpressionObject::ThisExpression(_) => "this".to_string(),
+    };
+    format!("{}.{}", object_str, member.property.name)
+}
+
+/// If `ident` is a local variable declared as `const ident = ImportedName` where
+/// `ImportedName` is an import binding, return `Some(ImportedName)`.
+/// Returns `None` if the identifier can't be resolved this way.
+fn try_resolve_namespace_alias<'a>(ident: &IdentifierReference<'a>, semantic: &Semantic<'a>) -> Option<String> {
+    use oxc_semantic::SymbolFlags;
+    use oxc_ast::AstKind;
+
+    let ref_id = ident.reference_id.get()?;
+    let sym_id = semantic.scoping().get_reference(ref_id).symbol_id()?;
+    let flags = semantic.scoping().symbol_flags(sym_id);
+
+    // If it's already an import, no alias resolution needed.
+    if flags.intersects(SymbolFlags::Import) {
+        return None;
+    }
+
+    // Only resolve const variable declarations.
+    if !flags.contains(SymbolFlags::ConstVariable) {
+        return None;
+    }
+
+    // Get the declaring AST node and check if it's a VariableDeclarator
+    // with an IdentifierReference initializer.
+    let decl_node_id = semantic.scoping().symbol_declaration(sym_id);
+    let decl_kind = semantic.nodes().kind(decl_node_id);
+
+    if let AstKind::VariableDeclarator(decl) = decl_kind {
+        if let Some(Expression::Identifier(init_ident)) = &decl.init {
+            let init_ref_id = init_ident.reference_id.get()?;
+            let init_sym_id = semantic.scoping().get_reference(init_ref_id).symbol_id()?;
+            let init_flags = semantic.scoping().symbol_flags(init_sym_id);
+            // If the initializer is an import, use its name.
+            if init_flags.intersects(SymbolFlags::Import) {
+                return Some(init_ident.name.to_string());
+            }
+        }
+    }
+
+    None
 }
 
 /// Lower one JSXChild, appending the resulting Place (if any) to `out`.

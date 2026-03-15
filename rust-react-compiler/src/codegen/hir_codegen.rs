@@ -383,6 +383,10 @@ struct Codegen<'a> {
     /// Set of BlockIds for label body blocks that were already emitted inside a scope body.
     /// When emit_cfg_region hits a Label terminal, it checks this set to avoid double-emission.
     scope_emitted_label_bodies: std::collections::HashSet<BlockId>,
+    /// Maps local variable names that are aliases for namespace imports to the namespace name.
+    /// e.g. `const MyLocal = SharedRuntime` where SharedRuntime is `import * as SharedRuntime`
+    /// → `"MyLocal" → "SharedRuntime"`. Used to resolve JSX member-expression tags.
+    namespace_alias: HashMap<String, String>,
 }
 
 /// Traverse blocks reachable from `start` (not crossing `fall_bid`) and check
@@ -925,6 +929,7 @@ impl<'a> Codegen<'a> {
             early_return_handled_blocks: std::collections::HashSet::new(),
             hoisted_declare_instr_ids: std::collections::HashSet::new(),
             scope_emitted_label_bodies: std::collections::HashSet::new(),
+            namespace_alias: HashMap::new(),
         }
     }
 
@@ -4361,7 +4366,22 @@ impl<'a> Codegen<'a> {
             InstructionValue::JsxExpression { tag, props, children, .. } => {
                 let tag_str = match tag {
                     JsxTag::Builtin(b) => b.name.clone(),
-                    JsxTag::Place(p) => self.expr(p),
+                    JsxTag::Place(p) => {
+                        let raw = self.expr(p);
+                        // Resolve namespace aliases: if tag is "MyLocal.Text" and
+                        // "MyLocal" is an alias for a namespace import "SharedRuntime",
+                        // emit "SharedRuntime.Text" instead.
+                        if let Some(dot_pos) = raw.find('.') {
+                            let prefix = &raw[..dot_pos];
+                            if let Some(ns_name) = self.namespace_alias.get(prefix).cloned() {
+                                format!("{}{}", ns_name, &raw[dot_pos..])
+                            } else {
+                                raw
+                            }
+                        } else {
+                            raw
+                        }
+                    }
                 };
                 let attr_parts: Vec<String> = props.iter().map(|attr| match attr {
                     JsxAttribute::Attribute { name, place } => {
@@ -8169,11 +8189,44 @@ fn promote_let_to_const(src: &str) -> String {
 
 fn normalize_arrow_params(src: &str) -> String {
     let s = src.trim_start();
-    // Find the `=>` token (ignoring nested strings/parens).
-    // If source starts with `(`, it's already parenthesized.
-    if s.starts_with('(') || s.starts_with("async ") || s.starts_with("async(") {
+    let leading_spaces = src.len() - src.trim_start().len();
+    let indent = &src[..leading_spaces];
+
+    // Handle parenthesized params — strip TypeScript type annotations if present.
+    // e.g., `(param: number) => ...` → `(param) => ...`
+    // e.g., `(a: A, b: B) => ...` → `(a, b) => ...`
+    if s.starts_with('(') {
+        // Find the closing `)` before `=>`
+        let bytes = s.as_bytes();
+        let mut depth = 0i32;
+        let mut close = None;
+        for (idx, &b) in bytes.iter().enumerate() {
+            if b == b'(' { depth += 1; }
+            else if b == b')' {
+                depth -= 1;
+                if depth == 0 { close = Some(idx); break; }
+            }
+        }
+        if let Some(close_idx) = close {
+            let params_inner = &s[1..close_idx];
+            let after_close = s[close_idx + 1..].trim_start();
+            // Check this is followed by `=>`
+            if after_close.starts_with("=>") {
+                // Strip TypeScript type annotations from params.
+                // Only strip if there's a `:` that's not inside brackets/parens/angles.
+                let stripped = strip_ts_type_annotations_from_params(params_inner);
+                let rest = &s[close_idx + 1..];
+                return format!("{indent}({stripped}){rest}");
+            }
+        }
         return src.to_string();
     }
+
+    // Handle async arrow functions.
+    if s.starts_with("async ") || s.starts_with("async(") {
+        return src.to_string();
+    }
+
     // Check if the source is `IDENT => ...` (single unparenthesized param).
     let bytes = s.as_bytes();
     let mut i = 0;
@@ -8189,12 +8242,111 @@ fn normalize_arrow_params(src: &str) -> String {
         if i + 1 < bytes.len() && bytes[i] == b'=' && bytes[i + 1] == b'>' {
             let rest = &s[i..];
             // Reconstruct with parens.
-            let leading_spaces = src.len() - src.trim_start().len();
-            let indent = &src[..leading_spaces];
             return format!("{indent}({param}) {rest}");
         }
     }
     src.to_string()
+}
+
+/// Strip TypeScript type annotations from a parameter list string.
+/// Input: the content between `(` and `)` of arrow function params.
+/// e.g., "param: number" → "param"
+/// e.g., "a: A, b: B" → "a, b"
+/// e.g., "a, b" → "a, b" (unchanged)
+/// e.g., "a: Map<string, number>" → "a" (handles generic types)
+fn strip_ts_type_annotations_from_params(params: &str) -> String {
+    if !params.contains(':') {
+        return params.to_string();
+    }
+    let mut result = String::new();
+    let bytes = params.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        // Skip leading whitespace for each param
+        while i < len && bytes[i].is_ascii_whitespace() { i += 1; }
+        if i >= len { break; }
+
+        // Read the parameter name (could be destructuring, spread, etc.)
+        // For simplicity, read until `:`, `,`, or end
+        let param_start = i;
+        let mut depth = 0i32; // track brackets/braces/parens
+
+        // Read until we find `:` at depth 0 (type annotation), `,` at depth 0 (next param), or end
+        let mut colon_pos = None;
+        let mut end_pos = len;
+
+        let mut j = i;
+        while j < len {
+            match bytes[j] {
+                b'(' | b'[' | b'{' | b'<' => { depth += 1; j += 1; }
+                b')' | b']' | b'}' | b'>' => {
+                    if depth > 0 { depth -= 1; }
+                    j += 1;
+                }
+                b':' if depth == 0 => {
+                    colon_pos = Some(j);
+                    j += 1;
+                    break;
+                }
+                b',' if depth == 0 => {
+                    end_pos = j;
+                    break;
+                }
+                b'=' if depth == 0 => {
+                    // Default parameter `param = default` — include as-is until `,`
+                    // Skip to comma
+                    while j < len && !(bytes[j] == b',' && depth == 0) {
+                        match bytes[j] {
+                            b'(' | b'[' | b'{' => { depth += 1; j += 1; }
+                            b')' | b']' | b'}' => { if depth > 0 { depth -= 1; } j += 1; }
+                            _ => { j += 1; }
+                        }
+                    }
+                    end_pos = j;
+                    break;
+                }
+                _ => { j += 1; }
+            }
+        }
+        if j >= len && colon_pos.is_none() {
+            end_pos = len;
+        }
+
+        let param_name = if let Some(cp) = colon_pos {
+            // Has type annotation — skip from `:` to `,` or end
+            let name = params[param_start..cp].trim_end();
+            // Skip the type annotation
+            let mut k = cp + 1;
+            let mut d = 0i32;
+            while k < len {
+                match bytes[k] {
+                    b'(' | b'[' | b'{' | b'<' => { d += 1; k += 1; }
+                    b')' | b']' | b'}' | b'>' => {
+                        if d > 0 { d -= 1; }
+                        k += 1;
+                    }
+                    b',' if d == 0 => { end_pos = k; break; }
+                    _ => { k += 1; }
+                }
+            }
+            if k >= len { end_pos = len; }
+            name.to_string()
+        } else {
+            params[param_start..end_pos].trim_end().to_string()
+        };
+
+        if !result.is_empty() {
+            result.push_str(", ");
+        }
+        result.push_str(&param_name);
+
+        i = end_pos;
+        if i < len && bytes[i] == b',' { i += 1; } // skip comma
+    }
+
+    result
 }
 
 /// If `expr` is a no-arg arrow function body of the form `() => { return EXPR; }`,
