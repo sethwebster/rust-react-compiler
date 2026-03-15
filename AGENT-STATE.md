@@ -35,8 +35,8 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **39.7% (682/1719)** — at best; unchanged streak 1 |
-| Uncommitted changes | none |
+| Correct rate | **39.7% (682/1719)** — at best; unchanged streak 2 |
+| Uncommitted changes | hir_codegen.rs +19/-3 (neutral so far) |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
