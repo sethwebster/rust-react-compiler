@@ -1120,12 +1120,22 @@ impl<'a> Codegen<'a> {
         } else {
             "_c".to_string()
         };
-        if self.hir.is_arrow {
+        // Bare anonymous arrow expression (e.g. React.memo(props => {...})):
+        // no name, no export, not assigned — emit as a pure expression `(params) => { ... }`.
+        let is_bare_arrow_expr = self.hir.is_arrow
+            && self.hir.id.is_none()
+            && !self.hir.is_default_export
+            && !self.hir.is_named_export
+            && self.hir.outer_name.is_none();
+        if self.hir.is_arrow && !is_bare_arrow_expr {
             // Arrow function form: `const Name = (params) => { ... };`
             let export_kw = if self.hir.is_default_export { "export default " }
                 else if self.hir.is_named_export { "export " }
                 else { "" };
             let _ = writeln!(out, "{export_kw}const {fn_name} = {async_kw}({params}) => {{");
+        } else if is_bare_arrow_expr {
+            // Bare arrow expression (anonymous, no assignment, no export).
+            let _ = writeln!(out, "{async_kw}({params}) => {{");
         } else if let Some(outer) = self.hir.outer_name.as_deref() {
             // Function expression assigned to outer variable:
             // `const Component = function ComponentName(params) { ... }`
@@ -1254,7 +1264,10 @@ impl<'a> Codegen<'a> {
             );
         }
 
-        if self.hir.is_arrow || self.hir.outer_name.is_some() {
+        if is_bare_arrow_expr {
+            // Bare arrow expression: no trailing semicolon.
+            let _ = writeln!(out, "}}");
+        } else if self.hir.is_arrow || self.hir.outer_name.is_some() {
             let _ = writeln!(out, "}};");
         } else {
             let _ = writeln!(out, "}}");
@@ -3976,14 +3989,19 @@ impl<'a> Codegen<'a> {
                 continue;
             }
             // Only inline unnamed temporaries that are used exactly once.
+            // Exception: non-outlined FunctionExpression with use_count==1 should
+            // be inlined even when "named" (e.g. anonymous arg to React.memo/forwardRef).
             let is_named = self.env
                 .get_identifier(instr.lvalue.identifier)
                 .and_then(|i| i.name.as_ref())
                 .is_some();
-            if is_named {
+            let uses = *adjusted_use_count.get(&instr.lvalue.identifier.0).unwrap_or(&0);
+            let is_fn_expr_single_use = matches!(&instr.value,
+                InstructionValue::FunctionExpression { name_hint: None, .. })
+                && uses == 1;
+            if is_named && !is_fn_expr_single_use {
                 continue;
             }
-            let uses = *adjusted_use_count.get(&instr.lvalue.identifier.0).unwrap_or(&0);
             if uses != 1 {
                 continue;
             }
