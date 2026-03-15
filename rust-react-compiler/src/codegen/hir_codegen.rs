@@ -1328,7 +1328,10 @@ impl<'a> Codegen<'a> {
                                     InstructionValue::MethodCall { .. }
                                     | InstructionValue::CallExpression { .. }
                                     | InstructionValue::ArrayExpression { .. }
-                                    | InstructionValue::ObjectExpression { .. } => {
+                                    | InstructionValue::ObjectExpression { .. }
+                                    | InstructionValue::PropertyLoad { .. }
+                                    | InstructionValue::ComputedLoad { .. }
+                                    | InstructionValue::LoadLocal { .. } => {
                                         inlined_ids.insert(collection.identifier.0);
                                     }
                                     _ => {}
@@ -5528,11 +5531,20 @@ impl<'a> Codegen<'a> {
                 // If this is an IIFE with no args, unwrap to just the body expression.
                 if args.is_empty() {
                     if let Some(inner) = extract_iife_return_expr(&callee_expr) {
+                        let uses = *self.use_count.get(&instr.lvalue.identifier.0).unwrap_or(&0);
                         let name = self.env.get_identifier(instr.lvalue.identifier)
                             .and_then(|i| i.name.as_ref())
                             .map(|n| n.value().to_string());
                         return if let Some(n) = name {
                             Some(format!("const {n} = {inner};"))
+                        } else if uses == 0 {
+                            // Result never used — emit inner as side-effect statement if it
+                            // has side effects (contains a call), or skip entirely if pure.
+                            if inner.contains('(') {
+                                Some(format!("{inner};"))
+                            } else {
+                                None
+                            }
                         } else {
                             let lv = self.lvalue_name(&instr.lvalue);
                             Some(format!("{lv} = {inner};"))
@@ -6782,12 +6794,57 @@ impl<'a> Codegen<'a> {
     // Scope assignment
     // -----------------------------------------------------------------------
 
+    /// Compute the set of InstructionIds that live in catch-handler blocks.
+    /// Instructions in catch handlers must NOT be assigned to any reactive scope,
+    /// even if the scope inference tagged them (due to unioning through StoreLocal
+    /// of variables that are also scope outputs in the try body).
+    fn catch_handler_instruction_ids(&self) -> std::collections::HashSet<InstructionId> {
+        use std::collections::{HashSet, VecDeque};
+
+        // Collect all catch handler block IDs.
+        let mut handler_blocks: HashSet<crate::hir::hir::BlockId> = HashSet::new();
+
+        for block in self.hir.body.blocks.values() {
+            if let Terminal::Try { handler, fallthrough, .. } = &block.terminal {
+                // BFS from handler block up to (but not including) the fallthrough block.
+                let fall_bid = *fallthrough;
+                let mut queue = VecDeque::new();
+                queue.push_back(*handler);
+                while let Some(bid) = queue.pop_front() {
+                    if bid == fall_bid { continue; }
+                    if !handler_blocks.insert(bid) { continue; }
+                    if let Some(b) = self.hir.body.blocks.get(&bid) {
+                        for succ in b.terminal.successors() {
+                            if succ != fall_bid && !handler_blocks.contains(&succ) {
+                                queue.push_back(succ);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Collect all InstructionIds in those blocks.
+        let mut ids = HashSet::new();
+        for bid in &handler_blocks {
+            if let Some(block) = self.hir.body.blocks.get(bid) {
+                for instr in &block.instructions {
+                    ids.insert(instr.id);
+                }
+            }
+        }
+        ids
+    }
+
     fn assign_instructions_to_scopes(
         &self,
         instrs: &[Instruction],
     ) -> HashMap<InstructionId, ScopeId> {
         use std::collections::HashSet;
         let mut map = HashMap::new();
+
+        // Instructions in catch handler blocks must NOT be assigned to any scope.
+        let catch_handler_ids = self.catch_handler_instruction_ids();
 
         // Pre-compute set of IdentifierId values that come from outlined FunctionExpressions.
         // An outlined FunctionExpression (name_hint set) is a stable module-level reference —
@@ -6804,6 +6861,11 @@ impl<'a> Codegen<'a> {
             .collect();
 
         for instr in instrs {
+            // Instructions in catch handler blocks must never be placed in a scope.
+            if catch_handler_ids.contains(&instr.id) {
+                continue;
+            }
+
             // Pre-check: hook calls and outlined FunctionExpressions must NEVER be placed
             // inside a memoization scope block — they must run unconditionally.
             // This check must happen before the ident.scope lookup (step 1) because

@@ -661,6 +661,16 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
         }
     }
 
+    // Build param_ids: set of direct function param IdentifierIds.
+    // Used to decide when to use property path vs receiver for MethodCall deps.
+    let mut param_ids: HashSet<IdentifierId> = HashSet::new();
+    for param in &hir.params {
+        match param {
+            Param::Place(p) => { param_ids.insert(p.identifier); }
+            Param::Spread(s) => { param_ids.insert(s.place.identifier); }
+        }
+    }
+
     // Build name_to_id: variable name → list of IdentifierIds for all named
     // identifiers in this function. Used for InlineJs source-text dep scanning.
     let mut name_to_id: HashMap<String, Vec<IdentifierId>> = HashMap::new();
@@ -908,6 +918,69 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
                         }
                     }
                     continue; // Don't fall through to each_dep_operand for InlineJs.
+                }
+
+                // MethodCall special case: when calling a method on a direct function param
+                // (e.g. `props.render(ref)`, `props.x()`), use the property accessor path
+                // as the dep instead of just the receiver.
+                // For `props.render(ref)`: dep is `props.render`, not `props`.
+                // For `arr.at(-1)` where `arr` is a local variable: dep is `arr` (receiver),
+                // not `arr.at` — handled by the generic loop below.
+                if let InstructionValue::MethodCall { receiver, property, args, .. } = &instr.value {
+                    // Resolve the receiver to determine if it's a direct param.
+                    let recv_resolved = resolve_dep_path(receiver.identifier, &def_at, &instr_map, &store_local_value, &phi_operands, range_start);
+                    let use_property_path = if let Some((base_id, ref base_path)) = recv_resolved {
+                        base_path.is_empty() && param_ids.contains(&base_id)
+                    } else {
+                        false
+                    };
+
+                    // Choose which place to use as the primary dep operand.
+                    let primary_place = if use_property_path { property } else { receiver };
+                    let places_to_process: Vec<&Place> = std::iter::once(primary_place)
+                        .chain(args.iter().filter_map(|a| match a {
+                            crate::hir::hir::CallArg::Place(p) => Some(p),
+                            crate::hir::hir::CallArg::Spread(s) => Some(&s.place),
+                        }))
+                        .collect();
+
+                    for place in places_to_process {
+                        let resolved = resolve_dep_path(place.identifier, &def_at, &instr_map, &store_local_value, &phi_operands, range_start);
+                        let Some((base_id, path)) = resolved else { continue; };
+                        let is_reactive = place.reactive || reactive_ids.contains(&base_id);
+                        let relevant = is_reactive || (path.is_empty() && {
+                            let val_id = store_local_value.get(&base_id).copied().unwrap_or(base_id);
+                            is_always_invalidating.get(&val_id).copied().unwrap_or(false)
+                                || is_always_invalidating.get(&base_id).copied().unwrap_or(false)
+                        });
+                        if !relevant { continue; }
+                        let path_key: Vec<String> = path.iter().map(|e| e.property.clone()).collect();
+                        let has_ancestor = !path_key.is_empty() && {
+                            let mut found = false;
+                            for prefix_len in 0..path_key.len() {
+                                let prefix = path_key[..prefix_len].to_vec();
+                                if seen.contains(&(base_id.0, prefix)) { found = true; break; }
+                            }
+                            found
+                        };
+                        let key = (base_id.0, path_key);
+                        if !has_ancestor && seen.insert(key) {
+                            let base_place = if base_id == place.identifier {
+                                let mut p = place.clone();
+                                if is_reactive { p.reactive = true; }
+                                p
+                            } else {
+                                Place {
+                                    identifier: base_id,
+                                    reactive: is_reactive,
+                                    loc: place.loc.clone(),
+                                    effect: Effect::Unknown,
+                                }
+                            };
+                            dep_list.push(ReactiveScopeDependency { place: base_place, path });
+                        }
+                    }
+                    continue; // Don't fall through to each_dep_operand for MethodCall.
                 }
 
                 for place in each_dep_operand(&instr.value) {
