@@ -99,6 +99,7 @@ fn make_passthrough_hir(env: &mut Environment) -> Result<HIRFunction> {
         is_arrow: false,
         is_named_export: false,
         is_default_export: false,
+        outer_name: None,
             reactive_block: None,
     })
 }
@@ -684,6 +685,12 @@ fn try_lower_var_declarators<'a>(
                     // Use the variable name if the function has no id.
                     if hir.id.is_none() {
                         hir.id = var_name;
+                    } else if hir.id != var_name {
+                        // Function has its own name (e.g. `function ComponentName`) but
+                        // is assigned to a different outer variable (e.g. `const Component`).
+                        // Store the outer variable name so codegen can emit the correct form:
+                        // `const Component = function ComponentName(props) {...}`
+                        hir.outer_name = var_name;
                     }
                     return Ok(Some(hir));
                 }
@@ -817,6 +824,7 @@ fn lower_arrow_function<'a>(
         is_arrow: true,
         is_named_export: false,
         is_default_export: false,
+        outer_name: None,
             reactive_block: None,
     })
 }
@@ -922,6 +930,7 @@ pub fn lower_function<'a>(
         is_arrow: false,
         is_named_export: false,
         is_default_export: false,
+        outer_name: None,
             reactive_block: None,
     })
 }

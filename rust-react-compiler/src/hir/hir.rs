@@ -1321,6 +1321,10 @@ pub struct HIRFunction {
     pub is_named_export: bool,
     /// True if the function was declared with `export default function` or `export default () =>`.
     pub is_default_export: bool,
+    /// When a function expression is assigned to an outer variable with a different name
+    /// (e.g. `const Component = function ComponentName(props) {...}`), this holds the
+    /// outer variable name ("Component"). Used in codegen to emit the correct form.
+    pub outer_name: Option<String>,
     /// The reactive function tree built by build_reactive_function.
     /// None until that pass runs; Some after.
     pub reactive_block: Option<ReactiveBlock>,

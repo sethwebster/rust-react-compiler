@@ -105,6 +105,7 @@ pub fn codegen_hir_function_parts(hir: &HIRFunction, env: &Environment) -> (Stri
     let outlines: Vec<String> = env.outlined_functions.iter().map(|(_name, decl)| {
         let normalized = normalize_fn_body_text(decl);
         let normalized = normalize_jsx_self_closing(&normalized);
+        let normalized = normalize_arrow_expr_body(&normalized);
         reindent_multiline(&normalized, "")
     }).collect();
     (out, outlines)
@@ -1125,6 +1126,11 @@ impl<'a> Codegen<'a> {
                 else if self.hir.is_named_export { "export " }
                 else { "" };
             let _ = writeln!(out, "{export_kw}const {fn_name} = {async_kw}({params}) => {{");
+        } else if let Some(outer) = self.hir.outer_name.as_deref() {
+            // Function expression assigned to outer variable:
+            // `const Component = function ComponentName(params) { ... }`
+            let export_kw = if self.hir.is_named_export { "export " } else { "" };
+            let _ = writeln!(out, "{export_kw}const {outer} = {async_kw}function {fn_name}({params}) {{");
         } else if self.hir.is_default_export {
             let _ = writeln!(out, "export default {async_kw}function {fn_name}({params}) {{");
         } else if self.hir.is_named_export {
@@ -1248,7 +1254,7 @@ impl<'a> Codegen<'a> {
             );
         }
 
-        if self.hir.is_arrow {
+        if self.hir.is_arrow || self.hir.outer_name.is_some() {
             let _ = writeln!(out, "}};");
         } else {
             let _ = writeln!(out, "}}");

@@ -679,6 +679,14 @@ pub fn infer_mutation_aliasing_ranges(
     // V's mutable range extends to that store (the object now captures V).
     // For MethodCall args: if arg is alias of named var A passed to receiver X,
     // track (capture_iid, A) for X. If X is later mutated, A's range extends too.
+
+    // Track variables that have been frozen by hook calls. Once a named variable
+    // is passed to a hook (which freezes it per React's aliasing semantics), subsequent
+    // non-hook calls that receive it as an argument should NOT extend its mutable range.
+    // This prevents the scope for `a = []` from growing to cover `call(a)` when
+    // `useFreeze(a)` was already called before `call(a)`.
+    let mut hook_frozen_vars: HashSet<IdentifierId> = HashSet::new();
+
     for (_, block) in &hir.body.blocks {
         for instr in &block.instructions {
             let iid = instr.id;
@@ -701,16 +709,34 @@ pub fn infer_mutation_aliasing_ranges(
                         .get(&callee.identifier)
                         .map(|n| is_primitive_returning_builtin_call(n))
                         .unwrap_or(false);
-                    if !is_hook && !is_primitive_builtin {
-                        // Function calls may mutate their arguments (conservative).
+                    if is_hook {
+                        // Hook call: mark arguments as frozen. After a hook freezes a
+                        // variable, subsequent non-hook calls cannot mutate it.
+                        for arg in args {
+                            let arg_id = match arg {
+                                crate::hir::hir::CallArg::Place(p) => p.identifier,
+                                crate::hir::hir::CallArg::Spread(s) => s.place.identifier,
+                            };
+                            // Resolve through alias chain to get the named variable.
+                            let source_var = aliases.get(&arg_id).copied().unwrap_or(arg_id);
+                            hook_frozen_vars.insert(source_var);
+                            // Also track the arg id itself in case it IS a named var.
+                            hook_frozen_vars.insert(arg_id);
+                        }
+                    } else if !is_primitive_builtin {
+                        // Function calls may mutate their arguments (conservative),
+                        // UNLESS the argument was previously frozen by a hook call.
                         for arg in args {
                             let arg_id = match arg {
                                 crate::hir::hir::CallArg::Place(p) => p.identifier,
                                 crate::hir::hir::CallArg::Spread(s) => s.place.identifier,
                             };
                             if let Some(&source_var) = aliases.get(&arg_id) {
-                                use_at(&mut named_mut_uses, source_var, iid);
-                                use_at(&mut named_real_muts, source_var, iid);
+                                // Skip frozen variables — hook has already frozen them.
+                                if !hook_frozen_vars.contains(&source_var) && !hook_frozen_vars.contains(&arg_id) {
+                                    use_at(&mut named_mut_uses, source_var, iid);
+                                    use_at(&mut named_real_muts, source_var, iid);
+                                }
                             }
                         }
                         // Closure call: when the callee is an alias of a named var that

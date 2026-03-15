@@ -310,6 +310,39 @@ fn collect_compilable_fn_spans(source: &str, source_type: SourceType) -> Vec<(u3
                     }
                 }
             }
+            // ExpressionStatement: handle React.memo(fn) and React.forwardRef(fn)
+            // where the inner function/arrow needs to be compiled in-place.
+            Statement::ExpressionStatement(expr_stmt) => {
+                if let Expression::CallExpression(call) = &expr_stmt.expression {
+                    // Check if callee is React.memo or React.forwardRef
+                    let is_react_wrapper = match &call.callee {
+                        Expression::StaticMemberExpression(mem) => {
+                            let obj_name = match &mem.object {
+                                Expression::Identifier(id) => id.name.as_str(),
+                                _ => "",
+                            };
+                            obj_name == "React" && matches!(mem.property.name.as_str(), "memo" | "forwardRef")
+                        }
+                        _ => false,
+                    };
+                    if is_react_wrapper {
+                        // Add the span of the first function/arrow argument
+                        for arg in &call.arguments {
+                            match arg {
+                                oxc_ast::ast::Argument::ArrowFunctionExpression(arrow) => {
+                                    spans.push((arrow.span.start, arrow.span.end));
+                                    break;
+                                }
+                                oxc_ast::ast::Argument::FunctionExpression(func) => {
+                                    spans.push((func.span.start, func.span.end));
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -574,6 +607,10 @@ fn fn_looks_like_component_or_hook(fn_src: &str) -> bool {
         let param_count = count_fn_params(trimmed);
         if param_count <= 1 {
             return true; // Looks like a component (0-1 params + JSX)
+        }
+        if param_count == 2 {
+            // React.forwardRef pattern: (props, ref) => JSX — compile it
+            return true;
         }
         // Multiple params with JSX — still might be valid if it has hooks
         // Check specifically for hook calls
