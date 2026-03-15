@@ -1035,6 +1035,31 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
             }
         }
 
+        // Deduplicate: remove descendant deps when an ancestor dep exists.
+        // e.g., if both `props.items` and `props.items.length` are in dep_list,
+        // keep only `props.items` (shorter path = broader dep).
+        // This handles cases where deps were added in bottom-up order (descendant first).
+        {
+            let ancestor_set: HashSet<(u32, Vec<String>)> = dep_list.iter()
+                .map(|d| {
+                    let path_key: Vec<String> = d.path.iter().map(|e| e.property.clone()).collect();
+                    (d.place.identifier.0, path_key)
+                })
+                .collect();
+            dep_list.retain(|d| {
+                let path_key: Vec<String> = d.path.iter().map(|e| e.property.clone()).collect();
+                if path_key.is_empty() { return true; } // base deps never removed
+                // Check if any strict ancestor (same base, shorter path) exists
+                for prefix_len in 0..path_key.len() {
+                    let prefix = path_key[..prefix_len].to_vec();
+                    if ancestor_set.contains(&(d.place.identifier.0, prefix)) {
+                        return false; // remove this descendant
+                    }
+                }
+                true
+            });
+        }
+
         // Sort deps alphabetically by "name.path" (mirrors TS compiler sort).
         // Unnamed deps (SSA temps, scope outputs without user-visible names) sort
         // after named deps using "\xFF" as a high sentinel value.
