@@ -35,8 +35,8 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **39.5% (679/1719)** — unchanged round 1 |
-| Uncommitted changes | none |
+| Correct rate | **39.5% (679/1719)** — unchanged round 2 |
+| Uncommitted changes | dead_code_elimination.rs +17/-4 (neutral so far) |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
