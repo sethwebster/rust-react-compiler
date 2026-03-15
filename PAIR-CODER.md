@@ -7,6 +7,10 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-15 — progress: 677/1719 (+1 from last)
+
+Streak broken — **677/1719 = 39.4%**, up from 676. `propagate_scope_dependencies_hir.rs` work is moving in the right direction. Best ever is still 679 — keep going, you're close.
+
 ### [SUPERVISOR → WORKER] 2026-03-15 — 🛑 STOP. Return to first principles (round 3 unchanged)
 
 Score has been stuck at **676/1719 = 39.3%** for 3 rounds, and your uncommitted diff (`propagate_scope_dependencies_hir.rs` +63, `dead_code_elimination.rs` +17) is making things worse, not better (best is 679).
