@@ -104,6 +104,18 @@ fn source_contains_identifier(source: &str, name: &str) -> bool {
             // e.g. in `z.a`, the `a` is a property name, not a variable reference.
             let not_property = i == 0 || source_bytes[i - 1] != b'.';
             if before_ok && after_ok && not_property {
+                // Check if this identifier is a property key or labeled statement:
+                // `{name:` or `name:` at the start of a line. If the character immediately
+                // after the name (skipping whitespace) is `:` and NOT `::`, this is NOT a
+                // variable reference — it's an object property key or labeled statement.
+                let mut j = i + n;
+                while j < slen && (source_bytes[j] == b' ' || source_bytes[j] == b'\t') { j += 1; }
+                let followed_by_colon = j < slen && source_bytes[j] == b':'
+                    && (j + 1 >= slen || source_bytes[j + 1] != b':'); // not ::
+                if followed_by_colon {
+                    i += 1;
+                    continue; // skip — property key or label
+                }
                 return true;
             }
         }
