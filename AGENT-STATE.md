@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **39.4% (677/1719)** — unchanged streak 1; -2 from best 679 |
+| Correct rate | **39.4% (677/1719)** — unchanged streak 2; -2 from best 679 |
 | Uncommitted changes | dead_code_elimination.rs +17/-4, propagate_scope_dependencies_hir.rs +73 |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
