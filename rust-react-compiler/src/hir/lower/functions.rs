@@ -151,6 +151,101 @@ fn collect_inner_params(source: &str) -> std::collections::HashSet<String> {
     params
 }
 
+/// Collect variable names declared with `let`, `const`, or `var` inside the function body.
+/// These shadow outer bindings and must NOT be treated as captures.
+/// Only does simple token-level scanning (skips string literals and comments).
+fn collect_local_declarations(source: &str) -> std::collections::HashSet<String> {
+    let mut locals = std::collections::HashSet::new();
+    let is_id_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+    let is_id_start = |b: u8| b.is_ascii_alphabetic() || b == b'_' || b == b'$';
+    let bytes = source.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        // Skip string literals.
+        if bytes[i] == b'\'' || bytes[i] == b'"' || bytes[i] == b'`' {
+            let q = bytes[i];
+            i += 1;
+            while i < len {
+                if bytes[i] == b'\\' { i += 2; continue; }
+                if bytes[i] == q { i += 1; break; }
+                i += 1;
+            }
+            continue;
+        }
+        // Skip line comments.
+        if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+            while i < len && bytes[i] != b'\n' { i += 1; }
+            continue;
+        }
+        // Skip block comments.
+        if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') { i += 1; }
+            if i + 1 < len { i += 2; }
+            continue;
+        }
+        // Check for `let`, `const`, `var` keyword at word boundary.
+        if is_id_start(bytes[i]) {
+            let at_boundary = i == 0 || !is_id_char(bytes[i - 1]);
+            if at_boundary {
+                let id_start = i;
+                while i < len && is_id_char(bytes[i]) { i += 1; }
+                let kw = &source[id_start..i];
+                if matches!(kw, "let" | "const" | "var") {
+                    // Skip whitespace
+                    while i < len && (bytes[i] == b' ' || bytes[i] == b'\t') { i += 1; }
+                    // Collect all declared names (handle destructuring like `let {a, b}` or `let [a, b]`
+                    // by just looking for identifier tokens at word boundaries until `;` or `=`).
+                    // Simple approach: collect all identifier tokens on this line until `=` or `;` or `{`-context.
+                    // We just collect the first simple identifier, which covers the most common case.
+                    // For array/object destructuring, we collect all identifiers before `=`.
+                    let decl_start = i;
+                    // Scan for identifiers in the pattern (before `=` or `;` or `\n` with no init)
+                    let mut j = i;
+                    let mut depth = 0i32;
+                    while j < len {
+                        match bytes[j] {
+                            b'{' | b'[' | b'(' => { depth += 1; j += 1; }
+                            b'}' | b']' | b')' => {
+                                if depth > 0 { depth -= 1; j += 1; }
+                                else { break; }
+                            }
+                            b'=' if j + 1 < len && bytes[j + 1] != b'>' => { break; }
+                            b';' | b'\n' if depth == 0 => { break; }
+                            _ => { j += 1; }
+                        }
+                    }
+                    // Extract all identifiers from `decl_start..j`
+                    let pattern_src = &source[decl_start..j];
+                    let pbytes = pattern_src.as_bytes();
+                    let plen = pbytes.len();
+                    let mut k = 0;
+                    while k < plen {
+                        if is_id_start(pbytes[k]) && (k == 0 || !is_id_char(pbytes[k - 1])) {
+                            let istart = k;
+                            while k < plen && is_id_char(pbytes[k]) { k += 1; }
+                            let ident = &pattern_src[istart..k];
+                            // Exclude keywords and special values
+                            if !matches!(ident, "undefined" | "null" | "true" | "false" | "this" | "new" | "return") {
+                                locals.insert(ident.to_string());
+                            }
+                        } else {
+                            k += 1;
+                        }
+                    }
+                    i = j;
+                    continue;
+                }
+                continue;
+            }
+        }
+        i += 1;
+    }
+    locals
+}
+
 /// Collect all outer-scope variables that appear (by name) in `fn_source`.
 /// `excluded_params` — names of the function's own parameters (they shadow
 /// outer bindings and must NOT be treated as captures).
@@ -158,6 +253,8 @@ fn collect_inner_params(source: &str) -> std::collections::HashSet<String> {
 fn collect_captures(ctx: &LoweringContext, fn_source: &str, excluded_params: &std::collections::HashSet<String>) -> Vec<Place> {
     // Also exclude params of inner arrows within the source (they shadow outer bindings).
     let inner_params = collect_inner_params(fn_source);
+    // Exclude locally declared variables (let/const/var) within the function body.
+    let local_decls = collect_local_declarations(fn_source);
 
     let mut seen = std::collections::HashSet::new();
     let mut result = Vec::new();
@@ -170,8 +267,9 @@ fn collect_captures(ctx: &LoweringContext, fn_source: &str, excluded_params: &st
                 Some(n) => n.value().to_string(),
                 None => continue,
             };
-            // Skip names that are parameters of this function or inner functions.
-            if excluded_params.contains(&name) || inner_params.contains(&name) {
+            // Skip names that are parameters of this function or inner functions,
+            // or locally declared variables (let/const/var) that shadow outer bindings.
+            if excluded_params.contains(&name) || inner_params.contains(&name) || local_decls.contains(&name) {
                 continue;
             }
             if source_contains_identifier(fn_source, &name) {
