@@ -85,7 +85,9 @@ fn find_disjoint_mutable_values(
     let mut declarations: HashMap<DeclarationId, IdentifierId> = HashMap::new();
 
     // Build a map: identifier id → binding name, for detecting hook calls.
-    // Covers all NonLocalBinding variants (Global, ImportSpecifier, etc.).
+    // Covers all NonLocalBinding variants (Global, ImportSpecifier, etc.)
+    // AND locally-defined hooks loaded via LoadLocal (e.g., `function useFreeze(x) {}`
+    // defined in the same file — these are LoadLocal, not LoadGlobal).
     let mut global_names: HashMap<IdentifierId, String> = HashMap::new();
     for (_, block) in &hir.body.blocks {
         for instr in &block.instructions {
@@ -98,6 +100,14 @@ fn find_disjoint_mutable_values(
                     NonLocalBinding::ModuleLocal { name } => name.clone(),
                 };
                 global_names.insert(instr.lvalue.identifier, name);
+            }
+            // Track locally-defined functions (including hooks) loaded via LoadLocal.
+            if let InstructionValue::LoadLocal { place, .. } = &instr.value {
+                if let Some(ident) = env.get_identifier(place.identifier) {
+                    if let Some(name) = &ident.name {
+                        global_names.insert(instr.lvalue.identifier, name.value().to_string());
+                    }
+                }
             }
         }
     }
@@ -588,14 +598,6 @@ fn find_disjoint_mutable_values(
                 let mut seen = HashSet::new();
                 let dedup: Vec<_> =
                     operands.into_iter().filter(|&id| seen.insert(id)).collect();
-                if std::env::var("RC_DEBUG2").is_ok() {
-                    eprintln!("[infer_scope] instr[{}] {:?} dedup={:?}", instr.id.0,
-                        std::mem::discriminant(&instr.value),
-                        dedup.iter().map(|id| {
-                            let r = env.get_identifier(*id).map(|i| i.mutable_range.clone()).unwrap_or_else(crate::hir::hir::MutableRange::zero);
-                            format!("{}[{},{})", id.0, r.start.0, r.end.0)
-                        }).collect::<Vec<_>>());
-                }
                 set.union(&dedup);
             }
         }

@@ -489,9 +489,20 @@ pub fn infer_mutation_aliasing_ranges(
                 }
                 // LoadLocal/LoadContext: record alias temp → source variable.
                 // These are READ operations — do NOT extend named variable mutation range.
+                // Also track locally-defined hook names (e.g., `function useFreeze(x) {}`
+                // defined in the same file). These are loaded via LoadLocal, not LoadGlobal,
+                // so we must look up the identifier's name to detect them as hooks.
                 InstructionValue::LoadLocal { place, .. }
                 | InstructionValue::LoadContext { place, .. } => {
                     aliases.insert(lv, place.identifier);
+                    if let Some(ident) = env.identifiers.get(&place.identifier) {
+                        if let Some(name) = &ident.name {
+                            let name_str = name.value().to_string();
+                            if is_hook_name(&name_str) {
+                                global_name_of.insert(lv, name_str);
+                            }
+                        }
+                    }
                 }
                 // PropertyLoad: record the property name so Phase 2 can identify
                 // non-mutating method calls (e.g., x.map → property_names[lv] = "map").
