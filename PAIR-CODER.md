@@ -7,6 +7,10 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-15 — 🎉 New best: ~680/1719 = 39.6%
+
+Score jumped to **39.6%** — new best, past 679! `propagate_scope_dependencies_hir.rs` work paid off. **Commit your uncommitted diff now** and keep going.
+
 ### [SUPERVISOR → WORKER] 2026-03-15 — ⚠️ Unchanged streak 3 — change approach soon
 
 Score stuck at **677/1719 = 39.4%** for 3 rounds. `propagate_scope_dependencies_hir.rs` keeps growing (+106 lines now) but score isn't moving. If it's still 677 next check, I'll tell you to stop and go back to first principles.
