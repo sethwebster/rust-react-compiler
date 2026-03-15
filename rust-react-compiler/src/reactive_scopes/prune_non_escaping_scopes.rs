@@ -39,6 +39,30 @@ fn is_hook_name(name: &str) -> bool {
     }
 }
 
+/// Returns true if the method is known to return a primitive value (string, number, boolean).
+/// Primitive values don't need memoization because JS identity comparison (===) on primitives
+/// is value-based, not reference-based. If `join` returns "a,b", a new render returning "a,b"
+/// is already identical and won't trigger downstream re-memoization.
+fn is_primitive_returning_method(name: &str) -> bool {
+    matches!(
+        name,
+        // Array → string
+        "join"
+        // Array/String → number
+        | "indexOf" | "lastIndexOf" | "findIndex" | "findLastIndex"
+        // Array/String → boolean
+        | "includes" | "every" | "some"
+        // String → number
+        | "charCodeAt" | "codePointAt"
+        // String → boolean
+        | "startsWith" | "endsWith"
+        // String/RegExp test
+        | "test"
+        // Object → number
+        | "valueOf"
+    )
+}
+
 fn instruction_memo_level(value: &InstructionValue) -> MemoLevel {
     match value {
         // Allocating expressions — always need memoization if reachable.
@@ -221,6 +245,19 @@ pub fn run_with_env(hir: &HIRFunction, env: &mut Environment) {
         }
     }
 
+    // Build property name map: IdentifierId of PropertyLoad lvalue → property name string.
+    // In a MethodCall { property }, property.identifier is the lvalue of a PropertyLoad.
+    // Used to detect MethodCall results with known primitive-returning methods.
+    let mut property_names: HashMap<IdentifierId, String> = HashMap::new();
+    for (_, block) in &hir.body.blocks {
+        for instr in &block.instructions {
+            if let InstructionValue::PropertyLoad { property, .. } = &instr.value {
+                // property is PropertyLiteral = String — insert lvalue → name mapping.
+                property_names.insert(instr.lvalue.identifier, property.clone());
+            }
+        }
+    }
+
     // Build the nodes graph, keyed by DeclarationId.
     // For each instruction, we add entries for:
     //  - The instruction's lvalue (keyed by its decl_id)
@@ -236,7 +273,21 @@ pub fn run_with_env(hir: &HIRFunction, env: &mut Environment) {
         for (instr_idx, instr) in block.instructions.iter().enumerate() {
             let lv = instr.lvalue.identifier;
             let lv_decl = decl_for(lv);
-            let level = instruction_memo_level(&instr.value);
+            // MethodCalls with known primitive-returning methods (join, indexOf, etc.)
+            // are treated as Never — primitives don't need memoization because JS identity
+            // comparison (===) is value-based for them.
+            let level = if let InstructionValue::MethodCall { property, .. } = &instr.value {
+                let method_name = property_names.get(&property.identifier)
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                if is_primitive_returning_method(method_name) {
+                    MemoLevel::Never
+                } else {
+                    instruction_memo_level(&instr.value)
+                }
+            } else {
+                instruction_memo_level(&instr.value)
+            };
             let scope = env.get_identifier(lv).and_then(|i| i.scope);
 
             let deps: Vec<DeclarationId> = match level {
