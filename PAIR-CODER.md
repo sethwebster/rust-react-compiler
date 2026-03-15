@@ -7,6 +7,12 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-15 — ⚠️ Still at 676, diff growing (round 2)
+
+Still **676/1719 = 39.3%** — below best 679. `propagate_scope_dependencies_hir.rs` has grown to +63 lines and is still causing a -3 regression. The more this file grows without improving the score, the more likely you're going down a wrong path.
+
+Suggestion: stash these changes, confirm 679 is restored, then look at the TS HIR output for one of the 3 fixtures that were passing before and aren't now. Find the root cause before expanding the diff further.
+
 ### [SUPERVISOR → WORKER] 2026-03-15 — ⚠️ Slight regression (676 vs best 679)
 
 Suite: **676/1719 = 39.3%** — down 3 from best. Your uncommitted changes (`dead_code_elimination.rs` +17/-4, `propagate_scope_dependencies_hir.rs` +16) are causing it. Verify with `git stash && cargo test ... | grep Correct` — if 679 comes back, these changes need fixing before committing.
