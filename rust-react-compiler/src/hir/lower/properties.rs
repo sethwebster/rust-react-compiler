@@ -305,6 +305,7 @@ fn store_to_assignment_target<'a>(
 }
 
 /// Lower an object assignment target `({x, y: z} = value)` as a Destructure instruction.
+/// Handles nested patterns by extracting to temporaries and recursively lowering.
 fn lower_object_assignment_target<'a>(
     ctx: &mut LoweringContext,
     semantic: &Semantic<'a>,
@@ -314,8 +315,11 @@ fn lower_object_assignment_target<'a>(
     lower_expr: &mut dyn FnMut(&Expression<'a>, &mut LoweringContext) -> Result<Place>,
 ) -> Result<()> {
     let mut properties: Vec<ObjectPatternProperty> = Vec::new();
+    // Track (property_index, tmp_place) for deferred nested lowering.
+    // Using indices avoids storing borrowed references across the loop boundary.
+    let mut nested_prop_indices: Vec<(usize, Place)> = Vec::new();
 
-    for prop in &obj.properties {
+    for (prop_idx, prop) in obj.properties.iter().enumerate() {
         match prop {
             AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(prop_ident) => {
                 // `{x}` or `{x = default}` — shorthand form
@@ -359,6 +363,13 @@ fn lower_object_assignment_target<'a>(
                         };
                         Place::new(id, loc.clone())
                     }
+                    AssignmentTargetMaybeDefault::ArrayAssignmentTarget(_)
+                    | AssignmentTargetMaybeDefault::ObjectAssignmentTarget(_) => {
+                        // Nested destructuring: extract to tmp, defer lowering by index.
+                        let tmp = ctx.make_temporary(loc.clone());
+                        nested_prop_indices.push((prop_idx, tmp.clone()));
+                        tmp
+                    }
                     _ => ctx.make_temporary(loc.clone()),
                 };
                 properties.push(ObjectPatternProperty::Property(HirObjectProperty {
@@ -394,15 +405,34 @@ fn lower_object_assignment_target<'a>(
         InstructionValue::Destructure {
             lvalue: LValuePattern { pattern: hir_pattern, kind: InstructionKind::Reassign },
             value,
-            loc,
+            loc: loc.clone(),
         },
         SourceLocation::Generated,
     );
+
+    // Lower nested patterns after the Destructure instruction.
+    // Re-index into obj.properties to retrieve the nested AST nodes.
+    for (prop_idx, tmp_place) in nested_prop_indices {
+        if let Some(AssignmentTargetProperty::AssignmentTargetPropertyProperty(prop_prop)) =
+            obj.properties.get(prop_idx)
+        {
+            match &prop_prop.binding {
+                AssignmentTargetMaybeDefault::ArrayAssignmentTarget(inner_arr) => {
+                    lower_array_assignment_target(ctx, semantic, inner_arr, tmp_place, loc.clone(), lower_expr)?;
+                }
+                AssignmentTargetMaybeDefault::ObjectAssignmentTarget(inner_obj) => {
+                    lower_object_assignment_target(ctx, semantic, inner_obj, tmp_place, loc.clone(), lower_expr)?;
+                }
+                _ => {}
+            }
+        }
+    }
 
     Ok(())
 }
 
 /// Lower an array assignment target `[x, y] = value` as a Destructure instruction.
+/// Handles nested patterns by extracting to temporaries and recursively lowering.
 fn lower_array_assignment_target<'a>(
     ctx: &mut LoweringContext,
     semantic: &Semantic<'a>,
@@ -412,8 +442,11 @@ fn lower_array_assignment_target<'a>(
     lower_expr: &mut dyn FnMut(&Expression<'a>, &mut LoweringContext) -> Result<Place>,
 ) -> Result<()> {
     let mut items: Vec<ArrayElement> = Vec::new();
+    // Track (element_index, tmp_place) for deferred nested lowering.
+    // Using indices avoids storing borrowed references across the loop boundary.
+    let mut nested_elem_indices: Vec<(usize, Place)> = Vec::new();
 
-    for elem in &arr.elements {
+    for (elem_idx, elem) in arr.elements.iter().enumerate() {
         match elem {
             None => {
                 items.push(ArrayElement::Hole);
@@ -430,8 +463,15 @@ fn lower_array_assignment_target<'a>(
                         };
                         items.push(ArrayElement::Place(Place::new(id, loc.clone())));
                     }
+                    AssignmentTargetMaybeDefault::ArrayAssignmentTarget(_)
+                    | AssignmentTargetMaybeDefault::ObjectAssignmentTarget(_) => {
+                        // Nested destructuring: extract to tmp, defer lowering by index.
+                        let tmp = ctx.make_temporary(loc.clone());
+                        items.push(ArrayElement::Place(tmp.clone()));
+                        nested_elem_indices.push((elem_idx, tmp));
+                    }
                     _ => {
-                        // Nested patterns or defaults — use a temporary placeholder
+                        // AssignmentTargetWithDefault or other — use a temporary placeholder
                         let tmp = ctx.make_temporary(loc.clone());
                         items.push(ArrayElement::Place(tmp));
                     }
@@ -464,10 +504,26 @@ fn lower_array_assignment_target<'a>(
         InstructionValue::Destructure {
             lvalue: LValuePattern { pattern: hir_pattern, kind: InstructionKind::Reassign },
             value,
-            loc,
+            loc: loc.clone(),
         },
         SourceLocation::Generated,
     );
+
+    // Lower nested patterns after the Destructure instruction.
+    // Re-index into arr.elements to retrieve the nested AST nodes.
+    for (elem_idx, tmp_place) in nested_elem_indices {
+        if let Some(Some(maybe_default)) = arr.elements.get(elem_idx) {
+            match maybe_default {
+                AssignmentTargetMaybeDefault::ArrayAssignmentTarget(inner_arr) => {
+                    lower_array_assignment_target(ctx, semantic, inner_arr, tmp_place, loc.clone(), lower_expr)?;
+                }
+                AssignmentTargetMaybeDefault::ObjectAssignmentTarget(inner_obj) => {
+                    lower_object_assignment_target(ctx, semantic, inner_obj, tmp_place, loc.clone(), lower_expr)?;
+                }
+                _ => {}
+            }
+        }
+    }
 
     Ok(())
 }

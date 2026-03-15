@@ -54,6 +54,7 @@ pub fn lower_identifier<'a>(
     ident: &IdentifierReference<'a>,
 ) -> Result<Place> {
     use oxc_semantic::SymbolFlags;
+    use oxc_ast::AstKind;
     let loc = SourceLocation::source(ident.span.start, ident.span.end);
 
     // In oxc 0.69, reference_id is a Cell<Option<ReferenceId>>, accessed via .get().
@@ -66,7 +67,34 @@ pub fn lower_identifier<'a>(
             if flags.intersects(SymbolFlags::Import) {
                 // Import bindings are module-level — emit LoadGlobal so downstream
                 // passes (hook detection, outlining) can identify them by name.
-                let binding = NonLocalBinding::Global { name: ident.name.to_string() };
+                // Detect the specific import kind to preserve original imported name.
+                let decl_node_id = semantic.scoping().symbol_declaration(sym_id);
+                let decl_kind = semantic.nodes().kind(decl_node_id);
+                let binding = match decl_kind {
+                    AstKind::ImportSpecifier(spec) => {
+                        let local = ident.name.to_string();
+                        let imported = match &spec.imported {
+                            ModuleExportName::IdentifierName(id) => id.name.to_string(),
+                            ModuleExportName::IdentifierReference(id) => id.name.to_string(),
+                            ModuleExportName::StringLiteral(s) => s.value.to_string(),
+                        };
+                        // Walk up to find the ImportDeclaration for the module source
+                        let module = find_import_module_for_specifier(semantic, decl_node_id)
+                            .unwrap_or_default();
+                        NonLocalBinding::ImportSpecifier { name: local, module, imported }
+                    }
+                    AstKind::ImportDefaultSpecifier(_) => {
+                        let module = find_import_module_for_specifier(semantic, decl_node_id)
+                            .unwrap_or_default();
+                        NonLocalBinding::ImportDefault { name: ident.name.to_string(), module }
+                    }
+                    AstKind::ImportNamespaceSpecifier(_) => {
+                        let module = find_import_module_for_specifier(semantic, decl_node_id)
+                            .unwrap_or_default();
+                        NonLocalBinding::ImportNamespace { name: ident.name.to_string(), module }
+                    }
+                    _ => NonLocalBinding::Global { name: ident.name.to_string() },
+                };
                 let load = InstructionValue::LoadGlobal { binding, loc: loc.clone() };
                 Ok(ctx.push(load, loc))
             } else {
@@ -87,6 +115,25 @@ pub fn lower_identifier<'a>(
             Ok(ctx.push(load, loc))
         }
     }
+}
+
+/// Walk up the ancestor chain from an import specifier node to find the
+/// `ImportDeclaration` and return its source module string.
+fn find_import_module_for_specifier<'a>(
+    semantic: &Semantic<'a>,
+    node_id: oxc_semantic::NodeId,
+) -> Option<String> {
+    use oxc_ast::AstKind;
+    let mut current_id = node_id;
+    // Walk up parent nodes to find the ImportDeclaration
+    for _ in 0..5 {
+        let parent_id = semantic.nodes().parent_id(current_id)?;
+        if let AstKind::ImportDeclaration(import) = semantic.nodes().kind(parent_id) {
+            return Some(import.source.value.to_string());
+        }
+        current_id = parent_id;
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------

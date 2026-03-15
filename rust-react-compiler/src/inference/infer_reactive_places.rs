@@ -549,13 +549,8 @@ pub fn infer_reactive_places(hir: &mut HIRFunction, env: &Environment) {
 /// but stable hooks (whose return value never changes) are excluded.
 fn value_is_hook_source(value: &InstructionValue) -> bool {
     if let InstructionValue::LoadGlobal { binding, .. } = value {
-        let name = match binding {
-            NonLocalBinding::Global { name } => name.as_str(),
-            NonLocalBinding::ImportSpecifier { name, .. } => name.as_str(),
-            NonLocalBinding::ImportDefault { name, .. } => name.as_str(),
-            NonLocalBinding::ImportNamespace { name, .. } => name.as_str(),
-            NonLocalBinding::ModuleLocal { name } => name.as_str(),
-        };
+        // For ImportSpecifier, prefer the original imported name (e.g. "useState" not "useReactState").
+        let name = effective_binding_name(binding);
         is_hook_name(name) && !is_stable_hook(name)
     } else {
         false
@@ -566,16 +561,22 @@ fn value_is_hook_source(value: &InstructionValue) -> bool {
 /// whose call results should never be marked reactive.
 fn is_stable_hook_load(value: &InstructionValue) -> bool {
     if let InstructionValue::LoadGlobal { binding, .. } = value {
-        let name = match binding {
-            NonLocalBinding::Global { name } => name.as_str(),
-            NonLocalBinding::ImportSpecifier { name, .. } => name.as_str(),
-            NonLocalBinding::ImportDefault { name, .. } => name.as_str(),
-            NonLocalBinding::ImportNamespace { name, .. } => name.as_str(),
-            NonLocalBinding::ModuleLocal { name } => name.as_str(),
-        };
+        let name = effective_binding_name(binding);
         is_stable_hook(name)
     } else {
         false
+    }
+}
+
+/// For an ImportSpecifier binding, returns the original imported name.
+/// For all other bindings, returns the local name.
+fn effective_binding_name(binding: &NonLocalBinding) -> &str {
+    match binding {
+        NonLocalBinding::ImportSpecifier { imported, .. } => imported.as_str(),
+        NonLocalBinding::Global { name } => name.as_str(),
+        NonLocalBinding::ImportDefault { name, .. } => name.as_str(),
+        NonLocalBinding::ImportNamespace { name, .. } => name.as_str(),
+        NonLocalBinding::ModuleLocal { name } => name.as_str(),
     }
 }
 
@@ -590,6 +591,11 @@ fn is_dispatch_hook_ref(id: IdentifierId, blocks: &IndexMap<BlockId, BasicBlock>
         for instr in &block.instructions {
             if instr.lvalue.identifier == id {
                 if let InstructionValue::LoadGlobal { binding, .. } = &instr.value {
+                    // For ImportSpecifier, check both the imported (original) name and local
+                    // alias — e.g. `import { useState as useReactState }` should still match.
+                    if let NonLocalBinding::ImportSpecifier { imported, .. } = binding {
+                        return is_dispatch_hook(imported.as_str());
+                    }
                     let name = match binding {
                         NonLocalBinding::Global { name } => name.as_str(),
                         NonLocalBinding::ImportSpecifier { name, .. } => name.as_str(),

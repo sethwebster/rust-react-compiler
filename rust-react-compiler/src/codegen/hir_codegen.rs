@@ -227,6 +227,32 @@ fn contains_as_word_codegen(s: &str, pattern: &str) -> bool {
     false
 }
 
+/// Replace all word-boundary occurrences of `alias.` with `ns_name.` in source text.
+/// Used to resolve namespace aliases in function body source (JSX tags, member access).
+/// e.g. `<localVar.Text>` → `<SharedRuntime.Text>` when alias="localVar", ns_name="SharedRuntime".
+fn rename_namespace_in_src(src: &str, alias: &str, ns_name: &str) -> String {
+    if alias.is_empty() || alias == ns_name { return src.to_string(); }
+    let pattern = format!("{alias}.");
+    let mut result = src.to_string();
+    let mut start = 0;
+    while let Some(rel_pos) = result[start..].find(&pattern) {
+        let pos = start + rel_pos;
+        // Word-boundary check: char before `alias` must not be an identifier char
+        let before_ok = pos == 0 || {
+            let c = result[..pos].chars().next_back().unwrap_or('\0');
+            !(c.is_alphanumeric() || c == '_' || c == '$')
+        };
+        if before_ok {
+            let replacement = format!("{ns_name}.");
+            result = format!("{}{}{}", &result[..pos], replacement, &result[pos + pattern.len()..]);
+            start = pos + replacement.len();
+        } else {
+            start = pos + 1;
+        }
+    }
+    result
+}
+
 // ---------------------------------------------------------------------------
 // Internal state
 // ---------------------------------------------------------------------------
@@ -976,6 +1002,45 @@ impl<'a> Codegen<'a> {
 
         // Collect instructions in block order.
         let ordered = self.collect_instructions_in_order();
+
+        // Populate namespace_alias: detect `const localVar = NS` patterns where NS is a
+        // namespace import (`import * as NS from ...`).
+        // e.g. `const localVar = SharedRuntime; <localVar.Text>` → register "localVar" → "SharedRuntime".
+        // The environment's `namespace_import_names` contains all names from `import * as NS`.
+        if !self.env.namespace_import_names.is_empty() {
+            // Build a map: LoadGlobal result id → namespace name (only for namespace imports)
+            let mut load_ns_id: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+            for instr in &ordered {
+                if let InstructionValue::LoadGlobal { binding, .. } = &instr.value {
+                    let name = match binding {
+                        crate::hir::hir::NonLocalBinding::Global { name } => name.clone(),
+                        crate::hir::hir::NonLocalBinding::ImportNamespace { name, .. } => name.clone(),
+                        crate::hir::hir::NonLocalBinding::ImportSpecifier { name, .. } => name.clone(),
+                        crate::hir::hir::NonLocalBinding::ImportDefault { name, .. } => name.clone(),
+                        crate::hir::hir::NonLocalBinding::ModuleLocal { name } => name.clone(),
+                    };
+                    if self.env.namespace_import_names.contains(&name) {
+                        load_ns_id.insert(instr.lvalue.identifier.0, name);
+                    }
+                }
+            }
+            // Find StoreLocal where the value is a namespace import LoadGlobal
+            for instr in &ordered {
+                if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
+                    if let Some(ns_name) = load_ns_id.get(&value.identifier.0) {
+                        if let Some(id_info) = self.env.identifiers.get(&lvalue.place.identifier) {
+                            if let Some(var_name) = &id_info.name {
+                                let local_name = var_name.value().to_string();
+                                if local_name != *ns_name {
+                                    // Only register if the local name differs from the namespace name
+                                    self.namespace_alias.insert(local_name, ns_name.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Build inlined_exprs for transparent single-use temps.
         self.build_inline_map(&ordered);
@@ -3040,10 +3105,46 @@ impl<'a> Codegen<'a> {
         }
         // Propagate: update any inlined_exprs entries that still reference old $tN names.
         if !old_to_new.is_empty() {
+            // Build a HashMap of id → new_name for $tN-pattern entries, for use with
+            // substitute_temp_refs_in_str (handles `$tN` tokens in complex expressions).
+            let mut id_subst_map: HashMap<u32, String> = HashMap::new();
+            for (old_name, new_name) in &old_to_new {
+                if old_name.starts_with("$t") {
+                    if let Ok(id) = old_name[2..].parse::<u32>() {
+                        id_subst_map.insert(id, new_name.clone());
+                    }
+                }
+            }
+
             for value in self.inlined_exprs.values_mut() {
+                // First: exact match for any old_to_new entry.
+                let mut matched = false;
                 for (old_name, new_name) in &old_to_new {
-                    if value == old_name {
+                    if value.as_str() == old_name.as_str() {
                         *value = new_name.clone();
+                        matched = true;
+                        break;
+                    }
+                }
+                if matched { continue; }
+
+                // Second: $tN token substitution for complex expressions.
+                if !id_subst_map.is_empty() && value.contains("$t") {
+                    let new_val = Self::substitute_temp_refs_in_str(value, &id_subst_map);
+                    if new_val != *value {
+                        *value = new_val;
+                        continue;
+                    }
+                }
+
+                // Third: for resolved expressions (non-$t), also do substring replacement
+                // in complex inlined expressions like "useState({})" → "useState(t0)".
+                // This handles cases where the scope output's expression was inlined into
+                // a consumer's inlined_exprs entry before scope emission renamed it.
+                for (old_name, new_name) in &old_to_new {
+                    if !old_name.starts_with("$t") && value.contains(old_name.as_str()) {
+                        *value = value.replace(old_name.as_str(), new_name.as_str());
+                        break;
                     }
                 }
             }
@@ -4307,12 +4408,19 @@ impl<'a> Codegen<'a> {
                 let a = self.expr(alternate);
                 // Wrap consequent in parens if it contains a nested ternary, to
                 // match TS compiler output: `test ? (a ? b : c) : alt`
-                let c_wrapped = if c.contains(" ? ") {
+                // Also wrap TypeCastExpression (`x as T`) in parens in ternary branches,
+                // to match TS compiler output: `test ? ("pending" as Status) : t1`
+                let c_wrapped = if c.contains(" ? ") || c.contains(" as ") {
                     format!("({c})")
                 } else {
                     c
                 };
-                Some(format!("{t} ? {c_wrapped} : {a}"))
+                let a_wrapped = if a.contains(" as ") {
+                    format!("({a})")
+                } else {
+                    a
+                };
+                Some(format!("{t} ? {c_wrapped} : {a_wrapped}"))
             }
             InstructionValue::UnaryExpression { operator, value, .. } => {
                 let v = self.expr(value);
@@ -4478,7 +4586,11 @@ impl<'a> Codegen<'a> {
                 if !src.is_empty() {
                     // Apply capture renames: if any outer variable captured by this closure
                     // was renamed (due to shadowing), update the body text to use the new name.
-                    let src = apply_capture_renames(src, &lowered_func.func.context, self.env, &self.name_overrides);
+                    let mut src = apply_capture_renames(src, &lowered_func.func.context, self.env, &self.name_overrides);
+                    // Apply namespace alias substitutions in the function body source.
+                    for (alias_name, ns_name) in &self.namespace_alias {
+                        src = rename_namespace_in_src(&src, alias_name, ns_name);
+                    }
                     // Normalize: arrow functions with a single unparenthesized param get parens added.
                     // e.g. `e => ...` → `(e) => ...`  (TS compiler always parenthesizes)
                     // Also normalize body text: single quotes → double, computed property → dot.
@@ -5465,6 +5577,14 @@ impl<'a> Codegen<'a> {
                 } else {
                     None
                 };
+                // Skip namespace alias assignments: `const localVar = NS` where
+                // `localVar` is registered as a namespace alias. The alias is only
+                // used to resolve JSX tags like `<localVar.Text>` → `<NS.Text>`.
+                if let Some(ref n) = name {
+                    if self.namespace_alias.contains_key(n.as_str()) {
+                        return None;
+                    }
+                }
                 let val_expr = self.expr(value);
                 // Skip pre-scope declarations: Let-kind StoreLocal where the value has no
                 // scope and the target variable is in a scope's reassignments.
@@ -5805,7 +5925,13 @@ impl<'a> Codegen<'a> {
                 let src = &lowered_func.func.original_source;
                 if !src.is_empty() {
                     // Apply capture renames before normalizing.
-                    let src = apply_capture_renames(src, &lowered_func.func.context, self.env, &self.name_overrides);
+                    let mut src = apply_capture_renames(src, &lowered_func.func.context, self.env, &self.name_overrides);
+                    // Apply namespace alias substitutions: replace `localVar.` with `NS.` in
+                    // JSX tags and member access expressions within the function body.
+                    for (alias_name, ns_name) in &self.namespace_alias {
+                        // Replace `alias_name.` with `ns_name.` (word-boundary safe, only before '.')
+                        src = rename_namespace_in_src(&src, alias_name, ns_name);
+                    }
                     let normalized = normalize_fn_body_text(&src);
                     // Rename catch parameters to temp names (t0, t1, ...) to match
                     // the reference compiler's rename_variables behavior.
@@ -6860,6 +6986,27 @@ impl<'a> Codegen<'a> {
             })
             .collect();
 
+        // Build a local map from IdentifierId -> global/local name for callee resolution.
+        // This is needed because inlined_exprs is populated during codegen (not yet available here).
+        let mut callee_names: HashMap<u32, String> = HashMap::new();
+        for instr in instrs {
+            match &instr.value {
+                InstructionValue::LoadGlobal { binding, .. } => {
+                    callee_names.insert(instr.lvalue.identifier.0, self.binding_name(binding));
+                }
+                InstructionValue::LoadLocal { place, .. }
+                | InstructionValue::LoadContext { place, .. } => {
+                    let name = self.env.get_identifier(place.identifier)
+                        .and_then(|i| i.name.as_ref())
+                        .map(|n| n.value().to_string());
+                    if let Some(n) = name {
+                        callee_names.insert(instr.lvalue.identifier.0, n);
+                    }
+                }
+                _ => {}
+            }
+        }
+
         for instr in instrs {
             // Instructions in catch handler blocks must never be placed in a scope.
             if catch_handler_ids.contains(&instr.id) {
@@ -6873,10 +7020,8 @@ impl<'a> Codegen<'a> {
             // but codegen must still emit them outside the scope block.
             let is_early_excluded = match &instr.value {
                 InstructionValue::CallExpression { callee, .. } => {
-                    self.inlined_exprs.get(&callee.identifier.0)
-                        .map(|name| name.starts_with("use")
-                            && name.len() > 3
-                            && name[3..].starts_with(|c: char| c.is_uppercase()))
+                    callee_names.get(&callee.identifier.0)
+                        .map(|name| is_react_hook_name(name))
                         .unwrap_or(false)
                 }
                 InstructionValue::FunctionExpression { name_hint, .. } => name_hint.is_some(),
@@ -6992,10 +7137,8 @@ impl<'a> Codegen<'a> {
             // module-level references — they don't allocate and don't need scopes.
             let is_excluded = match &instr.value {
                 InstructionValue::CallExpression { callee, .. } => {
-                    self.inlined_exprs.get(&callee.identifier.0)
-                        .map(|name| name.starts_with("use")
-                            && name.len() > 3
-                            && name[3..].starts_with(|c: char| c.is_uppercase()))
+                    callee_names.get(&callee.identifier.0)
+                        .map(|name| is_react_hook_name(name))
                         .unwrap_or(false)
                 }
                 InstructionValue::FunctionExpression { name_hint, .. } => name_hint.is_some(),
@@ -7768,6 +7911,18 @@ fn maybe_paren_jsx_scope_output(cache_var: &str, expr: &str) -> String {
 }
 
 /// Returns true if `s` is a valid JS identifier (can be used as dot-notation property).
+/// Returns true if `name` is a React hook name.
+/// React hooks: names starting with "use" followed by an uppercase letter (e.g. "useState"),
+/// OR exactly "use" (the React 19 `use()` operator).
+fn is_react_hook_name(name: &str) -> bool {
+    if name == "use" {
+        return true;
+    }
+    name.starts_with("use")
+        && name.len() > 3
+        && name[3..].starts_with(|c: char| c.is_uppercase())
+}
+
 fn is_valid_identifier(s: &str) -> bool {
     if s.is_empty() {
         return false;
@@ -8050,10 +8205,210 @@ fn normalize_fn_body_text(src: &str) -> String {
         result.push(bytes[i] as char);
         i += 1;
     }
+    // Strip bare blocks: `{ stmt; }` → `stmt;` (TS compiler normalizes these away)
+    result = strip_bare_blocks(&result);
     // Promote `let` → `const` for variables that are never reassigned in the body.
     // The TS compiler's rename_variables pass does this for inner function declarations.
     result = promote_let_to_const(&result);
     result
+}
+
+/// Remove bare block statements: `{ ... }` not preceded by control flow keywords.
+/// E.g. `function () { { console.log(z); } }` → `function () { console.log(z); }`
+fn strip_bare_blocks(src: &str) -> String {
+    // We do a multi-pass approach: find bare `{` not preceded by control-flow keywords,
+    // find the matching `}`, and remove both, repeating until stable.
+    let control_keywords: &[&str] = &[
+        "if", "else", "for", "while", "do", "try", "catch", "finally", "switch", "=>",
+    ];
+    let mut result = src.to_string();
+    loop {
+        let new = strip_bare_blocks_once(&result, control_keywords);
+        if new == result {
+            break;
+        }
+        result = new;
+    }
+    result
+}
+
+fn strip_bare_blocks_once(src: &str, control_keywords: &[&str]) -> String {
+    let bytes = src.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut result = String::with_capacity(len);
+
+    while i < len {
+        if bytes[i] == b'{' {
+            // Check what precedes this `{` (skipping whitespace/newlines)
+            let mut j = i;
+            // Skip back over whitespace
+            while j > 0 && (bytes[j - 1] == b' ' || bytes[j - 1] == b'\t' || bytes[j - 1] == b'\n' || bytes[j - 1] == b'\r') {
+                j -= 1;
+            }
+            // Check if preceded by a control flow keyword or `)`
+            let preceded_by_control = if j == 0 {
+                false
+            } else if bytes[j - 1] == b')' || bytes[j - 1] == b'>' {
+                // ) from if/for/while condition, or => arrow
+                true
+            } else {
+                // Check for keywords ending at j
+                let mut found = false;
+                for kw in control_keywords {
+                    let klen = kw.len();
+                    if j >= klen {
+                        let slice = &bytes[j - klen..j];
+                        if slice == kw.as_bytes() {
+                            // Word boundary before keyword
+                            let before_ok = j == klen || {
+                                let b = bytes[j - klen - 1];
+                                !b.is_ascii_alphanumeric() && b != b'_' && b != b'$'
+                            };
+                            if before_ok {
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                found
+            };
+
+            if !preceded_by_control {
+                // Try to find the matching `}` for this bare block
+                if let Some(close_pos) = find_matching_brace(bytes, i) {
+                    // Check that this `{...}` is at statement level by verifying
+                    // the content doesn't look like an object literal
+                    // Simple heuristic: if the block only contains statements (no `:`
+                    // at the top level that would indicate an object), strip it.
+                    // For safety, only strip if the `{` is immediately followed by
+                    // whitespace/newline (block statement) not something like `{key: val}`
+                    let after_open = i + 1;
+                    let content_start = after_open;
+                    let is_block_stmt = after_open < len && (
+                        bytes[after_open] == b'\n' || bytes[after_open] == b'\r' ||
+                        bytes[after_open] == b' ' || bytes[after_open] == b'\t'
+                    );
+                    // Also make sure it's not an object literal: no `:` at depth 0 in content
+                    if is_block_stmt {
+                        let content = &bytes[content_start..close_pos];
+                        if !looks_like_object_literal(content) {
+                            // Strip the `{` and `}` and emit just the content
+                            result.push_str(std::str::from_utf8(content).unwrap_or(""));
+                            i = close_pos + 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Handle strings to avoid matching braces inside strings
+        if bytes[i] == b'"' || bytes[i] == b'\'' || bytes[i] == b'`' {
+            let q = bytes[i];
+            result.push(bytes[i] as char);
+            i += 1;
+            while i < len {
+                if bytes[i] == b'\\' {
+                    result.push(bytes[i] as char);
+                    i += 1;
+                    if i < len { result.push(bytes[i] as char); i += 1; }
+                    continue;
+                }
+                result.push(bytes[i] as char);
+                let c = bytes[i];
+                i += 1;
+                if c == q { break; }
+            }
+            continue;
+        }
+
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+/// Find the matching `}` for an opening `{` at position `open` in `bytes`.
+fn find_matching_brace(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut i = open;
+    let len = bytes.len();
+    while i < len {
+        match bytes[i] {
+            b'"' | b'\'' | b'`' => {
+                let q = bytes[i];
+                i += 1;
+                while i < len {
+                    if bytes[i] == b'\\' { i += 2; continue; }
+                    if bytes[i] == q { i += 1; break; }
+                    i += 1;
+                }
+            }
+            b'{' => { depth += 1; i += 1; }
+            b'}' => {
+                depth -= 1;
+                if depth == 0 { return Some(i); }
+                i += 1;
+            }
+            _ => { i += 1; }
+        }
+    }
+    None
+}
+
+/// Returns true if the byte slice looks like an object literal content (has `key: value`
+/// pattern at depth 0, where `:` is not part of a ternary expression).
+/// Used to avoid stripping `{...}` that are actually object literals.
+fn looks_like_object_literal(content: &[u8]) -> bool {
+    let mut depth = 0i32;
+    let mut pending_question_at_depth0 = false;
+    let mut i = 0;
+    let len = content.len();
+    while i < len {
+        match content[i] {
+            b'"' | b'\'' | b'`' => {
+                let q = content[i];
+                i += 1;
+                while i < len {
+                    if content[i] == b'\\' { i += 2; continue; }
+                    if content[i] == q { i += 1; break; }
+                    i += 1;
+                }
+            }
+            b'{' | b'[' | b'(' => { depth += 1; i += 1; }
+            b'}' | b']' | b')' => { depth -= 1; i += 1; }
+            b'?' if depth == 0 => {
+                // Mark that we've seen a `?` at depth 0 (ternary operator)
+                pending_question_at_depth0 = true;
+                i += 1;
+            }
+            b';' if depth == 0 => {
+                // `;` at depth 0 means we're in a block with statements, not an object literal
+                // Reset pending_question since we're past a statement boundary
+                pending_question_at_depth0 = false;
+                i += 1;
+            }
+            b':' if depth == 0 => {
+                // Check it's not `::` (namespace)
+                if i + 1 < len && content[i + 1] == b':' {
+                    i += 2; // skip ::
+                    continue;
+                }
+                // If we saw a `?` before this `:` at depth 0, it's a ternary, not object key
+                if pending_question_at_depth0 {
+                    pending_question_at_depth0 = false;
+                    i += 1;
+                    continue;
+                }
+                // A `:` at depth 0 without a preceding `?` indicates an object key-value pair
+                return true;
+            }
+            _ => { i += 1; }
+        }
+    }
+    false
 }
 
 /// Rename catch parameters to temp names (t0, t1, ...) in source text.

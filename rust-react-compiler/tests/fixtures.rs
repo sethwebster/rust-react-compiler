@@ -1204,12 +1204,12 @@ fn normalize_paren_jsx(input: &str) -> String {
     let len = bytes.len();
     let mut i = 0;
     while i < len {
-        // Look for `= (<` or `return (<` patterns
+        // Look for `= (<`, `return (<`, or `=> (<` patterns
         let paren_start = if i + 2 < len && bytes[i] == b'(' && (bytes[i + 1] == b'<' || bytes[i + 1] == b'{') {
-            // Check if preceded by `= ` or `return `
+            // Check if preceded by `= `, `return`, or `=>`
             let before = &result;
             let trimmed = before.trim_end();
-            if trimmed.ends_with('=') || trimmed.ends_with("return") {
+            if trimmed.ends_with('=') || trimmed.ends_with("return") || trimmed.ends_with("=>") {
                 true
             } else {
                 false

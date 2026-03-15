@@ -471,6 +471,22 @@ fn lower_program_impl(
         env.module_level_names = names;
     }
 
+    // Collect namespace import names (`import * as NS from ...`).
+    // Used by codegen to resolve local aliases of namespace imports in JSX.
+    {
+        for stmt in &program.body {
+            if let Statement::ImportDeclaration(import) = stmt {
+                if let Some(specifiers) = &import.specifiers {
+                    for spec in specifiers {
+                        if let oxc_ast::ast::ImportDeclarationSpecifier::ImportNamespaceSpecifier(ns) = spec {
+                            env.namespace_import_names.insert(ns.local.name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let mut fn_skip = fn_skip_param;
 
     // maybe_lower_fn!: used when we KNOW there's a function (FunctionDeclaration, etc.)

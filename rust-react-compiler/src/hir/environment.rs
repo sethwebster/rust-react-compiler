@@ -111,6 +111,11 @@ pub struct Environment {
     // Ranges of scopes that were pruned by prune_non_escaping_scopes (start, end instruction IDs).
     // Used by merge_reactive_scopes_that_invalidate_together to treat pruned scopes as merge barriers.
     pub pruned_scope_ranges: Vec<(u32, u32)>,
+
+    // Names of namespace imports (`import * as NS from ...`).
+    // Used by codegen to resolve local namespace aliases in JSX:
+    // e.g. `const localVar = NS; <localVar.Text>` → `<NS.Text>`.
+    pub namespace_import_names: HashSet<String>,
 }
 
 impl Environment {
@@ -134,6 +139,7 @@ impl Environment {
             outlined_functions: Vec::new(),
             module_level_names: HashSet::new(),
             pruned_scope_ranges: Vec::new(),
+            namespace_import_names: HashSet::new(),
         }
     }
 
