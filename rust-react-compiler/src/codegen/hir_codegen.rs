@@ -3317,7 +3317,24 @@ impl<'a> Codegen<'a> {
                 );
                 self.active_early_return = saved_er;
             }
-            Terminal::Goto { block: next, .. } => {
+            Terminal::Goto { block: next, variant, .. } => {
+                // If this is a Break goto to a labeled block's fallthrough and we're NOT
+                // at our stop_at boundary, emit an explicit `break label;`.
+                // (stop_at == Some(next) means natural exit from current control structure — no break needed)
+                if matches!(variant, GotoVariant::Break) {
+                    if stop_at != Some(*next) {
+                        if let Some(label) = self.switch_fallthrough_labels.get(next).cloned() {
+                            let _ = writeln!(out, "{pad}break {label};");
+                            return;
+                        }
+                    } else {
+                        // Natural exit from labeled block — still emit break if this is a
+                        // label_fallthrough_block (i.e., a Label terminal with explicit breaks in body).
+                        // But only if there IS a label (otherwise it's an implicit fall-through).
+                        // Don't emit break — natural label exit is silent.
+                        return;
+                    }
+                }
                 self.emit_scope_body_cfg_walk(
                     *next, scope_block_set, scope_instr_set, intra_instr_ids,
                     skip_instr_set, inlined_ids, all_out_names, scope_id,
@@ -3364,14 +3381,19 @@ impl<'a> Codegen<'a> {
                     if scope_block_set.contains(&body_bid) {
                         let label_opt = self.switch_fallthrough_labels.get(&fall_bid).cloned();
                         if let Some(ref label) = label_opt {
-                            let _ = writeln!(out, "{pad}{label}: {{");
+                            // Emit to temp buffer to check for single-compound optimization.
+                            let mut temp_body = String::new();
                             let mut vis2 = visited.clone();
                             self.emit_scope_body_cfg_walk(
                                 body_bid, scope_block_set, scope_instr_set, intra_instr_ids,
                                 skip_instr_set, inlined_ids, all_out_names, scope_id,
-                                indent + 1, Some(fall_bid), &mut vis2, out,
+                                indent + 1, Some(fall_bid), &mut vis2, &mut temp_body,
                             );
-                            let _ = writeln!(out, "{pad}}}");
+                            let outer_prefix = "  ".repeat(indent);
+                            let inner_prefix = "  ".repeat(indent + 1);
+                            if emit_label_single_compound_or_braced(out, &pad, &outer_prefix, &inner_prefix, label, &temp_body) {
+                                // single-compound optimization applied
+                            }
                         } else {
                             let mut vis2 = visited.clone();
                             self.emit_scope_body_cfg_walk(
@@ -3388,14 +3410,17 @@ impl<'a> Codegen<'a> {
                 let label_opt = self.switch_fallthrough_labels.get(&fall_bid).cloned();
                 if scope_block_set.contains(&body_bid) {
                     if let Some(ref label) = label_opt {
-                        let _ = writeln!(out, "{pad}{label}: {{");
+                        // Emit to temp buffer to check for single-compound optimization.
+                        let mut temp_body = String::new();
                         let mut vis2 = visited.clone();
                         self.emit_scope_body_cfg_walk(
                             body_bid, scope_block_set, scope_instr_set, intra_instr_ids,
                             skip_instr_set, inlined_ids, all_out_names, scope_id,
-                            indent + 1, Some(fall_bid), &mut vis2, out,
+                            indent + 1, Some(fall_bid), &mut vis2, &mut temp_body,
                         );
-                        let _ = writeln!(out, "{pad}}}");
+                        let outer_prefix = "  ".repeat(indent);
+                        let inner_prefix = "  ".repeat(indent + 1);
+                        emit_label_single_compound_or_braced(out, &pad, &outer_prefix, &inner_prefix, label, &temp_body);
                     } else {
                         let mut vis2 = visited.clone();
                         self.emit_scope_body_cfg_walk(
@@ -7766,6 +7791,63 @@ impl<'a> Codegen<'a> {
 // ---------------------------------------------------------------------------
 // Free helpers
 // ---------------------------------------------------------------------------
+
+/// Emit a labeled block, using single-compound optimization when possible.
+/// If the body is a single compound statement (if/while/for/switch/nested label),
+/// emits `label: stmt` without outer braces (matching TS compiler behavior).
+/// Otherwise emits `label: { ... }`.
+/// Returns true always (convenience for callers).
+fn emit_label_single_compound_or_braced(
+    out: &mut String,
+    pad: &str,
+    outer_prefix: &str,
+    inner_prefix: &str,
+    label: &str,
+    temp_body: &str,
+) -> bool {
+    let top_level_stmts: Vec<&str> = temp_body.lines()
+        .filter(|l| {
+            if !l.starts_with(inner_prefix) { return false; }
+            if l.starts_with(&format!("{}  ", inner_prefix)) { return false; }
+            let trimmed = l.trim();
+            if trimmed.is_empty() { return false; }
+            // Skip closing braces and continuation keywords.
+            if trimmed == "}" || trimmed == "};" { return false; }
+            if trimmed.starts_with("} else") { return false; }
+            if trimmed.starts_with("} catch") { return false; }
+            if trimmed.starts_with("} finally") { return false; }
+            if trimmed.starts_with("} while") { return false; }
+            true
+        })
+        .collect();
+    let is_single_compound = top_level_stmts.len() == 1 && {
+        let first = top_level_stmts[0].trim_start();
+        first.starts_with("if ") || first.starts_with("if(")
+            || first.starts_with("while ") || first.starts_with("while(")
+            || first.starts_with("switch ") || first.starts_with("switch(")
+            || first.starts_with("for ") || first.starts_with("for(")
+            || first.starts_with("bb")  // nested labeled block
+    };
+    let _ = outer_prefix; // used implicitly via pad
+    if is_single_compound {
+        // Dedent body by 2 spaces and prepend label to first line.
+        let mut first_line = true;
+        for line in temp_body.lines() {
+            let dedented = if line.starts_with("  ") { &line[2..] } else { line };
+            if first_line && !dedented.trim().is_empty() {
+                let _ = writeln!(out, "{pad}{label}: {}", dedented.trim_start());
+                first_line = false;
+            } else if !first_line {
+                let _ = writeln!(out, "{dedented}");
+            }
+        }
+    } else {
+        let _ = writeln!(out, "{pad}{label}: {{");
+        out.push_str(temp_body);
+        let _ = writeln!(out, "{pad}}}");
+    }
+    true
+}
 
 /// Strip a trailing natural `continue;` from a loop body string.
 /// The last statement in a loop body is often `continue;` (the natural loop-back
