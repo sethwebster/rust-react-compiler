@@ -385,6 +385,18 @@ fn remove_dead_instructions(hir: &mut HIRFunction, env: Option<&Environment>) {
     } else {
         HashSet::new()
     };
+    // Build a set of declaration IDs for captured variables.
+    // After SSA, FunctionExpression.context places are renamed to SSA IDs, so
+    // captured_vars contains SSA IDs that won't match lvalue.place.identifier
+    // (which is the pre-SSA named var ID). Group by declaration_id to bridge them.
+    let captured_decl_ids: HashSet<DeclarationId> = if let Some(env) = env {
+        captured_vars.iter()
+            .filter_map(|&id| env.get_identifier(id))
+            .map(|i| i.declaration_id)
+            .collect()
+    } else {
+        HashSet::new()
+    };
 
     // Remove instructions whose lvalue is dead and that have no side effects.
     // Special case: StoreLocal whose named variable is never loaded, never
@@ -414,12 +426,13 @@ fn remove_dead_instructions(hir: &mut HIRFunction, env: Option<&Environment>) {
                     }
                     // SSA alias check: after a Destructure renames a variable (id→new_id),
                     // LoadLocals use new_id, not the original id in StoreLocal.lvalue.place.
-                    // Check if any SSA alias (same declaration_id) of this variable is loaded.
+                    // Check if any SSA alias (same declaration_id) of this variable is loaded
+                    // or captured by a closure.
                     if let Some(env) = env {
                         if let Some(decl_id) = env.get_identifier(lvalue.place.identifier)
                             .map(|i| i.declaration_id)
                         {
-                            if loaded_decl_ids.contains(&decl_id) {
+                            if loaded_decl_ids.contains(&decl_id) || captured_decl_ids.contains(&decl_id) {
                                 return true;
                             }
                         }
@@ -440,8 +453,8 @@ fn remove_dead_instructions(hir: &mut HIRFunction, env: Option<&Environment>) {
                         if let Some(decl_id) = env.get_identifier(lvalue.place.identifier)
                             .map(|i| i.declaration_id)
                         {
-                            if loaded_decl_ids.contains(&decl_id) {
-                                // An SSA alias is loaded — fall through to has_side_effects (true).
+                            if loaded_decl_ids.contains(&decl_id) || captured_decl_ids.contains(&decl_id) {
+                                // An SSA alias is loaded or captured — fall through to has_side_effects (true).
                             } else {
                                 return false;
                             }

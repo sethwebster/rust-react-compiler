@@ -167,9 +167,11 @@ fn resolve_dep_path(
     store_local_value: &HashMap<IdentifierId, IdentifierId>,
     phi_operands: &HashMap<IdentifierId, Vec<IdentifierId>>,
     range_start: InstructionId,
+    scope_decl_ids: &HashSet<IdentifierId>,
+    reactive_ids: &HashSet<IdentifierId>,
 ) -> Option<(IdentifierId, Vec<DependencyPathEntry>)> {
     let mut visited = HashSet::new();
-    resolve_dep_path_inner(place_id, def_at, instr_map, store_local_value, phi_operands, range_start, 0, &mut visited)
+    resolve_dep_path_inner(place_id, def_at, instr_map, store_local_value, phi_operands, range_start, 0, &mut visited, scope_decl_ids, reactive_ids)
 }
 
 fn resolve_dep_path_inner(
@@ -181,9 +183,36 @@ fn resolve_dep_path_inner(
     range_start: InstructionId,
     depth: u32,
     visited: &mut HashSet<IdentifierId>,
+    scope_decl_ids: &HashSet<IdentifierId>,
+    reactive_ids: &HashSet<IdentifierId>,
 ) -> Option<(IdentifierId, Vec<DependencyPathEntry>)> {
     if depth > 64 { return None; }
     if !visited.insert(place_id) { return None; } // cycle detected
+
+    // If this place is a REACTIVE output declaration of another memoization scope that was
+    // computed BEFORE the current scope (i.e., its def is external to the current scope),
+    // treat it as an opaque dep boundary. This prevents scope B from depending on the
+    // underlying reactive values inside scope A's memoized output when scope B directly uses
+    // that output (e.g., JSX props). E.g., if scope A declares reactive `$t60=[$c]` and
+    // scope B (JSX) uses `$t60`, scope B's dep should be `$t60`, not the underlying `state`.
+    //
+    // We only apply this when:
+    // 1. place_id is REACTIVE (in reactive_ids) — constant scope outputs should be traced through
+    // 2. place_id is EXTERNAL (def_at[place_id] < range_start) — internal values aren't deps
+    // 3. The scope A (declaring place_id) HAS reactive deps — if scope A is always-invalidating
+    //    with no reactive deps (e.g., x=[1,2,3]), stopping here introduces a spurious dep on x.
+    //    In that case, trace through to find actual reactive deps (or none).
+    if scope_decl_ids.contains(&place_id) && reactive_ids.contains(&place_id) {
+        let def_id = def_at.get(&place_id);
+        let is_external = match def_id {
+            None => true,
+            Some(def_id) => *def_id < range_start,
+        };
+        if is_external {
+            return Some((place_id, vec![]));
+        }
+    }
+
     let def = def_at.get(&place_id);
     let is_external = match def {
         None => true, // param — external (no defining instruction)
@@ -201,11 +230,11 @@ fn resolve_dep_path_inner(
             match &instr.value {
                 InstructionValue::LoadLocal { place, .. }
                 | InstructionValue::LoadContext { place, .. } => {
-                    return resolve_dep_path_inner(place.identifier, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited);
+                    return resolve_dep_path_inner(place.identifier, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited, scope_decl_ids, reactive_ids);
                 }
                 InstructionValue::PropertyLoad { object, property, .. } => {
                     if let Some((base_id, mut path)) =
-                        resolve_dep_path_inner(object.identifier, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited)
+                        resolve_dep_path_inner(object.identifier, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited, scope_decl_ids, reactive_ids)
                     {
                         path.push(DependencyPathEntry {
                             property: property.clone(),
@@ -231,7 +260,7 @@ fn resolve_dep_path_inner(
                             crate::hir::hir::ObjectExpressionProperty::Property(p) => p.place.identifier,
                             crate::hir::hir::ObjectExpressionProperty::Spread(s) => s.place.identifier,
                         };
-                        if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited) {
+                        if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited, scope_decl_ids, reactive_ids) {
                             return Some(result);
                         }
                     }
@@ -244,7 +273,7 @@ fn resolve_dep_path_inner(
                             crate::hir::hir::ArrayElement::Spread(s) => s.place.identifier,
                             crate::hir::hir::ArrayElement::Hole => continue,
                         };
-                        if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited) {
+                        if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited, scope_decl_ids, reactive_ids) {
                             return Some(result);
                         }
                     }
@@ -257,7 +286,7 @@ fn resolve_dep_path_inner(
                             crate::hir::hir::CallArg::Place(p) => p.identifier,
                             crate::hir::hir::CallArg::Spread(s) => s.place.identifier,
                         };
-                        if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited) {
+                        if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited, scope_decl_ids, reactive_ids) {
                             return Some(result);
                         }
                     }
@@ -277,7 +306,7 @@ fn resolve_dep_path_inner(
                 let ops: Vec<IdentifierId> = ops.clone();
                 for op_id in ops {
                     if op_id == place_id { continue; }
-                    if let Some((base_id, _path)) = resolve_dep_path_inner(op_id, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited) {
+                    if let Some((base_id, _path)) = resolve_dep_path_inner(op_id, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited, scope_decl_ids, reactive_ids) {
                         // Strip path: the phi could yield either operand at runtime,
                         // so we only know the base reactive identifier is a dep.
                         return Some((base_id, vec![]));
@@ -300,7 +329,7 @@ fn resolve_dep_path_inner(
         match &instr.value {
             InstructionValue::PropertyLoad { object, property, .. } => {
                 if let Some((base_id, mut path)) =
-                    resolve_dep_path_inner(object.identifier, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited)
+                    resolve_dep_path_inner(object.identifier, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited, scope_decl_ids, reactive_ids)
                 {
                     path.push(DependencyPathEntry {
                         property: property.clone(),
@@ -312,13 +341,13 @@ fn resolve_dep_path_inner(
             // LoadLocal / LoadContext are transparent — trace through to the source.
             InstructionValue::LoadLocal { place, .. }
             | InstructionValue::LoadContext { place, .. } => {
-                return resolve_dep_path_inner(place.identifier, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited);
+                return resolve_dep_path_inner(place.identifier, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited, scope_decl_ids, reactive_ids);
             }
             // ComputedLoad: trace through the object operand. We can't represent
             // computed property indices in the dep path, but tracking the base
             // object is better than no dep at all.
             InstructionValue::ComputedLoad { object, .. } => {
-                return resolve_dep_path_inner(object.identifier, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited);
+                return resolve_dep_path_inner(object.identifier, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited, scope_decl_ids, reactive_ids);
             }
             // Internal allocations: trace through to operands.
             InstructionValue::ObjectExpression { properties, .. } => {
@@ -327,7 +356,7 @@ fn resolve_dep_path_inner(
                         crate::hir::hir::ObjectExpressionProperty::Property(p) => p.place.identifier,
                         crate::hir::hir::ObjectExpressionProperty::Spread(s) => s.place.identifier,
                     };
-                    if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited) {
+                    if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited, scope_decl_ids, reactive_ids) {
                         return Some(result);
                     }
                 }
@@ -340,7 +369,7 @@ fn resolve_dep_path_inner(
                         crate::hir::hir::ArrayElement::Spread(s) => s.place.identifier,
                         crate::hir::hir::ArrayElement::Hole => continue,
                     };
-                    if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited) {
+                    if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited, scope_decl_ids, reactive_ids) {
                         return Some(result);
                     }
                 }
@@ -352,7 +381,7 @@ fn resolve_dep_path_inner(
                         crate::hir::hir::CallArg::Place(p) => p.identifier,
                         crate::hir::hir::CallArg::Spread(s) => s.place.identifier,
                     };
-                    if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited) {
+                    if let Some(result) = resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited, scope_decl_ids, reactive_ids) {
                         return Some(result);
                     }
                 }
@@ -366,7 +395,7 @@ fn resolve_dep_path_inner(
     // e.g., `let cond = param_30` → StoreLocal { lvalue: 37, value: 30 }
     // instr_map doesn't have 37, but store_local_value[37] = 30.
     if let Some(&val_id) = store_local_value.get(&place_id) {
-        return resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited);
+        return resolve_dep_path_inner(val_id, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited, scope_decl_ids, reactive_ids);
     }
 
     // place_id is a phi node result: trace through its operands to find an external base.
@@ -375,7 +404,7 @@ fn resolve_dep_path_inner(
         let ops: Vec<IdentifierId> = ops.clone();
         for op_id in ops {
             if op_id == place_id { continue; } // avoid trivial self-loop
-            if let Some(result) = resolve_dep_path_inner(op_id, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited) {
+            if let Some(result) = resolve_dep_path_inner(op_id, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited, scope_decl_ids, reactive_ids) {
                 return Some(result);
             }
         }
@@ -396,13 +425,15 @@ fn resolve_dep_path_debug(
     store_local_value: &HashMap<IdentifierId, IdentifierId>,
     phi_operands: &HashMap<IdentifierId, Vec<IdentifierId>>,
     range_start: InstructionId,
+    scope_decl_ids: &HashSet<IdentifierId>,
+    reactive_ids: &HashSet<IdentifierId>,
 ) -> Option<(IdentifierId, Vec<DependencyPathEntry>)> {
     if std::env::var("RC_DEBUG2").is_ok() {
         eprintln!("[resolve_start] id={} def_at={:?} range_start={}", place_id.0,
             def_at.get(&place_id).map(|id| id.0), range_start.0);
     }
     let mut visited = HashSet::new();
-    resolve_dep_path_inner(place_id, def_at, instr_map, store_local_value, phi_operands, range_start, 0, &mut visited)
+    resolve_dep_path_inner(place_id, def_at, instr_map, store_local_value, phi_operands, range_start, 0, &mut visited, scope_decl_ids, reactive_ids)
 }
 
 /// Recursively collect all reactive deps reachable from a complex expression.
@@ -426,6 +457,7 @@ fn collect_all_reactive_deps(
     depth: u32,
     visited: &mut HashSet<IdentifierId>,
     out: &mut Vec<(IdentifierId, Vec<DependencyPathEntry>)>,
+    scope_decl_ids: &HashSet<IdentifierId>,
 ) {
     if depth > 64 { return; }
     if !visited.insert(place_id) { return; }
@@ -435,7 +467,7 @@ fn collect_all_reactive_deps(
     // cycle detection doesn't fire on `place_id` — we already inserted it above.
     let mut rv = HashSet::new();
     if let Some((base_id, path)) = resolve_dep_path_inner(
-        place_id, def_at, instr_map, store_local_value, phi_operands, range_start, 0, &mut rv,
+        place_id, def_at, instr_map, store_local_value, phi_operands, range_start, 0, &mut rv, scope_decl_ids, reactive_ids,
     ) {
         if reactive_ids.contains(&base_id) {
             out.push((base_id, path));
@@ -456,13 +488,13 @@ fn collect_all_reactive_deps(
         for op_id in operands {
             collect_all_reactive_deps(
                 op_id, def_at, instr_map, store_local_value, phi_operands, reactive_ids,
-                range_start, depth + 1, visited, out,
+                range_start, depth + 1, visited, out, scope_decl_ids,
             );
         }
     } else if let Some(&val_id) = store_local_value.get(&place_id) {
         collect_all_reactive_deps(
             val_id, def_at, instr_map, store_local_value, phi_operands, reactive_ids,
-            range_start, depth + 1, visited, out,
+            range_start, depth + 1, visited, out, scope_decl_ids,
         );
     } else if let Some(ops) = phi_operands.get(&place_id) {
         let ops: Vec<IdentifierId> = ops.clone();
@@ -470,7 +502,7 @@ fn collect_all_reactive_deps(
             if op_id != place_id {
                 collect_all_reactive_deps(
                     op_id, def_at, instr_map, store_local_value, phi_operands, reactive_ids,
-                    range_start, depth + 1, visited, out,
+                    range_start, depth + 1, visited, out, scope_decl_ids,
                 );
             }
         }
@@ -576,6 +608,22 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
     }
 
     let scope_ids: Vec<_> = env.scopes.keys().copied().collect();
+
+    // Build the set of all scope declaration identifiers across all scopes.
+    // When resolving dep paths, we should NOT trace through named variables that are
+    // outputs (declarations) of other memoization scopes — those scope outputs are
+    // themselves reactive dep boundaries. E.g., if scope A declares `t1 = [state]`,
+    // and scope B uses `t1`, scope B's dep should be `t1`, not `state`.
+    // Removing scope declarations from `store_local_value` prevents the resolver from
+    // tracing through them to their underlying value.
+    let all_scope_decl_ids: HashSet<IdentifierId> = env.scopes.values()
+        .flat_map(|s| s.declarations.keys().copied())
+        .collect();
+    // We do NOT filter store_local_value by scope_decl_ids.
+    // The scope_decl boundary check in resolve_dep_path_inner handles reactive scope_decl_ids.
+    // Non-reactive scope_decl_ids (always-invalidating objects with no reactive deps) need
+    // to remain in store_local_value so the is_always_invalidating check can bridge from
+    // StoreLocal lvalue to the underlying always-invalidating instruction, enabling Case 2 merges.
 
     // Collect loop test block IDs: only these blocks' Branch terminals contribute to
     // scope deps. If-condition blocks are NOT loop test blocks and must not add their
@@ -831,7 +879,7 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
                     let fn_source = &lowered_func.func.original_source;
                     for ctx_place in &lowered_func.func.context {
                         let Some((base_id, base_path)) =
-                            resolve_dep_path(ctx_place.identifier, &def_at, &instr_map, &store_local_value, &phi_operands, range_start)
+                            resolve_dep_path(ctx_place.identifier, &def_at, &instr_map, &store_local_value, &phi_operands, range_start, &all_scope_decl_ids, &reactive_ids)
                         else {
                             continue;
                         };
@@ -891,7 +939,7 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
                         if !contains_as_word(source, name) { continue; }
                         for &id in ids {
                             if !reactive_ids.contains(&id) { continue; }
-                            let Some((base_id, path)) = resolve_dep_path(id, &def_at, &instr_map, &store_local_value, &phi_operands, range_start) else {
+                            let Some((base_id, path)) = resolve_dep_path(id, &def_at, &instr_map, &store_local_value, &phi_operands, range_start, &all_scope_decl_ids, &reactive_ids) else {
                                 continue;
                             };
                             let path_key: Vec<String> = path.iter().map(|e| e.property.clone()).collect();
@@ -928,7 +976,7 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
                 // not `arr.at` — handled by the generic loop below.
                 if let InstructionValue::MethodCall { receiver, property, args, .. } = &instr.value {
                     // Resolve the receiver to determine if it's a direct param.
-                    let recv_resolved = resolve_dep_path(receiver.identifier, &def_at, &instr_map, &store_local_value, &phi_operands, range_start);
+                    let recv_resolved = resolve_dep_path(receiver.identifier, &def_at, &instr_map, &store_local_value, &phi_operands, range_start, &all_scope_decl_ids, &reactive_ids);
                     let use_property_path = if let Some((base_id, ref base_path)) = recv_resolved {
                         base_path.is_empty() && param_ids.contains(&base_id)
                     } else {
@@ -945,7 +993,7 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
                         .collect();
 
                     for place in places_to_process {
-                        let resolved = resolve_dep_path(place.identifier, &def_at, &instr_map, &store_local_value, &phi_operands, range_start);
+                        let resolved = resolve_dep_path(place.identifier, &def_at, &instr_map, &store_local_value, &phi_operands, range_start, &all_scope_decl_ids, &reactive_ids);
                         let Some((base_id, path)) = resolved else { continue; };
                         let is_reactive = place.reactive || reactive_ids.contains(&base_id);
                         let relevant = is_reactive || (path.is_empty() && {
@@ -988,7 +1036,7 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
                         eprintln!("[prop_dep] scope {:?} instr {} place {:?} reactive={}", scope_id.0, instr.id.0, place.identifier.0, place.reactive);
                     }
                     // Resolve dep path for all places — we need the base to check always-invalidating.
-                    let resolved = resolve_dep_path(place.identifier, &def_at, &instr_map, &store_local_value, &phi_operands, range_start);
+                    let resolved = resolve_dep_path(place.identifier, &def_at, &instr_map, &store_local_value, &phi_operands, range_start, &all_scope_decl_ids, &reactive_ids);
                     if std::env::var("RC_DEBUG").is_ok() {
                         eprintln!("[prop_dep]   def_at[{}]={:?}, range_start={:?}, resolved={:?}",
                             place.identifier.0,
@@ -1078,7 +1126,7 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
                 let mut term_deps: Vec<(IdentifierId, Vec<DependencyPathEntry>)> = Vec::new();
                 collect_all_reactive_deps(
                     place.identifier, &def_at, &instr_map, &store_local_value, &phi_operands,
-                    &reactive_ids, range_start, 0, &mut term_visited, &mut term_deps,
+                    &reactive_ids, range_start, 0, &mut term_visited, &mut term_deps, &HashSet::new(),
                 );
                 for (base_id, path) in term_deps {
                     let path_key: Vec<String> = path.iter().map(|e| e.property.clone()).collect();
