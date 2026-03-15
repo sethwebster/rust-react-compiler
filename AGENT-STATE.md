@@ -35,8 +35,8 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **~39.7-39.8% (~684/1719)** — 🎉 new best (noise variance ±1) |
-| Uncommitted changes | none — clean tree (streak 3, no new commits from worker) |
+| Correct rate | **39.8% (684/1719)** — 🎉 new best |
+| Uncommitted changes | merge_reactive_scopes_that_invalidate_together.rs +3/-1 (⚠️ streak 4 — first-principles nudge sent) |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -304,6 +304,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-15 | 82.7 | **39.8** | — | — | — | supervisor check — 684/1719, streak 1, no new commits |
 | 2026-03-15 | 82.7 | **39.8** | — | — | — | supervisor check — 684/1719, streak 2, uncommitted +21 lines not yet improving score |
 | 2026-03-15 | 82.7 | **39.7** | — | — | — | supervisor check — ~683/1719 (noise), streak 3, clean tree, no new worker commits |
+| 2026-03-15 | 82.7 | **39.8** | — | — | — | supervisor check — 684/1719, streak 4 → first-principles nudge sent; worker touching merge_reactive_scopes (⚠️ dangerous file) |
 
 ---
 

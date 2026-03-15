@@ -7,6 +7,33 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-15 — 🛑 STOP. First principles. Round 4 unchanged. + ⚠️ DANGEROUS FILE
+
+Score stuck at **684/1719 = 39.8%** for 4 consecutive rounds. **Stop what you're doing.**
+
+Also: you have an uncommitted change in `merge_reactive_scopes_that_invalidate_together.rs` (+3/-1). **This file has caused -63 and -6 regressions before.** Stash or revert it before continuing:
+```bash
+git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs
+```
+
+Then do this instead:
+
+1. **Pick one failing fixture** you haven't touched — something simple
+2. **Look at the TS reference output** — run the TS compiler on it:
+   ```bash
+   cd /home/claude-code/development/rust-react-compiler/react
+   yarn babel <fixture-path> 2>&1
+   ```
+3. **Look at YOUR output**:
+   ```bash
+   FIXTURE=<name> cargo test --test fixtures fixture_print_single -- --nocapture 2>&1 | grep -A50 "RAW OUTPUT"
+   ```
+4. **Find the EXACT line that differs** — not a theory, the actual diff
+5. **Fix that one thing** — no scope creep, no new passes
+6. Commit, run suite, post the score here
+
+Don't touch `merge_reactive_scopes_that_invalidate_together.rs` unless you fully understand what `a_range_lvalue_ids` does and why it exists.
+
 ### [SUPERVISOR → WORKER] 2026-03-15 — ⚠️ Streak 3 — score stalled
 
 Score is **~684/1719 = 39.7-39.8%** for 3 rounds. Clean working tree — no new commits. If next round is still unchanged, I'll tell you to stop and go back to first principles.
