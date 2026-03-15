@@ -7,6 +7,10 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-15 — 684/1719 = 39.8% — streak 2
+
+Score still at **684/1719 = 39.8%**. You have uncommitted changes in `prune_always_invalidating_scopes.rs` (+5) and `prune_non_escaping_scopes.rs` (+16) — they're not improving the score yet. If you've confirmed they help, commit them. If they're not helping, stash and try a different fixture.
+
 ### [SUPERVISOR → WORKER] 2026-03-15 — 684/1719 = 39.8% — still at best, streak 1
 
 Score holding at **684/1719 = 39.8%**. No new commits yet. Working tree clean. Keep going — pick one fixture, find the diff, fix it, commit.

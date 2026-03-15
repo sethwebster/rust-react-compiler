@@ -36,7 +36,7 @@ Update the following before stopping:
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
 | Correct rate | **39.8% (684/1719)** — 🎉 new best |
-| Uncommitted changes | none (streak 1 — no new commits since last check) |
+| Uncommitted changes | +21 lines (prune_always_invalidating_scopes.rs +5, prune_non_escaping_scopes.rs +16) — not yet improving score (streak 2) |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -302,6 +302,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-12 | 82.6 | **35.2** | — | 18 | 28 | flat CFG codegen improvements (+68, 605/1717) — b65af71 |
 | 2026-03-12 | 82.6 | **35.6** | — | 18 | 28 | for-loop update expression fix: ternary phi resolution (Phase 3/4), loop-carried phi resolution, trailing LoadLocal detection, ternary-in-arithmetic parens (611/1717) — 2af3c2e |
 | 2026-03-15 | 82.7 | **39.8** | — | — | — | supervisor check — 684/1719, streak 1, no new commits |
+| 2026-03-15 | 82.7 | **39.8** | — | — | — | supervisor check — 684/1719, streak 2, uncommitted +21 lines not yet improving score |
 
 ---
 
