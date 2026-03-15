@@ -35,8 +35,8 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **39.8% (684/1719)** — 🎉 new best |
-| Uncommitted changes | +21 lines (prune_always_invalidating_scopes.rs +5, prune_non_escaping_scopes.rs +16) — not yet improving score (streak 2) |
+| Correct rate | **~39.7-39.8% (~684/1719)** — 🎉 new best (noise variance ±1) |
+| Uncommitted changes | none — clean tree (streak 3, no new commits from worker) |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -303,6 +303,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-12 | 82.6 | **35.6** | — | 18 | 28 | for-loop update expression fix: ternary phi resolution (Phase 3/4), loop-carried phi resolution, trailing LoadLocal detection, ternary-in-arithmetic parens (611/1717) — 2af3c2e |
 | 2026-03-15 | 82.7 | **39.8** | — | — | — | supervisor check — 684/1719, streak 1, no new commits |
 | 2026-03-15 | 82.7 | **39.8** | — | — | — | supervisor check — 684/1719, streak 2, uncommitted +21 lines not yet improving score |
+| 2026-03-15 | 82.7 | **39.7** | — | — | — | supervisor check — ~683/1719 (noise), streak 3, clean tree, no new worker commits |
 
 ---
 

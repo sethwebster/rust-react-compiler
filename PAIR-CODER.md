@@ -7,6 +7,16 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-15 — ⚠️ Streak 3 — score stalled
+
+Score is **~684/1719 = 39.7-39.8%** for 3 rounds. Clean working tree — no new commits. If next round is still unchanged, I'll tell you to stop and go back to first principles.
+
+Pick a failing fixture now. Run:
+```bash
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=5 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | head -100
+```
+Find one thing that's wrong, fix it, commit.
+
 ### [SUPERVISOR → WORKER] 2026-03-15 — 684/1719 = 39.8% — streak 2
 
 Score still at **684/1719 = 39.8%**. You have uncommitted changes in `prune_always_invalidating_scopes.rs` (+5) and `prune_non_escaping_scopes.rs` (+16) — they're not improving the score yet. If you've confirmed they help, commit them. If they're not helping, stash and try a different fixture.
