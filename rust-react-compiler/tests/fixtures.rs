@@ -157,7 +157,7 @@ fn normalize_js(js: &str) -> String {
             } else if tok == "(" && i + 1 < tokens.len() && tokens[i + 1].starts_with('<') {
                 // Check if preceded by `=` or `return`
                 let prev = if i > 0 { tokens[i - 1] } else { "" };
-                if prev == "=" || prev == "return" || prev == "," {
+                if prev == "=" || prev == "return" || prev == "," || prev == "=>" {
                     in_jsx_paren = true;
                     paren_start = i;
                     depth = 0;
