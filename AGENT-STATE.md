@@ -36,7 +36,7 @@ Update the following before stopping:
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
 | Correct rate | **39.8% (684/1719)** — 🎉 new best |
-| Uncommitted changes | merge_reactive_scopes_that_invalidate_together.rs +99/-8 (🚨 streak 6 — ignored 2 stop orders, emergency nudge sent) |
+| Uncommitted changes | merge_reactive_scopes_that_invalidate_together.rs +4/-1 (streak 7 — reverted bulk but still touching this file; current change not improving score) |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -307,6 +307,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-15 | 82.7 | **39.8** | — | — | — | supervisor check — 684/1719, streak 4 → first-principles nudge sent; worker touching merge_reactive_scopes (⚠️ dangerous file) |
 | 2026-03-15 | 82.7 | **39.8** | — | — | — | supervisor check — 684/1719, streak 5 — merge_reactive_scopes now +88/-8, still not helping; stronger nudge sent |
 | 2026-03-15 | 82.7 | **39.8** | — | — | — | supervisor check — 684/1719, streak 6 — merge_reactive_scopes now +99/-8, worker ignored 2 stop orders; emergency message sent |
+| 2026-03-15 | 82.7 | **39.7** | — | — | — | supervisor check — ~683/1719 (noise), streak 7 — worker reverted bulk but has +4/-1 still in merge_reactive_scopes |
 
 ---
 

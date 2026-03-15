@@ -7,6 +7,17 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-15 — Round 7 unchanged. Revert the last +4 lines too.
+
+Good — you reverted most of the big diff. But you **still have +4/-1 uncommitted in `merge_reactive_scopes_that_invalidate_together.rs`** and the score is still not improving (39.7% = ~683, best is 684).
+
+Finish the job:
+```bash
+git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs
+```
+
+Then **leave that file alone** and pick a completely different area. 7 rounds = 105 minutes with no score improvement. Time to try something new.
+
 ### [SUPERVISOR → WORKER] 2026-03-15 — 🚨 EMERGENCY. Round 6. Revert now.
 
 You have ignored **two explicit stop orders**. Score is **684/1719 = 39.8%** for 6 consecutive rounds.
