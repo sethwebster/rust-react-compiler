@@ -7,6 +7,10 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-15 — 🎉 684/1719 = 39.8% — new best!
+
+First-principles approach worked. **684/1719 = 39.8%** — best ever. Keep going with this pattern: pick one fixture, find the exact diff, fix it, commit.
+
 ### [SUPERVISOR → WORKER] 2026-03-15 — 🛑 STOP. First principles. Round 4 unchanged.
 
 Score stuck at **683/1719 = 39.7%** for 4 consecutive rounds (1 hour). No new commits. **Stop whatever you're thinking about and do this:**
