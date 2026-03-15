@@ -4135,15 +4135,31 @@ impl<'a> Codegen<'a> {
                     // SSA-renamed version.
                     let fall_test_id = match &fall_block.terminal {
                         Terminal::Branch { test: fall_test, logical_op: None, .. } => {
-                            Some(fall_test.identifier.0)
+                            // Only map the fall test if it's a temp (not a named user variable).
+                            // If fall_test is a named variable (e.g. `a` in `return a ? b : c`
+                            // after `b`'s logical chain resolves), mapping it here would
+                            // incorrectly overwrite `a`'s meaning with `b`'s expression.
+                            let name = self.ident_name(fall_test.identifier);
+                            if name.starts_with("$t") || name.starts_with("$T") {
+                                Some(fall_test.identifier.0)
+                            } else {
+                                None
+                            }
                         }
                         Terminal::If { test: fall_test, .. } => {
-                            Some(fall_test.identifier.0)
+                            let name = self.ident_name(fall_test.identifier);
+                            if name.starts_with("$t") || name.starts_with("$T") {
+                                Some(fall_test.identifier.0)
+                            } else {
+                                None
+                            }
                         }
                         _ => None,
                     };
                     if let Some(ft_id) = fall_test_id {
-                        if ft_id != phi.place.identifier.0 {
+                        if ft_id != phi.place.identifier.0
+                            && !self.inlined_exprs.contains_key(&ft_id)
+                        {
                             logical_phi_ids.insert(ft_id);
                             self.inlined_exprs.insert(ft_id, combined);
                         }
