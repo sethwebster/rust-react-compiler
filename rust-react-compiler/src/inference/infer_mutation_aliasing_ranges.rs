@@ -692,7 +692,16 @@ pub fn infer_mutation_aliasing_ranges(
                         .get(&callee.identifier)
                         .map(|n| is_hook_name(n))
                         .unwrap_or(false);
-                    if !is_hook {
+                    // Known primitive-returning builtins (Boolean, String, Number, etc.)
+                    // only READ their arguments — they never mutate them. Skip
+                    // mutable-range extension to prevent spurious scope expansion that
+                    // would cause the call to be included inside the preceding scope,
+                    // making it invisible to the gap check in merge_adjacent.
+                    let is_primitive_builtin = global_name_of
+                        .get(&callee.identifier)
+                        .map(|n| is_primitive_returning_builtin_call(n))
+                        .unwrap_or(false);
+                    if !is_hook && !is_primitive_builtin {
                         // Function calls may mutate their arguments (conservative).
                         for arg in args {
                             let arg_id = match arg {
@@ -930,4 +939,17 @@ fn is_hook_name(name: &str) -> bool {
     name.starts_with("use")
         && name.len() > 3
         && name[3..].starts_with(|c: char| c.is_uppercase())
+}
+
+/// Returns true for global functions that only READ their arguments and return a primitive.
+/// These cannot mutate their arguments, so we should not extend the argument's mutable range.
+fn is_primitive_returning_builtin_call(name: &str) -> bool {
+    matches!(
+        name,
+        "Boolean" | "String" | "Number"
+            | "parseInt" | "parseFloat"
+            | "isNaN" | "isFinite"
+            | "encodeURI" | "encodeURIComponent"
+            | "decodeURI" | "decodeURIComponent"
+    )
 }
