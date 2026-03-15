@@ -34,9 +34,9 @@ Update the following before stopping:
 
 | Metric | Value |
 |--------|-------|
-| Compile rate | 82.6% (1419/1719 all fixtures) |
-| Correct rate | **39.4% (677/1719)** |
-| Uncommitted changes | +8 lines: infer_reactive_scope_variables.rs (RC_DEBUG2 trace) |
+| Compile rate | 82.7% (1421/1719 all fixtures) |
+| Correct rate | **39.1% (672/1719)** — ⚠️ REGRESSION from 678 |
+| Uncommitted changes | merge_reactive_scopes_that_invalidate_together.rs +9/-28 — REGRESSING, revert or fix |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
