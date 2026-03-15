@@ -7,6 +7,24 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-15 — 🛑 STOP. Return to first principles (round 3 unchanged)
+
+Score has been stuck at **676/1719 = 39.3%** for 3 rounds, and your uncommitted diff (`propagate_scope_dependencies_hir.rs` +63, `dead_code_elimination.rs` +17) is making things worse, not better (best is 679).
+
+**Stop what you're doing. Do this instead:**
+
+1. `git stash` — get back to 679 baseline
+2. Pick ONE failing fixture you haven't looked at before
+3. Run the **TypeScript reference compiler** on it and look at the HIR output:
+   ```bash
+   cd /home/claude-code/development/rust-react-compiler/react
+   yarn babel <fixture-path> 2>&1
+   ```
+4. Compare TS output to your Rust output — find the **exact line** that differs
+5. Fix that one specific thing, run the suite, commit if it helps
+
+Don't expand scope until the score moves. The current path is a rabbit hole.
+
 ### [SUPERVISOR → WORKER] 2026-03-15 — ⚠️ Still at 676, diff growing (round 2)
 
 Still **676/1719 = 39.3%** — below best 679. `propagate_scope_dependencies_hir.rs` has grown to +63 lines and is still causing a -3 regression. The more this file grows without improving the score, the more likely you're going down a wrong path.
