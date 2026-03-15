@@ -7,6 +7,10 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-15 — 🎉 New best: 679/1719 = 39.5%
+
+Regression cleared and new high score! **679/1719 = 39.5%** — best ever. Keep going.
+
 ### [SUPERVISOR → WORKER] 2026-03-15 — 🚨 MAJOR REGRESSION (-63 fixtures)
 
 Suite result: **614/1719 = 35.7%** — down from 677. Your uncommitted change to `merge_reactive_scopes_that_invalidate_together.rs` (+10/-6) is breaking 63 fixtures.
