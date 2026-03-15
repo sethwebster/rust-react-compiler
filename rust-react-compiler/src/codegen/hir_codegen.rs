@@ -249,6 +249,9 @@ struct ScopeOutputItem {
     out_kw: &'static str,
     /// True if the variable is the cache var (named-var approach); false for temp approach.
     is_named_var: bool,
+    /// True if this output comes from a Reassign StoreLocal (variable declared before scope).
+    /// Used to order cache slots: non-reassign declarations first, sentinel second, reassigns last.
+    is_reassign: bool,
 }
 
 /// Complete analysis of a scope's outputs, intra-scope variables, and whether
@@ -2447,7 +2450,7 @@ impl<'a> Codegen<'a> {
         for output in &mut analysis.outputs {
             if output.is_named_var {
                 if let Some(ref name) = output.out_name {
-                    if declared_names.contains(name) {
+                    if declared_names.contains(name.as_str()) {
                         // Find the StoreLocal that writes to this name to get skip_idx and cache_expr.
                         let found = instrs.iter().enumerate().find(|(_, instr)| {
                             if let InstructionValue::StoreLocal { lvalue, .. } = &instr.value {
@@ -2836,23 +2839,31 @@ impl<'a> Codegen<'a> {
             for ((_, dep_str), &slot) in hoisted_dep_info.iter().zip(&dep_slot_list) {
                 let _ = writeln!(out, "{body_pad}$[{slot}] = {dep_str};");
             }
-            // Regular output cache stores first, sentinel last.
-            let n_regular_slots = out_slot_list.len().saturating_sub(sentinel_slot_count);
-            for (cache_var, &slot) in output_cache_vars.iter().zip(out_slot_list.iter().take(n_regular_slots)) {
-                let _ = writeln!(out, "{body_pad}$[{slot}] = {cache_var};");
-            }
-            // Sentinel cache store at out_slot_list.last().
-            if let Some((ref sv, &slot)) = sentinel_var_opt.as_ref().zip(out_slot_list.last()) {
-                let _ = writeln!(out, "{body_pad}$[{slot}] = {sv};");
-            }
-            let _ = writeln!(out, "{pad}}} else {{");
-            // Regular output cache loads first, sentinel last.
-            for (cache_var, &slot) in output_cache_vars.iter().zip(out_slot_list.iter().take(n_regular_slots)) {
-                let _ = writeln!(out, "{body_pad}{cache_var} = $[{slot}];");
-            }
-            // Sentinel cache load.
-            if let Some((ref sv, &slot)) = sentinel_var_opt.as_ref().zip(out_slot_list.last()) {
-                let _ = writeln!(out, "{body_pad}{sv} = $[{slot}];");
+            // Order: non-reassign declarations first, sentinel second, reassignments last.
+            // This matches the TS compiler's cache slot ordering.
+            {
+                let mut slot_it = out_slot_list.iter().copied();
+                let mut ordered: Vec<(String, usize)> = Vec::new();
+                if sentinel_var_opt.is_some() {
+                    for (v, o) in output_cache_vars.iter().zip(analysis.outputs.iter()) {
+                        if !o.is_reassign { if let Some(s) = slot_it.next() { ordered.push((v.clone(), s)); } }
+                    }
+                    if let Some(ref sv) = sentinel_var_opt {
+                        if let Some(s) = slot_it.next() { ordered.push((sv.clone(), s)); }
+                    }
+                    for (v, o) in output_cache_vars.iter().zip(analysis.outputs.iter()) {
+                        if o.is_reassign { if let Some(s) = slot_it.next() { ordered.push((v.clone(), s)); } }
+                    }
+                } else {
+                    for (v, s) in output_cache_vars.iter().zip(slot_it) { ordered.push((v.clone(), s)); }
+                }
+                for (cache_var, slot) in &ordered {
+                    let _ = writeln!(out, "{body_pad}$[{slot}] = {cache_var};");
+                }
+                let _ = writeln!(out, "{pad}}} else {{");
+                for (cache_var, slot) in &ordered {
+                    let _ = writeln!(out, "{body_pad}{cache_var} = $[{slot}];");
+                }
             }
             let _ = writeln!(out, "{pad}}}");
             for (output, cache_var) in analysis.outputs.iter().zip(&output_cache_vars) {
@@ -4687,6 +4698,7 @@ impl<'a> Codegen<'a> {
                     .filter(|(i, _, _, intra)| *intra && *i != *esc_idx)
                     .map(|(i, _, _, _)| *i)
                     .collect();
+                let esc_is_reassign = esc_lvalue_kind.map(|k| matches!(k, InstructionKind::Reassign)).unwrap_or(false);
                 let output = if is_let_kind || used_after || captured_and_called {
                     ScopeOutputItem {
                         skip_idx: None,
@@ -4694,6 +4706,7 @@ impl<'a> Codegen<'a> {
                         out_name: esc_name.clone(),
                         out_kw: "let",
                         is_named_var: true,
+                        is_reassign: esc_is_reassign,
                     }
                 } else {
                     ScopeOutputItem {
@@ -4702,6 +4715,7 @@ impl<'a> Codegen<'a> {
                         out_name: esc_name.clone(),
                         out_kw: "const",
                         is_named_var: false,
+                        is_reassign: esc_is_reassign,
                     }
                 };
                 return ScopeOutput { outputs: vec![output], intra_scope_stores: esc_intra, terminal_place_id: None, terminal_type_cast_annotation: None, post_scope_destructure_idx: None };
@@ -4728,6 +4742,7 @@ impl<'a> Codegen<'a> {
                         out_name: Some(named_var),
                         out_kw: "let",
                         is_named_var: true,
+                        is_reassign: false,
                     }],
                     intra_scope_stores,
                     terminal_place_id: Some(feed_id),
@@ -4763,7 +4778,8 @@ impl<'a> Codegen<'a> {
                     out_name: None,
                     out_kw: "const",
                     is_named_var: false,
-                }],
+                        is_reassign: false,
+                    }],
                 intra_scope_stores,
                 terminal_place_id: Some(feed_id),
                 terminal_type_cast_annotation: type_cast_ann,
@@ -4859,6 +4875,7 @@ impl<'a> Codegen<'a> {
                         }
                     })
                 }).unwrap_or(false);
+                let is_reassign = lvalue_kind.map(|k| matches!(k, InstructionKind::Reassign)).unwrap_or(false);
                 let is_named_var = is_let_kind || used_after || captured_and_called;
                 if std::env::var("RC_DEBUG").is_ok() {
                     eprintln!("[analyze_scope] StoreLocal idx={} name={:?} used_after={} is_let_kind={} is_named_var={} instrs.len()={}",
@@ -4871,6 +4888,7 @@ impl<'a> Codegen<'a> {
                         out_name: name.clone(),
                         out_kw: "let",
                         is_named_var: true,
+                        is_reassign,
                     });
                 } else {
                     outputs.push(ScopeOutputItem {
@@ -4879,6 +4897,7 @@ impl<'a> Codegen<'a> {
                         out_name: name.clone(),
                         out_kw: "const",
                         is_named_var: false,
+                        is_reassign,
                     });
                 }
             }
@@ -4939,7 +4958,8 @@ impl<'a> Codegen<'a> {
                 out_name: None,
                 out_kw: "const",
                 is_named_var: false,
-            });
+                        is_reassign: false,
+                    });
         }
         if !multi_outputs.is_empty() {
             return ScopeOutput {
@@ -4976,6 +4996,7 @@ impl<'a> Codegen<'a> {
                         out_name: None,
                         out_kw: "const",
                         is_named_var: false,
+                        is_reassign: false,
                     }],
                     intra_scope_stores,
                     terminal_place_id: None,
@@ -5006,7 +5027,8 @@ impl<'a> Codegen<'a> {
                     out_name: None,
                     out_kw: "const",
                     is_named_var: false,
-                }],
+                        is_reassign: false,
+                    }],
                 intra_scope_stores,
                 terminal_place_id: None,
                 terminal_type_cast_annotation: None,
@@ -5038,6 +5060,7 @@ impl<'a> Codegen<'a> {
                         out_name: None,
                         out_kw: "const",
                         is_named_var: false,
+                        is_reassign: false,
                     }],
                     intra_scope_stores,
                     terminal_place_id: None,
@@ -5059,7 +5082,8 @@ impl<'a> Codegen<'a> {
                     out_name: None,
                     out_kw: "const",
                     is_named_var: false,
-                }],
+                        is_reassign: false,
+                    }],
                 intra_scope_stores,
                 terminal_place_id: None,
                 terminal_type_cast_annotation: None,
@@ -5074,7 +5098,8 @@ impl<'a> Codegen<'a> {
                 out_name: None,
                 out_kw: "const",
                 is_named_var: false,
-            }],
+                        is_reassign: false,
+                    }],
             intra_scope_stores,
             terminal_place_id: None,
             terminal_type_cast_annotation: None,
@@ -5367,11 +5392,10 @@ impl<'a> Codegen<'a> {
                     let value_has_scope = self.env.get_identifier(value.identifier)
                         .and_then(|i| i.scope).is_some();
                     if !value_has_scope {
-                        let place_id = lvalue.place.identifier;
-                        let in_reassignments = self.env.scopes.values()
-                            .any(|scope| scope.reassignments.contains(&place_id));
-                        if in_reassignments {
-                            return None;
+                        if let Some(ref n) = name {
+                            if scope_out_names.contains(n) {
+                                return None;
+                            }
                         }
                     }
                 }
