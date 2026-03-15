@@ -273,16 +273,21 @@ pub fn run_with_env(hir: &mut HIRFunction, env: &mut Environment) {
                                             if !a_decl_ids.contains(&instr.lvalue.identifier) {
                                                 cur.lvalues.insert(instr.lvalue.identifier);
                                             }
-                                            if let InstructionValue::StoreLocal { lvalue, .. } =
+                                            if let InstructionValue::StoreLocal { lvalue, value, .. } =
                                                 &instr.value
                                             {
-                                                // Always track the named binding (lvalue.place)
-                                                // in cur.lvalues so areLValuesLastUsedByScope can
-                                                // check whether it is last-used within scope B.
-                                                // TS's eachInstructionLValue adds ALL lvalues
-                                                // unconditionally — do not skip based on where
-                                                // the stored value came from.
-                                                if !a_decl_ids.contains(&lvalue.place.identifier) {
+                                                // Skip the named binding when it's a scope A output
+                                                // extraction: `const x = $t_scope_a_output`.
+                                                // In the TS reactive tree, such StoreLocals live
+                                                // INSIDE scope A's node (not in the gap), so TS
+                                                // never counts them as gap lvalues.
+                                                // We identify these by checking if the stored value
+                                                // was declared by scope A (a_decl_ids) or produced
+                                                // within scope A's instruction range (a_range_lvalue_ids).
+                                                let value_from_a =
+                                                    a_decl_ids.contains(&value.identifier)
+                                                    || a_range_lvalue_ids.contains(&value.identifier);
+                                                if !value_from_a && !a_decl_ids.contains(&lvalue.place.identifier) {
                                                     cur.lvalues.insert(lvalue.place.identifier);
                                                 }
                                             }

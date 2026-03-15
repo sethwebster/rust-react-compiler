@@ -1569,34 +1569,37 @@ impl<'a> Codegen<'a> {
                     }
 
                     // Normal while loop (no scope wrapping).
-                    // Mark test block as visited so the recursive body walk doesn't re-enter it.
-                    visited.insert(test_bid);
-                    // Collect test expression from the Branch terminal of the test block.
-                    let test_expr = self.hir.body.blocks.get(&test_bid).and_then(|b| {
-                        if let Terminal::Branch { test, .. } = &b.terminal {
-                            Some(self.expr(test))
-                        } else {
-                            None
-                        }
-                    }).unwrap_or_else(|| "true".to_string());
-                    // Also emit any instructions in the test block (condition computations).
-                    let test_block_instrs = self.hir.body.blocks.get(&test_bid)
-                        .map(|b| b.instructions.clone())
-                        .unwrap_or_default();
-                    for instr in &test_block_instrs {
-                        if inlined_ids.contains(&instr.lvalue.identifier.0) { continue; }
-                        // Skip test-expression instructions — they're inlined into the while condition.
-                        if self.inlined_exprs.contains_key(&instr.lvalue.identifier.0) { continue; }
-                        if let Some(s) = self.emit_stmt(instr, None, &[]) {
-                            for line in s.lines() {
-                                let _ = writeln!(out, "{pad}{}", line);
-                            }
+                    // Use do_while_test_expr to handle logical-chain conditions (&&/||).
+                    // The While.test block may itself be a logical-op branch; follow the
+                    // chain to the final Branch with the resolved phi result.
+                    let test_expr = if self.hir.body.blocks.get(&test_bid)
+                        .map(|b| matches!(&b.terminal, Terminal::Branch { .. }))
+                        .unwrap_or(false)
+                    {
+                        self.do_while_test_expr(test_bid)
+                    } else {
+                        "true".to_string()
+                    };
+                    // Mark test block and entire logical chain as visited so the
+                    // recursive body walk doesn't re-enter them. This mirrors the
+                    // for-loop handling.
+                    {
+                        let mut tb = test_bid;
+                        for _ in 0..32 {
+                            visited.insert(tb);
+                            let next = self.hir.body.blocks.get(&tb).and_then(|b| {
+                                if let Terminal::Branch { fallthrough, logical_op: Some(_), .. } = &b.terminal {
+                                    Some(*fallthrough)
+                                } else {
+                                    None
+                                }
+                            });
+                            match next { Some(n) => tb = n, None => break }
                         }
                     }
                     let _ = writeln!(out, "{pad}while ({test_expr}) {{");
                     let body_pad = indent + 1;
                     let mut vis2 = visited.clone();
-                    vis2.insert(test_bid);
                     self.emit_cfg_region(
                         loop_bid, Some(test_bid), body_pad, out,
                         &mut vis2, emitted_scopes, scope_index, instr_scope, inlined_ids, scope_instrs,
@@ -2742,6 +2745,16 @@ impl<'a> Codegen<'a> {
                             let val_expr = self.expr(value);
                             // Skip self-assignments (e.g. `const _temp = _temp` from outlined fns).
                             if n == val_expr {
+                                continue;
+                            }
+                            // Skip pre-scope null/undefined init: Let-kind StoreLocal for a named
+                            // scope output with a null/undefined primitive value. e.g. `let s = null;`
+                            // before a scope that reassigns `s = {}` inside. The scope output mechanism
+                            // handles `let s;` and `s = $[N];`, so this init is redundant.
+                            if matches!(lvalue.kind, InstructionKind::Let | InstructionKind::HoistedLet)
+                                && all_out_names.contains(&n)
+                                && (val_expr == "null" || val_expr == "undefined")
+                            {
                                 continue;
                             }
                             let stmt = if all_out_names.contains(&n) {
@@ -3959,11 +3972,21 @@ impl<'a> Codegen<'a> {
                     // Also map any use of the pre-SSA phi result to the combined expression.
                     // Because enter_ssa doesn't rename pre-existing phi results, the terminal
                     // that uses the phi result may have a different SSA id from phi.place.identifier.
-                    // Specifically, the fallthrough block's Branch.test is the SSA-renamed version.
-                    if let Terminal::Branch { test: fall_test, logical_op: None, .. } = &fall_block.terminal {
-                        if fall_test.identifier.0 != phi.place.identifier.0 {
-                            logical_phi_ids.insert(fall_test.identifier.0);
-                            self.inlined_exprs.insert(fall_test.identifier.0, combined);
+                    // Specifically, the fallthrough block's Branch.test or If.test is the
+                    // SSA-renamed version.
+                    let fall_test_id = match &fall_block.terminal {
+                        Terminal::Branch { test: fall_test, logical_op: None, .. } => {
+                            Some(fall_test.identifier.0)
+                        }
+                        Terminal::If { test: fall_test, .. } => {
+                            Some(fall_test.identifier.0)
+                        }
+                        _ => None,
+                    };
+                    if let Some(ft_id) = fall_test_id {
+                        if ft_id != phi.place.identifier.0 {
+                            logical_phi_ids.insert(ft_id);
+                            self.inlined_exprs.insert(ft_id, combined);
                         }
                     }
                     added_this_round += 1;
@@ -4082,6 +4105,42 @@ impl<'a> Codegen<'a> {
             }
             if !changed {
                 break;
+            }
+        }
+
+        // Mark instructions from logical-op Branch blocks as inlined.
+        // When a block ends with `Branch { logical_op: Some(_) }`, all its instructions
+        // are logically part of the compound condition (e.g. `A && B`). They should
+        // not be emitted as standalone statements; instead they're embedded via the
+        // inlined_exprs for the phi result.
+        //
+        // We only suppress instructions that are pure expressions (inlinable via
+        // try_inline_instr). This avoids suppressing side-effecting instructions
+        // that happen to live in the same block.
+        let logical_branch_block_ids: Vec<crate::hir::hir::BlockId> =
+            self.hir.body.blocks.iter()
+                .filter_map(|(&bid, block)| {
+                    if matches!(&block.terminal, Terminal::Branch { logical_op: Some(_), .. }) {
+                        Some(bid)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+        for bid in logical_branch_block_ids {
+            let block = match self.hir.body.blocks.get(&bid) {
+                Some(b) => b,
+                None => continue,
+            };
+            let instrs = block.instructions.clone();
+            for instr in &instrs {
+                let id = instr.lvalue.identifier.0;
+                if self.inlined_exprs.contains_key(&id) { continue; }
+                // Only inline if we can compute the expression without side effects.
+                if let Some(expr) = self.try_inline_instr(instr) {
+                    self.inlined_exprs.insert(id, expr);
+                }
             }
         }
     }
@@ -5391,9 +5450,16 @@ impl<'a> Codegen<'a> {
                 if matches!(lvalue.kind, InstructionKind::Let | InstructionKind::HoistedLet) {
                     let value_has_scope = self.env.get_identifier(value.identifier)
                         .and_then(|i| i.scope).is_some();
-                    if !value_has_scope {
+                    if std::env::var("RC_DEBUG").is_ok() {
+                        eprintln!("[emit_stmt Let] name={:?} val_expr={:?} value_has_scope={} active_er={:?} scope_out_names={:?}",
+                            name, val_expr, value_has_scope, self.active_early_return, scope_out_names);
+                    }
+                    if !value_has_scope && self.active_early_return.is_some() {
                         if let Some(ref n) = name {
                             if scope_out_names.contains(n) {
+                                if std::env::var("RC_DEBUG").is_ok() {
+                                    eprintln!("[emit_stmt Let] RETURNING NONE for {:?}", n);
+                                }
                                 return None;
                             }
                         }
