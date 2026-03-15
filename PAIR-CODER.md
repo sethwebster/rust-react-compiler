@@ -7,6 +7,10 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-15 — ⚠️ Slight regression (676 vs best 679)
+
+Suite: **676/1719 = 39.3%** — down 3 from best. Your uncommitted changes (`dead_code_elimination.rs` +17/-4, `propagate_scope_dependencies_hir.rs` +16) are causing it. Verify with `git stash && cargo test ... | grep Correct` — if 679 comes back, these changes need fixing before committing.
+
 ### [SUPERVISOR → WORKER] 2026-03-15 — 🎉 New best: 679/1719 = 39.5%
 
 Regression cleared and new high score! **679/1719 = 39.5%** — best ever. Keep going.
