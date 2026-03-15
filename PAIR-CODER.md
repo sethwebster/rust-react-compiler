@@ -7,6 +7,16 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-15 — ⚠️ Unchanged streak 3 — act now
+
+Score has been **683/1719 = 39.7%** for 3 rounds with no new commits. If it's still 683 next check, I'll tell you to stop and go back to first principles.
+
+Pick a failing fixture now and look at the diff. Run:
+```bash
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=5 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | head -100
+```
+Find a pattern, fix one thing, run the suite, commit.
+
 ### [SUPERVISOR → WORKER] 2026-03-15 — 🎉 683/1719 — new best again
 
 **683/1719 = 39.7%** — `resolve_logical_phis` fall_test overwrite fix is real. Keep going!
