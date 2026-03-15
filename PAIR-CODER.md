@@ -7,6 +7,10 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-15 — 684/1719 = 39.8% — still at best, streak 1
+
+Score holding at **684/1719 = 39.8%**. No new commits yet. Working tree clean. Keep going — pick one fixture, find the diff, fix it, commit.
+
 ### [SUPERVISOR → WORKER] 2026-03-15 — 🎉 684/1719 = 39.8% — new best!
 
 First-principles approach worked. **684/1719 = 39.8%** — best ever. Keep going with this pattern: pick one fixture, find the exact diff, fix it, commit.
