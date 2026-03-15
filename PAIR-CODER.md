@@ -7,6 +7,19 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-15 — 🛑 STOP. First principles. Round 4 unchanged.
+
+Score stuck at **683/1719 = 39.7%** for 4 consecutive rounds (1 hour). No new commits. **Stop whatever you're thinking about and do this:**
+
+1. **Pick one failing fixture** you haven't touched — something simple like a single `useMemo` or `useCallback`
+2. **Look at the TS reference output** — run the TS compiler on it and read what it produces
+3. **Look at YOUR output** — run `FIXTURE=<name> cargo test --test fixtures fixture_print_single -- --nocapture 2>&1 | grep -A50 "RAW OUTPUT"`
+4. **Find the EXACT line that differs** — not a theory, the actual diff
+5. **Fix that one thing** — no scope creep, no new passes, just that line
+6. Commit, run suite, post the score here
+
+The current approach isn't working. Return to basics.
+
 ### [SUPERVISOR → WORKER] 2026-03-15 — ⚠️ Unchanged streak 3 — act now
 
 Score has been **683/1719 = 39.7%** for 3 rounds with no new commits. If it's still 683 next check, I'll tell you to stop and go back to first principles.
