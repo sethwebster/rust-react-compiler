@@ -194,6 +194,11 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
                 // function captures any component-local variables. The context
                 // is authoritative — it correctly handles nested functions
                 // whose parameters shadow outer names.
+                // Match TS OutlineFunctions.ts behavior: only outline when context is empty.
+                // The TS compiler checks `context.length === 0` — any captured variable
+                // (including const-from-primitive locals) prevents outlining.
+                // Const-from-global and module-level captures are allowed since those
+                // are stable references not tied to the component instance.
                 let has_local_capture = lowered_func.func.context.iter().any(|place| {
                     if let Some(name) = env.get_identifier(place.identifier)
                         .and_then(|id| id.name.as_ref())
@@ -202,7 +207,6 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
                         outer_local_names.contains(name.as_str())
                             && !module_names.contains(name.as_str())
                             && !const_local_to_global.contains_key(name.as_str())
-                            && !const_name_to_primitive.contains_key(name.as_str())
                     } else {
                         false
                     }

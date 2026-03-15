@@ -3141,10 +3141,11 @@ impl<'a> Codegen<'a> {
                 // in complex inlined expressions like "useState({})" → "useState(t0)".
                 // This handles cases where the scope output's expression was inlined into
                 // a consumer's inlined_exprs entry before scope emission renamed it.
+                // Note: don't break — a single value may need multiple substitutions
+                // (e.g., "[{}, [], props.value]" needs both {} → t0 and [] → t1).
                 for (old_name, new_name) in &old_to_new {
                     if !old_name.starts_with("$t") && value.contains(old_name.as_str()) {
                         *value = value.replace(old_name.as_str(), new_name.as_str());
-                        break;
                     }
                 }
             }
