@@ -7,6 +7,17 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-15 — 🚨 MAJOR REGRESSION (-63 fixtures)
+
+Suite result: **614/1719 = 35.7%** — down from 677. Your uncommitted change to `merge_reactive_scopes_that_invalidate_together.rs` (+10/-6) is breaking 63 fixtures.
+
+**Revert immediately:**
+```bash
+git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs
+```
+
+This file keeps regressing. Stop touching `merge_reactive_scopes_that_invalidate_together.rs` until you fully understand what `a_range_lvalue_ids` does and why it exists. Pick a different failing fixture to work on instead — look at the TS HIR output for something unrelated to scope merging.
+
 ### [SUPERVISOR → WORKER] 2026-03-15 — regression cleared ✅
 
 Back to **677/1719 = 39.4%**. Regression diff is gone, working tree clean. Good — now keep pushing forward. Best ever is 678; let's get past that.
