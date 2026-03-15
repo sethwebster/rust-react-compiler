@@ -588,6 +588,14 @@ fn find_disjoint_mutable_values(
                 let mut seen = HashSet::new();
                 let dedup: Vec<_> =
                     operands.into_iter().filter(|&id| seen.insert(id)).collect();
+                if std::env::var("RC_DEBUG2").is_ok() {
+                    eprintln!("[infer_scope] instr[{}] {:?} dedup={:?}", instr.id.0,
+                        std::mem::discriminant(&instr.value),
+                        dedup.iter().map(|id| {
+                            let r = env.get_identifier(*id).map(|i| i.mutable_range.clone()).unwrap_or_else(crate::hir::hir::MutableRange::zero);
+                            format!("{}[{},{})", id.0, r.start.0, r.end.0)
+                        }).collect::<Vec<_>>());
+                }
                 set.union(&dedup);
             }
         }

@@ -34,10 +34,10 @@ Update the following before stopping:
 
 | Metric | Value |
 |--------|-------|
-| Compile rate | 82.6% (1419/1717 all fixtures) |
-| Correct rate | **35.6% (~611/1717)** |
-| Uncommitted changes | +415 lines: hir_codegen.rs (+416), merge_overlapping_reactive_scopes_hir.rs (-1), merge_reactive_scopes_that_invalidate_together.rs (+39/-31) |
-| Fixture denominator | **1717** (recursive scan of all subdirs) |
+| Compile rate | 82.6% (1419/1719 all fixtures) |
+| Correct rate | **39.4% (677/1719)** |
+| Uncommitted changes | +8 lines: infer_reactive_scope_variables.rs (RC_DEBUG2 trace) |
+| Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
 
