@@ -40,11 +40,136 @@ pub fn dead_code_elimination_with_env(hir: &mut HIRFunction, env: Option<&Enviro
         let before_instrs: usize = hir.body.blocks.values().map(|b| b.instructions.len()).sum();
         let before_phis: usize = hir.body.blocks.values().map(|b| b.phis.len()).sum();
         remove_dead_phis(hir);
+        eliminate_shadowed_stores(hir);
         remove_dead_instructions(hir, env);
         let after_instrs: usize = hir.body.blocks.values().map(|b| b.instructions.len()).sum();
         let after_phis: usize = hir.body.blocks.values().map(|b| b.phis.len()).sum();
         if after_instrs == before_instrs && after_phis == before_phis {
             break;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pass: eliminate intra-block shadowed StoreLocals
+// ---------------------------------------------------------------------------
+
+/// Remove StoreLocal instructions that are immediately overwritten in the same
+/// block before the variable is loaded.  Pattern: `x = <pure>; x = <any>` where
+/// no LoadLocal of `x` occurs between the two stores.
+///
+/// Because DCE runs in a convergence loop, removing the first StoreLocal will
+/// cause the pure expression instruction (e.g. `t0 = {}`) to also be pruned in
+/// the following `remove_dead_instructions` pass.
+fn eliminate_shadowed_stores(hir: &mut HIRFunction) {
+    for block in hir.body.blocks.values_mut() {
+        // Build a map: IdentifierId -> pure (bool) for each instruction in this block.
+        // "pure" means the instruction has no side effects besides producing the value.
+        let mut id_is_pure: HashMap<IdentifierId, bool> = HashMap::new();
+        for instr in &block.instructions {
+            let pure = !has_side_effects(&instr.value);
+            id_is_pure.insert(instr.lvalue.identifier, pure);
+        }
+
+        // After SSA, StoreLocal.lvalue.place.identifier is the pre-SSA variable id
+        // (same for all stores to `x`), while StoreLocal's outer lvalue (instr.lvalue)
+        // is the SSA temp that the instruction result is assigned to.
+        // LoadLocal.place.identifier is the SSA id of the variable being loaded —
+        // it matches instr.lvalue.identifier of a prior StoreLocal, NOT lvalue.place.identifier.
+        //
+        // Build a map: SSA id (instr.lvalue.identifier) -> pre-SSA var id (lvalue.place.identifier)
+        // so we can translate LoadLocal SSA ids back to the pre-SSA variable space.
+        let mut ssa_to_var: HashMap<IdentifierId, IdentifierId> = HashMap::new();
+        for instr in &block.instructions {
+            if let InstructionValue::StoreLocal { lvalue, .. } = &instr.value {
+                ssa_to_var.insert(instr.lvalue.identifier, lvalue.place.identifier);
+            }
+        }
+
+        // For each named variable (tracked by lvalue.place.identifier of StoreLocal),
+        // record the index of the last StoreLocal that hasn't been "consumed" by a load yet.
+        // If we see another StoreLocal before a load, the previous one may be a dead write.
+        let mut last_store: HashMap<IdentifierId, usize> = HashMap::new(); // pre-SSA var_id -> instr index
+        let mut dead_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+        for (idx, instr) in block.instructions.iter().enumerate() {
+            match &instr.value {
+                InstructionValue::StoreLocal { lvalue, value, .. } => {
+                    let var_id = lvalue.place.identifier;
+                    if let Some(prev_idx) = last_store.get(&var_id).copied() {
+                        // There's a previous unread store to this variable.
+                        // Only eliminate if:
+                        //   1. The previous store is kind=Reassign (not the initial Let/Const).
+                        //      The TS compiler preserves initial `let y = {}` assignments for
+                        //      mutation analysis context, even when immediately overwritten.
+                        //   2. The previous store's value is pure (no side effects).
+                        let prev_instr = &block.instructions[prev_idx];
+                        if let InstructionValue::StoreLocal { lvalue: prev_lvalue, value: prev_value, .. } = &prev_instr.value {
+                            let is_reassign = prev_lvalue.kind == InstructionKind::Reassign;
+                            let prev_val_pure = id_is_pure.get(&prev_value.identifier).copied().unwrap_or(false);
+                            if is_reassign && prev_val_pure {
+                                dead_indices.insert(prev_idx);
+                            }
+                        }
+                    }
+                    last_store.insert(var_id, idx);
+                }
+                InstructionValue::LoadLocal { place, .. } => {
+                    // Translate SSA id to pre-SSA variable id to match last_store keys.
+                    if let Some(&var_id) = ssa_to_var.get(&place.identifier) {
+                        last_store.remove(&var_id);
+                    }
+                    // Also try direct lookup in case the identifier is already pre-SSA.
+                    last_store.remove(&place.identifier);
+                }
+                InstructionValue::PostfixUpdate { value, .. }
+                | InstructionValue::PrefixUpdate { value, .. } => {
+                    // PostfixUpdate/PrefixUpdate implicitly reads the variable (value field).
+                    // Clear any pending "unread store" for this variable.
+                    if let Some(&var_id) = ssa_to_var.get(&value.identifier) {
+                        last_store.remove(&var_id);
+                    }
+                    last_store.remove(&value.identifier);
+                }
+                InstructionValue::FunctionExpression { lowered_func, .. }
+                | InstructionValue::ObjectMethod { lowered_func, .. } => {
+                    // If a closure captures a variable, treat it as a read.
+                    // The initial store establishes the variable for the closure
+                    // and must be preserved (the closure may modify or use it).
+                    for ctx in &lowered_func.func.context {
+                        if let Some(&var_id) = ssa_to_var.get(&ctx.identifier) {
+                            last_store.remove(&var_id);
+                        }
+                        last_store.remove(&ctx.identifier);
+                    }
+                }
+                InstructionValue::CallExpression { .. }
+                | InstructionValue::MethodCall { .. }
+                | InstructionValue::NewExpression { .. } => {
+                    // A call might observe or modify any variable through closures or
+                    // aliasing. Conservatively clear all pending stores.
+                    last_store.clear();
+                }
+                _ => {}
+            }
+        }
+
+        if !dead_indices.is_empty() {
+            if std::env::var("RC_DEBUG_SHADOW").is_ok() {
+                for &di in &dead_indices {
+                    let instr = &block.instructions[di];
+                    eprintln!("[shadow] eliminating instr at idx={di}: {:?}", std::mem::discriminant(&instr.value));
+                    if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
+                        eprintln!("  StoreLocal var_id={} value_id={}", lvalue.place.identifier.0, value.identifier.0);
+                    }
+                }
+            }
+            let mut i = 0;
+            block.instructions.retain(|_| {
+                let keep = !dead_indices.contains(&i);
+                i += 1;
+                keep
+            });
         }
     }
 }
