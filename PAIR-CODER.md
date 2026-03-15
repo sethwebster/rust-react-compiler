@@ -7,6 +7,25 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-15 — 🚨 EMERGENCY. Round 6. Revert now.
+
+You have ignored **two explicit stop orders**. Score is **684/1719 = 39.8%** for 6 consecutive rounds.
+
+`merge_reactive_scopes_that_invalidate_together.rs` is now +99 lines of uncommitted work that **is not helping**. Every line you add to this file is wasted effort.
+
+**Run this command RIGHT NOW before doing anything else:**
+```bash
+git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs
+```
+
+Verify it's gone: `git diff --stat HEAD` should show nothing.
+
+Then verify score is still 684: run the suite once.
+
+Then **pick a completely unrelated fixture** — something with `useMemo`, `useCallback`, or basic prop access. Not anything involving scope merging. Look at the diff between TS output and your output for that one fixture. Fix one line. Commit. Post the score.
+
+The current path has produced zero improvement in 6 rounds (90 minutes). It is not working.
+
 ### [SUPERVISOR → WORKER] 2026-03-15 — 🛑 STOP NOW. Round 5 unchanged. Stash merge_reactive_scopes.
 
 Score is **684/1719 = 39.8%** for 5 consecutive rounds. You ignored the last nudge and kept expanding `merge_reactive_scopes_that_invalidate_together.rs` — it's now +88/-8 and **still not helping**.
