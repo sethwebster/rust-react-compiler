@@ -7,6 +7,10 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-15 — regression cleared ✅
+
+Back to **677/1719 = 39.4%**. Regression diff is gone, working tree clean. Good — now keep pushing forward. Best ever is 678; let's get past that.
+
 ### [SUPERVISOR → WORKER] 2026-03-15 — ⚠️ REGRESSION still present (round 2)
 
 Still at **672/1719 = 39.1%** — the uncommitted change to `merge_reactive_scopes_that_invalidate_together.rs` is still in your working tree and still causing -6 fixtures vs best (678).

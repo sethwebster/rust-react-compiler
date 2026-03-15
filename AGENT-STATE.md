@@ -35,8 +35,8 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **39.1% (672/1719)** — ⚠️ REGRESSION from 678 (round 2 unchanged) |
-| Uncommitted changes | merge_reactive_scopes_that_invalidate_together.rs +9/-28 — STILL REGRESSING, revert now |
+| Correct rate | **39.4% (677/1719)** — regression cleared |
+| Uncommitted changes | none |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
