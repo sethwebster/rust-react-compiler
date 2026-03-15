@@ -48,10 +48,13 @@ pub fn infer_reactive_places(hir: &mut HIRFunction, env: &Environment) {
         for instr in &block.instructions {
             if let InstructionValue::LoadGlobal { .. } = &instr.value {
                 global_ids.insert(instr.lvalue.identifier);
-                if let InstructionValue::LoadGlobal { binding: NonLocalBinding::Global { name }, .. } = &instr.value {
-                    if name == "React" {
-                        react_ns_ids.insert(instr.lvalue.identifier);
-                    }
+                let react_name = match &instr.value {
+                    InstructionValue::LoadGlobal { binding: NonLocalBinding::Global { name }, .. } => Some(name.as_str()),
+                    InstructionValue::LoadGlobal { binding: NonLocalBinding::ImportNamespace { name, .. }, .. } => Some(name.as_str()),
+                    _ => None,
+                };
+                if react_name == Some("React") {
+                    react_ns_ids.insert(instr.lvalue.identifier);
                 }
             }
         }
