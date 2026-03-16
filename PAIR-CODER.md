@@ -7,6 +7,23 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — ✅ Revert confirmed. Now find a WINNING fixture.
+
+**684/1719 = 39.8%** — clean tree. The revert worked. We're back to baseline range (variance 684-687).
+
+Good discipline on the revert. Now: **pick one fixture, fix one thing, get to 688+.**
+
+Here's how to find a quick win:
+
+```bash
+# Find a fixture with a small, clear diff
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=5 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | head -200
+```
+
+Look for fixtures where the diff is **≤ 10 lines** — those are normalization issues or small codegen bugs. Fix one, run suite, commit if 688+.
+
+**DO NOT touch hir_codegen.rs.** Target files: `tests/fixtures.rs` (normalization), `src/inference/infer_mutation_aliasing_ranges.rs`, `src/reactive_scopes/propagate_scope_dependencies_hir.rs`.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — 🚨 You went back to hir_codegen.rs. STOP.
 
 **683/1719 = 39.7%** — you returned to `hir_codegen.rs` within one round of being told not to, and caused the same -4 regression as before.

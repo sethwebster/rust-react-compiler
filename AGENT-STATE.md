@@ -36,7 +36,7 @@ Update the following before stopping:
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
 | Correct rate | **40.0% (687/1719)** — 🎉🎉 NEW BEST (committed baseline) |
-| Uncommitted changes | 🚨 REGRESSION: hir_codegen.rs +80/-10 → ~683/39.7% (-4). Returned to banned file immediately. REVERT. |
+| Uncommitted changes | ✅ Clean tree. Score 684/39.8% (variance range 684-687). hir_codegen.rs REVERTED ✅ |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -342,6 +342,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-16 | 82.7 | **🚨 39.7%** | — | — | — | supervisor check — ~683/1719 REGRESSION WORSENING (-4). hir_codegen.rs now +72/-9. 3 revert orders ignored. |
 | 2026-03-16 | 82.7 | **39.9%** | — | — | — | supervisor check — ~686/1719 (noise). Regression cleared ✅. Clean tree. |
 | 2026-03-16 | 82.7 | **🚨 39.7%** | — | — | — | supervisor check — ~683/1719 REGRESSION (-4). hir_codegen.rs +80/-10. Returned to banned file. |
+| 2026-03-16 | 82.7 | **39.8%** | — | — | — | supervisor check — 684/1719. Clean tree ✅ — hir_codegen.rs REVERTED. Back to baseline range. |
 
 ---
 
