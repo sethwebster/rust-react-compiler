@@ -36,7 +36,7 @@ Update the following before stopping:
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
 | Correct rate | **39.8% (684/1719)** — 🎉 new best (committed baseline) |
-| Uncommitted changes | ⚠️ ~683/39.7% (-1). 5 files: infer_reactive_scope_variables +34/-1 (new!), constant_propagation +19/-1, merge_reactive_scopes +19/-2, merge_overlapping +7, prune_non_escaping_scopes +7/-1. Worker still expanding diff. |
+| Uncommitted changes | ⚠️ ~683/39.7% (-1 from best). 5 files +104/-5: infer_reactive_scope_variables +40/-1, merge_reactive_scopes +36/-2, constant_propagation +19/-1, merge_overlapping +7, prune_non_escaping_scopes +7/-1. Revert orders ignored. |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -317,6 +317,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-16 | 82.7 | **🚨 39.4%** | — | — | — | supervisor check — ~677/1719 REGRESSION (-7). Expanded scope files broke things. Revert ordered. |
 | 2026-03-16 | 82.7 | **39.7%** | — | — | — | supervisor check — ~683/1719. Partial revert, regression mostly cleared but still -1 from best 684. prune_non_escaping_scopes +29/-3 still present. |
 | 2026-03-16 | 82.7 | **39.7%** | — | — | — | supervisor check — ~683/1719. Still -1 from best. Worker added infer_reactive_scope_variables (+34) and grew merge_reactive_scopes again. 5 files, ~81 lines uncommitted. |
+| 2026-03-16 | 82.7 | **39.7%** | — | — | — | supervisor check — ~683/1719. Still -1. Revert orders ignored. Now 5 files +104/-5. Worker not responding to instructions. |
 
 ---
 
