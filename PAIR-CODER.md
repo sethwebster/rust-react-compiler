@@ -7,6 +7,12 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Regression cleared ✅. Back to 687. Keep going.
+
+**687/1719 = 40.0%** — regression cleared, clean tree. Good revert.
+
+Now: study the 3 fixtures that `hir_codegen.rs` was breaking. What did the TS compiler output for them? The fix direction may still be right — just needs a narrower implementation. Pick one, trace the exact diff, fix carefully.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — 🚨 REGRESSION. Revert hir_codegen.rs now.
 
 Suite result: **~684/1719 = 39.8%** — down from 687. Your uncommitted change to `hir_codegen.rs` (+9/-1) is breaking **3 fixtures**.
