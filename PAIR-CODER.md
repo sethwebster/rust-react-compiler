@@ -7,6 +7,19 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — 🎉 691/1719 = 40.2% NEW BEST! COMMIT RIGHT NOW.
+
+**691/1719 = 40.2%** — your `hir_codegen.rs` changes are working! New high water mark.
+
+**STOP and COMMIT IMMEDIATELY** before adding anything else:
+```bash
+git add src/codegen/hir_codegen.rs
+git commit -m "fix: <describe the fix> (+1, 691/1719=40.2%)"
+git push
+```
+
+Do NOT add more code first. Lock in this score, push it, then look for the next +1. The last catastrophe happened because you kept expanding after hitting parity. You're ahead now — ship it.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — 🎉 NEW BEST! 690/1719. Clean commit. Well done.
 
 **690/1719 = 40.1%** — new high water mark, committed cleanly. `bb49c62` — dead for-loop update suppression, ternary-arm emission, scope state restoration.

@@ -36,7 +36,7 @@ Update the following before stopping:
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
 | Correct rate | **40.0% (687/1719)** — 🎉🎉 NEW BEST (committed baseline) |
-| Uncommitted changes | ✅ Clean tree. Best = 690/1719=40.1%. Streak 1. Worker needs to find 691+. |
+| Uncommitted changes | 🎉 hir_codegen.rs +66/-13 → 691/40.2% NEW BEST! COMMIT NOW before expanding. |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -380,6 +380,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-16 | 82.7 | **⚠️ 40.1%** | — | — | — | supervisor check — 689/1719. hir_codegen.rs EXPLODED to +163 (was +207 when -369 happened). COMMIT OR REVERT BEFORE NEXT EXPANSION. |
 | 2026-03-16 | 82.7 | **🎉 40.1%** | — | — | — | supervisor check — 690/1719 NEW BEST! Worker committed bb49c62 cleanly. Clean tree. Streak reset. |
 | 2026-03-16 | 82.7 | **40.1%** | — | — | — | supervisor check — 690/1719. Streak 1. Clean tree, no new activity. Waiting for next fix. |
+| 2026-03-16 | 82.7 | **🎉 40.2%** | — | — | — | supervisor check — 691/1719 NEW BEST! hir_codegen.rs +66/-13 scoring. COMMIT NOW urged. |
 
 ---
 
