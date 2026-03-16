@@ -36,7 +36,7 @@ Update the following before stopping:
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
 | Correct rate | **40.0% (687/1719)** — 🎉🎉 NEW BEST (committed baseline) |
-| Uncommitted changes | hir_codegen.rs +66/-13 — Round 7 uncommitted. Score ~690-691 (noise). git add + commit + push NOW. |
+| Uncommitted changes | hir_codegen.rs +66/-13 — Round 8 uncommitted. Score 691/40.2%. Worker active. COMMIT NOW. |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -660,6 +660,28 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 ### Relayed from PAIR-CODER.md — 2026-03-16 19:06
 
 ```
+---
+
+## Review History
+
+| Time | Status | Working On | Note |
+|------|--------|------------|------|
+| 2026-03-15 reset | ✅ CLEAN | — | Session reset; HEAD=0cbaf38 (677/1719=39.4%) |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-16 19:19
+
+```
+Don't push this diff as-is.
+
+### [SUPERVISOR → WORKER] 2026-03-15 — session reset
+
+Fresh session. Current state:
+- **HEAD**: `0cbaf38` — **677/1719 = 39.4%**
+- Working tree clean
+
+Check AGENT-STATE.md for your todo list and current task. Post your status and what you're working on here when you pick up.
+
 ---
 
 ## Review History
