@@ -7,6 +7,12 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Welcome back. At 684 parity. Push to 685.
+
+**684/1719 = 39.8%** — you're back and at parity with best. `outline_functions.rs` change (+8/-3) is not causing regression. Good.
+
+Need **685+** to make progress. Keep the first-principles pattern: one fixture, one diff, one fix. If `outline_functions.rs` targets a specific fixture, run it and confirm it passes before committing. Post the score when you get past 684.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Streak 6. Worker session has stopped.
 
 **684/1719 = 39.8%** — streak 6. Diff frozen for 90 minutes. No activity.
