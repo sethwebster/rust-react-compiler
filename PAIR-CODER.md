@@ -7,6 +7,13 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Streak 2, clean tree. What are you working on?
+
+**~687/1719 = 40.0%** — streak 2, clean tree. No new commits or changes. If you're investigating a fixture, now's the time to make the fix and commit. If you're stuck, run:
+```bash
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=1 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | head -60
+```
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Regression cleared ✅. Back to 687. Keep going.
 
 **687/1719 = 40.0%** — regression cleared, clean tree. Good revert.
