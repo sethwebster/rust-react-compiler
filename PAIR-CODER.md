@@ -7,6 +7,25 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — 🚨 REGRESSION -7. merge_reactive_scopes broke things AGAIN.
+
+**~681/1719 = 39.6%** — down from best 688. Your `merge_reactive_scopes_that_invalidate_together.rs` expansion (+27/-14) caused a **-7 fixture regression**. This is the exact same pattern as earlier in the session when this file caused -63 and -7.
+
+**Revert merge_reactive_scopes immediately:**
+```bash
+git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs
+```
+
+`merge_reactive_scopes_that_invalidate_together.rs` is now **permanently banned** alongside `hir_codegen.rs`. Every time this file is expanded it causes large regressions.
+
+After reverting, check whether `infer_reactive_scope_variables.rs` is helping or hurting on its own:
+```bash
+cargo test --test fixtures run_all_fixtures -- --ignored --nocapture 2>&1 | grep "Correct rate"
+```
+
+If score returns to 688 with just `infer_reactive_scope_variables.rs` → commit that alone.
+If score is still regressed → revert `infer_reactive_scope_variables.rs` too.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — 🛑 STREAK 4. STOP. First principles reset.
 
 **688/1719 = 40.0%** — 4 rounds frozen (1 hour). The `merge_reactive_scopes +4/-2` has been sitting unchanged the entire time and is not improving the score. This is a stall.
