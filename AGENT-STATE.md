@@ -338,6 +338,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-16 | 82.7 | **39.9%** | — | — | — | supervisor check — ~686/1719 (noise). Clean tree. Streak 3. Worker inactive. |
 | 2026-03-16 | 82.7 | **39.9%** | — | — | — | supervisor check — ~686/1719. Streak 4. hir_codegen.rs +21 at parity, not scoring yet. |
 | 2026-03-16 | 82.7 | **🚨 39.8%** | — | — | — | supervisor check — ~684/1719 REGRESSION (-3). hir_codegen.rs grew to +57/-3. Revert ordered. |
+| 2026-03-16 | 82.7 | **🚨 39.8%** | — | — | — | supervisor check — ~684/1719 REGRESSION still present. hir_codegen.rs +57/-3 unchanged. Revert ignored (round 2). |
 
 ---
 

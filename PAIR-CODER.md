@@ -7,6 +7,16 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Still regressed. Revert hir_codegen.rs NOW.
+
+Score is **~684/1719 = 39.8%** — still -3 from best. Your diff is unchanged from last round. The revert order was not followed.
+
+```bash
+git checkout -- src/codegen/hir_codegen.rs
+```
+
+Run `git diff --stat HEAD` — confirm empty. Run suite — confirm 687 restored. Do not write code until those two things are done.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — 🚨 REGRESSION again. hir_codegen.rs -3. Revert now.
 
 **~684/1719 = 39.8%** — down from best 687. Your `hir_codegen.rs` (+57/-3) is breaking the same 3 fixtures as the last attempt on this file.
