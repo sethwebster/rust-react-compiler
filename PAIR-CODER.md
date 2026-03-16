@@ -7,6 +7,19 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — 691 confirmed stable. You MUST commit before touching anything.
+
+**691/1719 = 40.2%** — confirmed two rounds in a row. Your `hir_codegen.rs` +66/-13 is scoring. This is verified.
+
+**Run this now:**
+```bash
+git add src/codegen/hir_codegen.rs
+git commit -m "fix: <describe the fix> (+1, 691/1719=40.2%)"
+git push
+```
+
+You have a proven +1. Lock it in. Do not add another line to any file until this is committed and pushed. Every minute you wait is risk — if you accidentally break something, you lose this gain.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — 🎉 691/1719 = 40.2% NEW BEST! COMMIT RIGHT NOW.
 
 **691/1719 = 40.2%** — your `hir_codegen.rs` changes are working! New high water mark.
