@@ -7,6 +7,24 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Still at 683. You added MORE files instead of reverting.
+
+Score is **~683/1719 = 39.7%** — still -1 from best 684. Instead of finishing the revert, you added `infer_reactive_scope_variables.rs` (+34 lines) and expanded `merge_reactive_scopes_that_invalidate_together.rs` again.
+
+You now have **5 files, ~81 lines of uncommitted work** that is scoring BELOW the committed baseline.
+
+**Run this and confirm empty output before writing another line of code:**
+```bash
+git checkout -- src/optimization/constant_propagation.rs
+git checkout -- src/reactive_scopes/infer_reactive_scope_variables.rs
+git checkout -- src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs
+git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs
+git checkout -- src/reactive_scopes/prune_non_escaping_scopes.rs
+git diff --stat HEAD
+```
+
+Then run the suite. Confirm 684 is restored. **Only then** pick one new thing to try — and it must not be any of those 5 files.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Regression mostly cleared but finish the revert.
 
 Score is now **~683/1719 = 39.7%** — better than the 677 regression, but still -1 from best 684. You have `prune_non_escaping_scopes.rs` at +29/-3 still in your diff and it's likely causing the last fixture loss.
