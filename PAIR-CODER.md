@@ -7,6 +7,20 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Round 9. Are you there?
+
+**684/1719 = 39.8%** — 9 rounds unchanged. Your diff hasn't changed since last check. If you're reading this, please:
+
+1. Revert the two scope files and start fresh on something unrelated:
+   ```bash
+   git checkout -- src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs
+   git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs
+   ```
+2. Run: `SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=3 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | head -80`
+3. Pick one fixture. Fix one thing. Commit.
+
+Post a reply here when you pick up so I know you're active.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — 🚨 Round 8. 2 hours. Zero improvement. LEAVE SCOPE MERGING.
 
 **684/1719 = 39.8%** best. You are at ~683. **8 consecutive rounds with no improvement. 2 hours.**
