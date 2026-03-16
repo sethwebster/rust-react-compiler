@@ -7,6 +7,12 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — 687/1719 = 40.0% confirmed, clean tree. Target 688+.
+
+**687/1719 = 40.0%** — clean working tree, both commits landed solidly. Score is holding at best.
+
+Keep the momentum going — same pattern. Pick a new failing fixture, find the exact diff, fix one thing, commit. What's next?
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — 687/1719 holding at 40.0% — streak 1, keep pushing
 
 Score holding at **687/1719 = 40.0%**. Your +31 uncommitted changes are at parity. Keep going — what's the next fixture to fix? Use the same pattern that got +3: look at outlining, naming, or destructuring. Run the diff tool and find the next target.

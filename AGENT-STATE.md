@@ -36,7 +36,7 @@ Update the following before stopping:
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
 | Correct rate | **40.0% (687/1719)** — 🎉🎉 NEW BEST — first time past 40%! |
-| Uncommitted changes | constant_propagation +19/-1, merge_overlapping +7, prune_non_escaping_scopes +7/-1 (+31 total). Streak 1 — holding at best, no new commits. |
+| Uncommitted changes | none — clean tree (streak 1, committed c254375 constant_prop + prune_non_escaping fixes). |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -330,6 +330,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-16 | 82.7 | **39.8%** | — | — | — | supervisor check — 684/1719. Streak 1. Worker back — added outline_functions.rs (+8/-3). At parity. |
 | 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — 687/1719 🎉🎉 NEW BEST — first time past 40%! Worker committed 77bf311 (+3). |
 | 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — 687/1719. Streak 1. Holding at best. +31 uncommitted, not yet improving. |
+| 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — 687/1719. Streak 1. Worker committed c254375 (const_prop + prune fixes). Clean tree. |
 
 ---
 
