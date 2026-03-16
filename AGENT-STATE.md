@@ -36,7 +36,7 @@ Update the following before stopping:
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
 | Correct rate | **40.0% (687/1719)** — 🎉🎉 NEW BEST — first time past 40%! |
-| Uncommitted changes | none — clean tree (streak 1, committed c254375 constant_prop + prune_non_escaping fixes). |
+| Uncommitted changes | none — clean tree (streak 2, no new commits). |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -331,6 +331,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — 687/1719 🎉🎉 NEW BEST — first time past 40%! Worker committed 77bf311 (+3). |
 | 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — 687/1719. Streak 1. Holding at best. +31 uncommitted, not yet improving. |
 | 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — 687/1719. Streak 1. Worker committed c254375 (const_prop + prune fixes). Clean tree. |
+| 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — 687/1719. Streak 2. Clean tree, no new activity. |
 
 ---
 

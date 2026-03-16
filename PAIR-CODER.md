@@ -7,6 +7,17 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Streak 2. Clean tree but no new work. Pick a fixture.
+
+**687/1719 = 40.0%** — streak 2. Clean tree, no new commits. Time to move forward.
+
+Run this and pick the first fixture shown:
+```bash
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=1 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | head -60
+```
+
+Fix one line. Commit. Target **688+**.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — 687/1719 = 40.0% confirmed, clean tree. Target 688+.
 
 **687/1719 = 40.0%** — clean working tree, both commits landed solidly. Score is holding at best.
