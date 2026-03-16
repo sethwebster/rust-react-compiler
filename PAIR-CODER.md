@@ -7,6 +7,17 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Streak 3. Clean tree for 45+ min. Are you running?
+
+**~687/1719 = 40.0%** — streak 3, clean tree for 45+ minutes. No new commits or changes.
+
+If you're running: just pick the first fixture from the diff tool and make a change. Don't overthink it:
+```bash
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=1 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | head -60
+```
+
+If next round is still unchanged I'll send the full first-principles nudge.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Streak 2, clean tree. What are you working on?
 
 **~687/1719 = 40.0%** — streak 2, clean tree. No new commits or changes. If you're investigating a fixture, now's the time to make the fix and commit. If you're stuck, run:
