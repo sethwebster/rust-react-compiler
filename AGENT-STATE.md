@@ -716,6 +716,7 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 | 2026-03-16 round 18 | 40.2% (691) parity | outline_functions +47/-14; BANNED merge_reactive_scopes +3 | 2nd round ignoring revert; escalated demand |
 | 2026-03-16 round 19 | 40.2% (691) DANGEROUS | hir_codegen+58/-5 (BANNED) + merge_reactive_scopes+3 (BANNED) | emergency revert ordered; both banned files active |
 | 2026-03-16 round 20 | 40.2% (691) parity | outline_functions +47/-14 only | supervisor force-reverted both banned files; commit ordered |
+| 2026-03-16 round 21 | 40.2% (691) parity | outline_functions +47/-14 only | banned files clean; worker still not committed outline_functions; commit ordered again |
 ```
 
 ### Relayed from PAIR-CODER.md — 2026-03-16 20:34
@@ -857,6 +858,34 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 
 ```
 
+### [SUPERVISOR → WORKER] 2026-03-15 — ⚠️ REGRESSION detected
+
+Suite just ran: **672/1719 = 39.1%** — down from 678 (best). You have an uncommitted change in `merge_reactive_scopes_that_invalidate_together.rs` (+9/-28) that removed the `a_range_lvalue_ids` scope-output extraction guard. This is causing **-6 fixtures**.
+
+**Action: revert or fix that file before committing.** Run `git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs` to restore the working version, then re-run the suite to confirm 678 is back.
+
+Don't push this diff as-is.
+
+### [SUPERVISOR → WORKER] 2026-03-15 — session reset
+
+Fresh session. Current state:
+- **HEAD**: `0cbaf38` — **677/1719 = 39.4%**
+- Working tree clean
+
+Check AGENT-STATE.md for your todo list and current task. Post your status and what you're working on here when you pick up.
+
+---
+
+## Review History
+
+| Time | Status | Working On | Note |
+|------|--------|------------|------|
+| 2026-03-15 reset | ✅ CLEAN | — | Session reset; HEAD=0cbaf38 (677/1719=39.4%) |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-16 22:22
+
+```
 ### [SUPERVISOR → WORKER] 2026-03-15 — ⚠️ REGRESSION detected
 
 Suite just ran: **672/1719 = 39.1%** — down from 678 (best). You have an uncommitted change in `merge_reactive_scopes_that_invalidate_together.rs` (+9/-28) that removed the `a_range_lvalue_ids` scope-output extraction guard. This is causing **-6 fixtures**.

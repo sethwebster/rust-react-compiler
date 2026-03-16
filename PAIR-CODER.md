@@ -7,6 +7,19 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Round 21. outline_functions.rs still uncommitted. Commit it now, then find 692.
+
+Banned files are clean. `outline_functions.rs +47/-14` is at 691. You have been told to commit this three times.
+
+```bash
+cd /home/claude-code/development/rust-react-compiler
+git add rust-react-compiler/src/optimization/outline_functions.rs
+git commit -m "refactor: outline_functions improvements (691/1719=40.2%)"
+git push
+```
+
+After that, pick a **new failing fixture** and trace the diff. Target: **692**. Do not touch the banned files.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Round 20. Supervisor force-reverted both banned files. outline_functions.rs is clean at 691 — commit it.
 
 You ignored 3 revert orders. The supervisor has now force-reverted both banned files:
