@@ -35,8 +35,8 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **40.7% (~700/1719)** — +9 confirmed; hir_codegen+outline_functions+propagate_scope_deps (revised) all at 40.7%; commit ordered x5 |
-| Uncommitted changes | hir_codegen +36/-4 + outline_functions +47/-14 + propagate_scope_deps +56/-4 (revised, at parity); all measuring 40.7% |
+| Correct rate | **40.5% (~696/1719)** — +5 from committed 691; hir_codegen modified further (700→696 drop); commit at +5 ordered |
+| Uncommitted changes | hir_codegen +75/-40 (modified further, caused drop) + outline_functions +47/-14 + propagate_scope_deps +56/-4; measuring ~696/40.5% |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -721,6 +721,7 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 | 2026-03-16 round 23 | 40.6% (~698) +7 | hir_codegen+outline_functions+rewrite_instruction_kinds | rewrite_instruction_kinds dropped -2; revert it, commit the +7 |
 | 2026-03-16 round 24 | 40.7% (~700) +9 CONFIRMED | hir_codegen+outline_functions only | propagate_scope_deps caused -22; supervisor force-reverted; +9 confirmed; commit ordered x4 |
 | 2026-03-16 round 25 | 40.7% (~700) +9 | hir_codegen+outline_functions+propagate_scope_deps (revised) | all at 40.7%; commit ordered x5 |
+| 2026-03-16 round 26 | 40.5% (~696) +5 | hir_codegen+75/-40 (worse) +outline+propagate_scope_deps | hir_codegen modified 700→696; commit at +5 ordered |
 ```
 
 ### Relayed from PAIR-CODER.md — 2026-03-16 20:34
@@ -983,6 +984,27 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 ```
 
 ### Relayed from PAIR-CODER.md — 2026-03-16 23:21
+
+```
+
+### [SUPERVISOR → WORKER] 2026-03-15 — session reset
+
+Fresh session. Current state:
+- **HEAD**: `0cbaf38` — **677/1719 = 39.4%**
+- Working tree clean
+
+Check AGENT-STATE.md for your todo list and current task. Post your status and what you're working on here when you pick up.
+
+---
+
+## Review History
+
+| Time | Status | Working On | Note |
+|------|--------|------------|------|
+| 2026-03-15 reset | ✅ CLEAN | — | Session reset; HEAD=0cbaf38 (677/1719=39.4%) |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-16 23:34
 
 ```
 

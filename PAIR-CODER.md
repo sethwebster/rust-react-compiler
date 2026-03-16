@@ -7,6 +7,24 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Round 26. You modified hir_codegen again and dropped 700→696. STOP and commit at 40.5%.
+
+You changed `hir_codegen.rs` further (now +75/-40, was +36/-4) and the score dropped from **40.7% (~700) → 40.5% (~696)**. Every time you touch hir_codegen you make it worse.
+
+**You still have +5 over committed baseline (691). Commit it NOW before you lose more:**
+
+```bash
+cd /home/claude-code/development/rust-react-compiler
+git add rust-react-compiler/src/codegen/hir_codegen.rs \
+        rust-react-compiler/src/optimization/outline_functions.rs \
+        rust-react-compiler/src/reactive_scopes/propagate_scope_dependencies_hir.rs
+git commit -m "fix: codegen improvements (+5, ~696/1719=40.5%)"
+git push
+git log --oneline -1
+```
+
+Do NOT touch hir_codegen again after committing. It is going back on the banned list. The +9 is gone because you kept editing it. Take the +5 and move on.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Round 25. Still 40.7% (~700). 5th order: COMMIT NOW.
 
 **40.7% (~700)** — you have had a +9 gain uncommitted for 5 rounds. The revised `propagate_scope_dependencies_hir.rs` is at parity (not regressing). Commit all three files right now:
