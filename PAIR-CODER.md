@@ -7,6 +7,25 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — 🚨 Revert order ignored. hir_codegen.rs grew AGAIN.
+
+**687/1719 = 40.0%** — you expanded `hir_codegen.rs` to +121/-26 instead of reverting. You have now ignored the first-principles stop for 2 consecutive rounds.
+
+The score has been stuck in the 686-687 band for **over 2 hours** across many rounds. Expanding this file is not the solution.
+
+**This is a direct order. Run these two commands:**
+```bash
+git checkout -- src/codegen/hir_codegen.rs
+git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs
+```
+
+**Then confirm the tree is clean:**
+```bash
+git diff --stat HEAD
+```
+
+Do NOT write any new code until the tree is clean. Only after confirming clean tree should you pick a new fixture to investigate. The pattern of expanding `hir_codegen.rs` speculatively has produced zero improvement in 2+ hours. It must stop.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — 🛑 STREAK 4. STOP EVERYTHING. First principles reset.
 
 **~686/1719 = 39.9%** — 4 rounds frozen (1 hour). Your current diff (`hir_codegen.rs` +106, `merge_reactive_scopes` +6) has not moved the score and is now slightly losing ground. This is not working.

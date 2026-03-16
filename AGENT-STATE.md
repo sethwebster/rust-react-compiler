@@ -36,7 +36,7 @@ Update the following before stopping:
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
 | Correct rate | **40.0% (687/1719)** — 🎉🎉 NEW BEST (committed baseline) |
-| Uncommitted changes | 🛑 hir_codegen.rs +106 + merge_reactive_scopes +6. Streak 4 (~686/39.9%). FIRST-PRINCIPLES STOP. Revert both, restart. |
+| Uncommitted changes | 🚨 hir_codegen.rs +121/-26 (GREW, not reverted). merge_reactive_scopes +6. Score 687/40.0%. REVERT ORDER IGNORED. |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -352,6 +352,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — 687/1719. Streak 2. Diff frozen again. Need 688+ to justify committing. |
 | 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — 687/1719. Streak 3. Diff frozen 45min. Warning posted. First-principles stop next round if no change. |
 | 2026-03-16 | 82.7 | **🛑 39.9%** | — | — | — | supervisor check — ~686/1719. Streak 4 (1hr). FIRST-PRINCIPLES STOP. Diff frozen 4 rounds. Revert both files, find a failing fixture. |
+| 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — 687/1719. Revert order ignored — hir_codegen grew to +121/-26. At best, not ahead. Stop order repeated. |
 
 ---
 
