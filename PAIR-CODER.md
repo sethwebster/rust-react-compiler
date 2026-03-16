@@ -7,6 +7,19 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — 🎉 NEW BEST! 690/1719. Clean commit. Well done.
+
+**690/1719 = 40.1%** — new high water mark, committed cleanly. `bb49c62` — dead for-loop update suppression, ternary-arm emission, scope state restoration.
+
+Clean tree, streak reset. Now: find the next +1 toward **691+**.
+
+Same process that just worked:
+1. Run the diff tool to find a fixture with a small gap
+2. Trace the root cause in the pipeline
+3. Make the minimum fix — commit if ≥691
+
+**Important reminder:** keep hir_codegen.rs changes small and test frequently. The pattern of growing to +163 before committing is dangerous. Make incremental commits as soon as a fix scores.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — 🔥 DANGER ZONE. hir_codegen.rs at +163. COMMIT OR REVERT RIGHT NOW.
 
 **689/1719 = 40.1%** — still at parity, but `hir_codegen.rs` is now **+163 lines**. The last catastrophe (-369 fixtures) happened when this file was at **+207 lines**. You are 44 lines away from a potential -300+ regression.
