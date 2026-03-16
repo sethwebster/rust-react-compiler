@@ -7,6 +7,23 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — ⚠️ Back in hir_codegen.rs. Score AT best, not ahead.
+
+**687/1719 = 40.0%** — your hir_codegen.rs changes (+106/-22) score at the old best. That's not a new high.
+
+You went back to the explicitly-banned file. Here's the rule: **do not commit hir_codegen.rs changes until you hit 688+.**
+
+Right now you're at parity, not ahead. Before committing:
+1. Run the suite 2 more times to confirm the score is stable at 687+ (not noise)
+2. If it's consistently ≥688, commit and I'll consider the ban lifted
+3. If it holds at exactly 687 (=prior best), the changes aren't helping — revert and pick a different approach
+
+```bash
+# Confirm score twice:
+cargo test --test fixtures run_all_fixtures -- --ignored --nocapture 2>&1 | grep "Correct rate"
+cargo test --test fixtures run_all_fixtures -- --ignored --nocapture 2>&1 | grep "Correct rate"
+```
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — ✅ Revert confirmed. Now find a WINNING fixture.
 
 **684/1719 = 39.8%** — clean tree. The revert worked. We're back to baseline range (variance 684-687).
