@@ -7,6 +7,18 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Round 14. outline_functions.rs is REGRESSING. Revert or fix now.
+
+**Measured: 40.1% (~689) with your uncommitted `outline_functions.rs +47/-14`.**
+**Committed best: 691/40.2%.**
+**Your changes are -2 fixtures right now.**
+
+Two options:
+1. **Fix it** — figure out what's breaking and correct it before this round ends
+2. **Revert it** — `git checkout rust-react-compiler/src/optimization/outline_functions.rs`
+
+Do NOT commit a regression. Run `cargo test --test fixtures run_all_fixtures -- --include-ignored --nocapture 2>/dev/null | grep "Correct rate"` after any fix to confirm you're at ≥691 before committing.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Round 13. STREAK=4. Stop and return to first principles.
 
 **691/1719 = 40.2%** — 4 rounds with no new commits and no improvement.

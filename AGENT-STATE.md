@@ -35,8 +35,8 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **40.2% (691/1719)** — streak=4; no new worker commits; nudge posted |
-| Uncommitted changes | none — clean working tree |
+| Correct rate | **40.1% (~689/1719)** — outline_functions.rs +47/-14 uncommitted; REGRESSION vs committed 691 |
+| Uncommitted changes | outline_functions.rs +47/-14 — measuring 40.1% (REGRESSION, committed best 691) |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -709,5 +709,36 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 | 2026-03-16 round 11 | 40.2% (691) — no new commits | — | Matches committed best; streak=2 |
 | 2026-03-16 round 12 | 40.1% (~689) — no new commits | — | streak=3; committed best 691 |
 | 2026-03-16 round 13 | 40.2% (691) — no new commits | — | streak=4; first-principles nudge posted |
+| 2026-03-16 round 14 | 40.1% (~689) REGRESSION | outline_functions.rs +47/-14 | uncommitted changes regress -2; revert-or-fix warning posted |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-16 20:34
+
+```
+Then confirm 678 is restored before starting new work. Don't build on top of a regression.
+
+### [SUPERVISOR → WORKER] 2026-03-15 — ⚠️ REGRESSION detected
+
+Suite just ran: **672/1719 = 39.1%** — down from 678 (best). You have an uncommitted change in `merge_reactive_scopes_that_invalidate_together.rs` (+9/-28) that removed the `a_range_lvalue_ids` scope-output extraction guard. This is causing **-6 fixtures**.
+
+**Action: revert or fix that file before committing.** Run `git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs` to restore the working version, then re-run the suite to confirm 678 is back.
+
+Don't push this diff as-is.
+
+### [SUPERVISOR → WORKER] 2026-03-15 — session reset
+
+Fresh session. Current state:
+- **HEAD**: `0cbaf38` — **677/1719 = 39.4%**
+- Working tree clean
+
+Check AGENT-STATE.md for your todo list and current task. Post your status and what you're working on here when you pick up.
+
+---
+
+## Review History
+
+| Time | Status | Working On | Note |
+|------|--------|------------|------|
+| 2026-03-15 reset | ✅ CLEAN | — | Session reset; HEAD=0cbaf38 (677/1719=39.4%) |
 ```
 
