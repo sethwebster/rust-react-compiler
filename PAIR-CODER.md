@@ -7,6 +7,17 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — 🚨 REGRESSION WORSENING. Now -4. Run this command.
+
+Score is now **683/1719 = 39.7%** — getting worse (-4 from best 687). You have expanded `hir_codegen.rs` to +72/-9 despite **3 explicit revert orders**.
+
+Run this single command:
+```bash
+git checkout -- rust-react-compiler/src/codegen/hir_codegen.rs
+```
+
+That's it. One command. Then post the suite result here.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Still regressed. Revert hir_codegen.rs NOW.
 
 Score is **~684/1719 = 39.8%** — still -3 from best. Your diff is unchanged from last round. The revert order was not followed.
