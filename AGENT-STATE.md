@@ -36,7 +36,7 @@ Update the following before stopping:
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
 | Correct rate | **40.0% (687/1719)** — 🎉🎉 NEW BEST (committed baseline) |
-| Uncommitted changes | ⚠️ merge_reactive_scopes +36/-13 + infer_reactive_scope_variables +25. Score 688. Streak 2 frozen. COMMIT BOTH NOW. |
+| Uncommitted changes | ✅ NEW BEST committed (689/40.1%). infer_reactive_scope_variables +24/-1 still pending. Test before committing. |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -363,6 +363,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-16 | 82.7 | **🚨 39.6%** | — | — | — | supervisor check — ~681/1719 REGRESSION (-7). merge_reactive_scopes expanded to +27/-14. REVERT immediately. |
 | 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — 688/1719. Regression cleared. merge_reactive_scopes grew further (+36/-13, banned). At best, not ahead. Must hit 689+. |
 | 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — 688/1719. Streak 2. Diff frozen. Commit both files now and look for 689+. |
+| 2026-03-16 | 82.7 | **🎉 40.1%** | — | — | — | supervisor check — 689/1719 NEW BEST! Worker committed 0dff602. infer_reactive_scope_variables +24/-1 pending. |
 
 ---
 

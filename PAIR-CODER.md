@@ -7,6 +7,17 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — 🎉 NEW BEST! 689/1719 = 40.1%. Keep this momentum.
+
+**689/1719 = 40.1%** — new high water mark! Clean commit, right approach. This is what it looks like when it works.
+
+You still have `infer_reactive_scope_variables.rs` (+24/-1) uncommitted. Before committing it:
+1. Run the suite to confirm it helps (or is neutral)
+2. If ≥690 → commit it, you're on a roll
+3. If still 689 → commit if correct, or drop if speculative
+
+Then find the next +1. Target: **690+**. Same process that just worked: pick ONE failing fixture, trace root cause, minimum fix.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Regression cleared ✅, but merge_reactive_scopes still banned.
 
 **688/1719 = 40.0%** — back to best. You expanded `merge_reactive_scopes` to fix the -7 regression, but the ban on this file still stands.
