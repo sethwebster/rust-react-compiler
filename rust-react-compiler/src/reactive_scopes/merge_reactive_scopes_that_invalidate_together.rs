@@ -42,11 +42,13 @@ pub fn run_with_env(hir: &mut HIRFunction, env: &mut Environment) {
         eprintln!("[merge_adjacent_start] {} scopes:", scope_list.len());
         for (sid, s) in &scope_list {
             eprintln!(
-                "  scope {:?} range=[{},{}] ndeps={}",
+                "  scope {:?} range=[{},{}] ndeps={} ndecls={} nreassigns={}",
                 sid.0,
                 s.range.start.0,
                 s.range.end.0,
-                s.dependencies.len()
+                s.dependencies.len(),
+                s.declarations.len(),
+                s.reassignments.len()
             );
         }
     }
@@ -359,19 +361,42 @@ pub fn run_with_env(hir: &mut HIRFunction, env: &mut Environment) {
                                             if let InstructionValue::StoreLocal { lvalue, value, .. } =
                                                 &instr.value
                                             {
-                                                // Skip the named binding when it's a scope A output
-                                                // extraction: `const x = $t_scope_a_output`.
-                                                // In the TS reactive tree, such StoreLocals live
-                                                // INSIDE scope A's node (not in the gap), so TS
-                                                // never counts them as gap lvalues.
-                                                // We identify these by checking if the stored value
-                                                // was declared by scope A (a_decl_ids) or produced
-                                                // within scope A's instruction range (a_range_lvalue_ids).
+                                                // Add the named binding to cur.lvalues, UNLESS:
+                                                // 1. The binding is already in scope A's declarations.
+                                                // 2. The stored value comes from scope A (value_from_a)
+                                                //    AND the binding is a direct dep of scope B — it
+                                                //    flows A's output into B as an explicit dep.
+                                                // 3. The stored value comes from scope A AND is
+                                                //    always-invalidating (FunctionExpression, Array, etc.).
+                                                //    In TS, allocating values have their mutable range
+                                                //    extended to include the StoreLocal, placing it inside
+                                                //    scope A's reactive block. We mirror that by not adding
+                                                //    the binding to lvalues — it's effectively scope A's
+                                                //    territory.
+                                                // If value_from_a but value is NOT always-invalidating
+                                                // AND binding is NOT a dep of B (e.g. `const a = someObj()`
+                                                // where someObj() is not always-inv), the binding may be
+                                                // used by later scopes, so we must track it.
                                                 let value_from_a =
                                                     a_decl_ids.contains(&value.identifier)
                                                     || a_range_lvalue_ids.contains(&value.identifier);
-                                                if !value_from_a && !a_decl_ids.contains(&lvalue.place.identifier) {
-                                                    cur.lvalues.insert(lvalue.place.identifier);
+                                                let binding_id = lvalue.place.identifier;
+                                                let binding_is_b_dep = value_from_a && env.scopes.get(&sid).map_or(false, |scope_b| {
+                                                    scope_b.dependencies.iter().any(|dep| {
+                                                        dep.place.identifier == binding_id
+                                                        || store_local_value.get(&dep.place.identifier)
+                                                            .map_or(false, |&val_id| val_id == binding_id || a_decl_ids.contains(&val_id))
+                                                    })
+                                                });
+                                                let value_is_always_inv = is_always_invalidating
+                                                    .get(&value.identifier)
+                                                    .copied()
+                                                    .unwrap_or(false);
+                                                let skip = a_decl_ids.contains(&binding_id)
+                                                    || binding_is_b_dep
+                                                    || (value_from_a && value_is_always_inv);
+                                                if !skip {
+                                                    cur.lvalues.insert(binding_id);
                                                 }
                                             }
                                         } else {
