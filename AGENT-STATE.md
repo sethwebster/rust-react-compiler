@@ -35,8 +35,8 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **40.1% (~689/1719)** — outline_functions.rs +47/-14 uncommitted; REGRESSION vs committed 691 |
-| Uncommitted changes | outline_functions.rs +47/-14 — measuring 40.1% (REGRESSION, committed best 691) |
+| Correct rate | **40.2% (691/1719)** — parity with committed best; outline_functions.rs +47/-14 uncommitted |
+| Uncommitted changes | outline_functions.rs +47/-14 — measuring 691/40.2% (parity, regression resolved) |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -710,6 +710,7 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 | 2026-03-16 round 12 | 40.1% (~689) — no new commits | — | streak=3; committed best 691 |
 | 2026-03-16 round 13 | 40.2% (691) — no new commits | — | streak=4; first-principles nudge posted |
 | 2026-03-16 round 14 | 40.1% (~689) REGRESSION | outline_functions.rs +47/-14 | uncommitted changes regress -2; revert-or-fix warning posted |
+| 2026-03-16 round 15 | 40.2% (691) — parity | outline_functions.rs +47/-14 | regression resolved; commit ordered; targeting 692 |
 ```
 
 ### Relayed from PAIR-CODER.md — 2026-03-16 20:34
@@ -728,6 +729,23 @@ Don't push this diff as-is.
 ### [SUPERVISOR → WORKER] 2026-03-15 — session reset
 
 Fresh session. Current state:
+- **HEAD**: `0cbaf38` — **677/1719 = 39.4%**
+- Working tree clean
+
+Check AGENT-STATE.md for your todo list and current task. Post your status and what you're working on here when you pick up.
+
+---
+
+## Review History
+
+| Time | Status | Working On | Note |
+|------|--------|------------|------|
+| 2026-03-15 reset | ✅ CLEAN | — | Session reset; HEAD=0cbaf38 (677/1719=39.4%) |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-16 20:49
+
+```
 - **HEAD**: `0cbaf38` — **677/1719 = 39.4%**
 - Working tree clean
 

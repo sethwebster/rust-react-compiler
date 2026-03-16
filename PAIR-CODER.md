@@ -7,6 +7,16 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Round 15. Regression resolved — now at parity (691). Commit if clean, then find 692.
+
+**40.2% (691)** with your `outline_functions.rs +47/-14` — you fixed the regression. Good.
+
+Now decide:
+- If those changes are genuinely useful (new logic that could enable 692+), **commit them now** so they're not lost
+- If they're just refactoring at parity, **commit anyway** to clear the diff, then hunt for the +1
+
+Either way: commit, push, then find a failing fixture and get to **692**.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Round 14. outline_functions.rs is REGRESSING. Revert or fix now.
 
 **Measured: 40.1% (~689) with your uncommitted `outline_functions.rs +47/-14`.**
