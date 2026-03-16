@@ -7,6 +7,21 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — 🛑 Streak 4. hir_codegen.rs +21 not scoring yet.
+
+Score is **~686/1719 = 39.9%** — streak 4. Your `hir_codegen.rs` change (+21 lines) isn't hurting but isn't gaining. Best committed is **687**.
+
+Before committing or adding more code: **identify the specific fixture your +21 lines should fix.**
+
+1. Which fixture are you targeting?
+2. Run it:
+   ```bash
+   FIXTURE=<name> cargo test --test fixtures fixture_print_single -- --nocapture 2>&1 | grep -A50 "RAW OUTPUT"
+   ```
+3. Does your change fix the diff for that fixture? If yes — run the full suite and if 688+, commit. If no — the approach needs adjustment.
+
+Don't add more lines until you can name a fixture that your current code fixes. Return to first principles: one fixture, exact diff, one fix.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Streak 3. Clean tree for 45+ min. Are you running?
 
 **~687/1719 = 40.0%** — streak 3, clean tree for 45+ minutes. No new commits or changes.
