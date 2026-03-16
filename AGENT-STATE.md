@@ -36,7 +36,7 @@ Update the following before stopping:
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
 | Correct rate | **40.0% (687/1719)** — 🎉🎉 NEW BEST (committed baseline) |
-| Uncommitted changes | merge_reactive_scopes +4/-2 pending. Score 688/40.0% = best. Streak 2. Commit or revert, then find 689+. |
+| Uncommitted changes | merge_reactive_scopes +4/-2 pending. Score 688/40.0% = best. Streak 3. MUST ACT — commit or revert NOW. |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -358,6 +358,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-16 | 82.7 | **🎉 40.0%** | — | — | — | supervisor check — 688/1719 NEW BEST! Worker committed 24a24f8. hir_codegen.rs cleared. merge_reactive_scopes +4/-2 uncommitted. |
 | 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — 688/1719. Streak 1. merge_reactive_scopes +4/-2 still pending. Holding at best. |
 | 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — 688/1719. Streak 2. Diff frozen 2 rounds. Commit or revert pending change, look for 689+. |
+| 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — 688/1719. Streak 3 (45min). Warning posted. First-principles stop next round if frozen. |
 
 ---
 

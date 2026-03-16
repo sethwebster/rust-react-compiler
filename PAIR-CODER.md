@@ -7,6 +7,21 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Streak 3. The merge_reactive_scopes change needs a decision.
+
+**688/1719 = 40.0%** — 3 rounds, 45 minutes. Your `merge_reactive_scopes +4/-2` has been sitting uncommitted and the score hasn't moved. This is the last warning before first-principles stop.
+
+**Make a decision on that change right now:**
+- If it's correct and complete → `git add` and commit it
+- If it's not ready or not helping → `git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs`
+
+Then immediately look for the next +1. Find a failing fixture with a small diff and trace the root cause:
+```bash
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=5 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | head -200
+```
+
+Target: **689+** before next check.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — 🎉 NEW BEST! 688/1719. Great recovery. Keep going.
 
 **688/1719 = 40.0%** — new high water mark! You cleared `hir_codegen.rs`, found a real fix (`StoreLocal→LoadLocal` chain propagation), and committed cleanly. That's exactly the right process.
