@@ -267,6 +267,7 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
                 // Generate a unique name.
                 // With @enableNameAnonymousFunctions, use `_ComponentOnClick` style names
                 // (component name + capitalized variable name). Otherwise `_temp`, `_temp2`, ...
+                // NOTE: Babel's generateUidIdentifier skips "_temp1" → sequence is _temp, _temp2, _temp3, ...
                 let temp_name = if enable_named && !component_name.is_empty() {
                     if let Some(var_name) = fn_id_to_var_name.get(&instr.lvalue.identifier.0) {
                         // Capitalize first letter of var name.
@@ -274,12 +275,12 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
                         if let Some(f) = cap.get_mut(0..1) { f.make_ascii_uppercase(); }
                         format!("_{}{}", component_name, cap)
                     } else {
-                        if temp_counter == 0 { "_temp".to_string() } else { format!("_temp{}", temp_counter) }
+                        if temp_counter == 0 { "_temp".to_string() } else { format!("_temp{}", temp_counter + 1) }
                     }
                 } else if temp_counter == 0 {
                     "_temp".to_string()
                 } else {
-                    format!("_temp{}", temp_counter)
+                    format!("_temp{}", temp_counter + 1)
                 };
                 temp_counter += 1;
 
@@ -324,8 +325,23 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
                 // and `(arg: Type)` → `(arg)`.
                 renamed_body = strip_type_annotations(&renamed_body);
 
+                // TS-style normalization: convert single destructured params to t0 + explicit
+                // destructuring at top of body. e.g. `({id, name}) => <C />` becomes
+                // `function _temp(t0) { const {id, name} = t0; return <C />; }`
+                let (final_params_for_decl, destructuring_prefix) = if
+                    info.total_param_count == 1
+                    && info.destructured_params.len() == 1
+                    && info.destructured_params[0].0 == 0
+                {
+                    let raw_pattern = &info.destructured_params[0].1;
+                    let prefix = format!("  const {} = t0;\n", raw_pattern);
+                    (vec!["t0".to_string()], prefix)
+                } else {
+                    (final_param_names.clone(), String::new())
+                };
+
                 // Build the function declaration.
-                let params_str = final_param_names.join(", ");
+                let params_str = final_params_for_decl.join(", ");
                 // For arrow functions with expression bodies, strip outer parens from the
                 // body text before wrapping in `return ...`. An arrow like `(x) => ({...x})`
                 // has body text `({...x})` — the parens are syntactically required in arrow
@@ -350,9 +366,18 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
                 };
                 let decl = if info.is_expr_body {
                     format!(
-                        "function {}({}) {{\n  return {};\n}}",
-                        temp_name, params_str, return_body
+                        "function {}({}) {{\n{}  return {};\n}}",
+                        temp_name, params_str, destructuring_prefix, return_body
                     )
+                } else if !destructuring_prefix.is_empty() {
+                    // Block body: inject destructuring after opening `{`.
+                    // renamed_body starts with `{` and ends with `}`.
+                    if renamed_body.starts_with('{') {
+                        let inner = &renamed_body[1..renamed_body.len()-1];
+                        format!("function {}({}) {{\n{}{}}}", temp_name, params_str, destructuring_prefix, inner)
+                    } else {
+                        format!("function {}({}) {}", temp_name, params_str, renamed_body)
+                    }
                 } else {
                     // Block body already includes `{ ... }`.
                     format!("function {}({}) {}", temp_name, params_str, renamed_body)
@@ -379,6 +404,12 @@ struct ArrowInfo {
     param_names: Vec<String>,
     body_text: String,
     is_expr_body: bool,
+    /// For outlined functions with destructured params: the raw text of the destructuring pattern
+    /// (e.g. `{id, name}` or `[, value]`) and which positional param index it belongs to.
+    /// TS normalizes these to `t0, t1, ...` parameters with explicit const destructuring in body.
+    destructured_params: Vec<(usize, String)>, // (param_index, raw_pattern_text)
+    /// Total number of formal parameters (not counting rest).
+    total_param_count: usize,
 }
 
 /// Recursively collect all binding identifier names from a binding pattern.
@@ -444,25 +475,43 @@ fn parse_arrow_info(src: &str) -> Option<ArrowInfo> {
     };
 
     // Collect parameter names, including from destructuring patterns.
+    // Also detect destructured params (ObjectPattern/ArrayPattern) for TS-style normalization.
     let mut param_names = Vec::new();
-    for param in &arrow.params.items {
-        collect_binding_names(&param.pattern.kind, &mut param_names);
+    let mut destructured_params: Vec<(usize, String)> = Vec::new();
+    let prefix_len: usize = "let _ = ".len(); // 8
+    for (idx, param) in arrow.params.items.iter().enumerate() {
+        use oxc_ast::ast::BindingPatternKind;
+        match &param.pattern.kind {
+            BindingPatternKind::ObjectPattern(_) | BindingPatternKind::ArrayPattern(_) => {
+                // Record the raw pattern text for later normalization
+                let pat_start = (param.span.start as usize).saturating_sub(prefix_len);
+                let pat_end = (param.span.end as usize).saturating_sub(prefix_len);
+                if let Some(raw) = src.get(pat_start..pat_end) {
+                    destructured_params.push((idx, raw.to_string()));
+                }
+                collect_binding_names(&param.pattern.kind, &mut param_names);
+            }
+            _ => {
+                collect_binding_names(&param.pattern.kind, &mut param_names);
+            }
+        }
     }
     if let Some(rest) = &arrow.params.rest {
         collect_binding_names(&rest.argument.kind, &mut param_names);
     }
 
     // Extract body text by adjusting the span for the `let _ = ` prefix (8 bytes).
-    let prefix_len: usize = "let _ = ".len(); // 8
     let body_span = arrow.body.span;
     let body_start = (body_span.start as usize).saturating_sub(prefix_len);
     let body_end = (body_span.end as usize).saturating_sub(prefix_len);
     let body_text = src.get(body_start..body_end)?.to_string();
 
     Some(ArrowInfo {
+        total_param_count: arrow.params.items.len(),
         param_names,
         body_text,
         is_expr_body: arrow.expression,
+        destructured_params,
     })
 }
 
@@ -496,23 +545,39 @@ fn parse_function_expr_info(src: &str) -> Option<ArrowInfo> {
     };
 
     let mut param_names = Vec::new();
-    for param in &func_expr.params.items {
-        collect_binding_names(&param.pattern.kind, &mut param_names);
+    let mut destructured_params: Vec<(usize, String)> = Vec::new();
+    let prefix_len: usize = "let _ = ".len();
+    for (idx, param) in func_expr.params.items.iter().enumerate() {
+        use oxc_ast::ast::BindingPatternKind;
+        match &param.pattern.kind {
+            BindingPatternKind::ObjectPattern(_) | BindingPatternKind::ArrayPattern(_) => {
+                let pat_start = (param.span.start as usize).saturating_sub(prefix_len);
+                let pat_end = (param.span.end as usize).saturating_sub(prefix_len);
+                if let Some(raw) = src.get(pat_start..pat_end) {
+                    destructured_params.push((idx, raw.to_string()));
+                }
+                collect_binding_names(&param.pattern.kind, &mut param_names);
+            }
+            _ => {
+                collect_binding_names(&param.pattern.kind, &mut param_names);
+            }
+        }
     }
     if let Some(rest) = &func_expr.params.rest {
         collect_binding_names(&rest.argument.kind, &mut param_names);
     }
 
     let body = func_expr.body.as_ref()?;
-    let prefix_len: usize = "let _ = ".len();
     let body_start = (body.span.start as usize).saturating_sub(prefix_len);
     let body_end = (body.span.end as usize).saturating_sub(prefix_len);
     let body_text = src.get(body_start..body_end)?.to_string();
 
     Some(ArrowInfo {
+        total_param_count: func_expr.params.items.len(),
         param_names,
         body_text,
         is_expr_body: false, // Regular functions always have block body.
+        destructured_params,
     })
 }
 
@@ -999,7 +1064,8 @@ fn outline_inner_arrows_in_source(
         for (orig, ren) in info.param_names.iter().zip(final_params.iter()) {
             if orig != ren { body = rename_word(&body, orig, ren); }
         }
-        let name = if *temp_counter == 0 { "_temp".to_string() } else { format!("_temp{}", temp_counter) };
+        // Babel's generateUidIdentifier skips "_temp1" → sequence is _temp, _temp2, _temp3, ...
+        let name = if *temp_counter == 0 { "_temp".to_string() } else { format!("_temp{}", *temp_counter + 1) };
         *temp_counter += 1;
         let ps = final_params.join(", ");
         let rb = if info.is_expr_body && body.starts_with('(') && body.ends_with(')') {
