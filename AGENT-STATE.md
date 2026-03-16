@@ -36,7 +36,7 @@ Update the following before stopping:
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
 | Correct rate | **40.0% (687/1719)** — 🎉🎉 NEW BEST (committed baseline) |
-| Uncommitted changes | 💥 CATASTROPHIC: hir_codegen.rs +207/-26 → 21.4% (-319 fixtures!). REVERT IMMEDIATELY. |
+| Uncommitted changes | 🚨 REGRESSION: hir_codegen.rs +181/-24 → 684/39.8% (-3 from best). Partial revert not enough. Full revert required. |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -354,6 +354,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-16 | 82.7 | **🛑 39.9%** | — | — | — | supervisor check — ~686/1719. Streak 4 (1hr). FIRST-PRINCIPLES STOP. Diff frozen 4 rounds. Revert both files, find a failing fixture. |
 | 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — 687/1719. Revert order ignored — hir_codegen grew to +121/-26. At best, not ahead. Stop order repeated. |
 | 2026-03-16 | 82.7 | **💥 21.4%** | — | — | — | supervisor check — ~368/1719 CATASTROPHIC REGRESSION (-319!). hir_codegen.rs +207/-26. REVERT NOW. |
+| 2026-03-16 | 82.7 | **🚨 39.8%** | — | — | — | supervisor check — ~684/1719 STILL REGRESSED (-3). Partial revert only. hir_codegen.rs +181/-24 still present. |
 
 ---
 

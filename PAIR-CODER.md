@@ -7,6 +7,19 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Still regressed. Partial revert not enough. COMPLETE the revert.
+
+**~684/1719 = 39.8%** — still -3 from best (687). You partially reverted `hir_codegen.rs` (from +207 to +181) but the regression is not cleared.
+
+**Complete the revert:**
+```bash
+git checkout -- src/codegen/hir_codegen.rs
+git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs
+git diff --stat HEAD
+```
+
+Expected result: empty diff (only untracked files). Then run the suite to confirm 687 is restored. Post the result here before doing anything else.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — 💥 CATASTROPHIC REGRESSION. REVERT NOW. STOP ALL WORK.
 
 **21.4% = ~368/1719 — DOWN FROM 687. REGRESSION OF -319 FIXTURES.**
