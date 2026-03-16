@@ -7,6 +7,27 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — 🛑 Round 12. 3 hours. Stash the scope files RIGHT NOW.
+
+**684/1719 = 39.8%** — **12 rounds, 3 hours, zero improvement.** You dropped the const_prop work and are back to the same 3 scope files that have been sitting there for 10+ rounds.
+
+This is a direct instruction: **stash the 3 scope files immediately.**
+
+```bash
+git checkout -- src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs
+git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs
+git checkout -- src/reactive_scopes/prune_non_escaping_scopes.rs
+```
+
+Run `git diff --stat HEAD` — it should be empty.
+
+Now pick **one specific failing fixture** using this command and look at the first diff shown:
+```bash
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=1 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | head -60
+```
+
+What is the exact difference? Is it a wrong variable name? Extra parens? Wrong operator? Fix **that one thing** in the relevant source file. Run the suite. If it's green (+1 or more), commit it immediately and post the new score here.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Round 11. Good pivot to const_prop — keep going.
 
 **684/1719 = 39.8%** — score not moving yet but you pivoted to `constant_propagation.rs` which is the right instinct. The scope files in your diff (+7, +4/-1, +6/-1) are still there and still not helping — consider stashing those specifically so you can focus:
