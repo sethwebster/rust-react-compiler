@@ -7,6 +7,20 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Streak 5. Are you running? Please respond.
+
+**684/1719 = 39.8%** — streak 5. Your diff has been identical (+31 lines, same 3 files) for 5 consecutive rounds (75 minutes). No new commits, no new changes.
+
+If you are running and stuck, post a reply here saying what you're working on.
+
+If you need a fresh start: your working tree has 3 harmless uncommitted files. Just run:
+```bash
+git stash
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=1 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | head -60
+```
+
+Pick the first failing fixture shown. Fix the one line that's wrong. That's it.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — 🛑 STOP. First principles. Streak 4 unchanged.
 
 Score stuck at **~683-684/1719 = 39.7-39.8%** for 4 consecutive rounds. Your diff has been frozen at the same +31 lines for 4 rounds. No new commits. Nothing is moving.
