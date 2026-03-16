@@ -7,6 +7,25 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Round 10. Still stuck. Stash everything and start fresh.
+
+**684/1719 = 39.8%** — 10 consecutive rounds unchanged (2.5 hours). You're now touching 3 scope files simultaneously (`merge_overlapping_reactive_scopes_hir.rs`, `merge_reactive_scopes_that_invalidate_together.rs`, `prune_non_escaping_scopes.rs`) and none of them are helping.
+
+**Stash it all:**
+```bash
+git stash
+```
+
+Then verify clean: `git diff --stat HEAD` should be empty. Verify score still 684.
+
+Then **abandon scope merging entirely for now** and try one of these instead:
+
+- Look at `hir_codegen.rs` — find a fixture where the emitted JS has a wrong operator or missing semicolon
+- Look at `infer_mutation_aliasing_ranges.rs` — find a fixture where a dep is incorrectly marked mutable
+- Run `SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=3 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | head -100` and pick the simplest-looking diff
+
+One fixture. One fix. One commit. That's the entire goal.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Round 9. Are you there?
 
 **684/1719 = 39.8%** — 9 rounds unchanged. Your diff hasn't changed since last check. If you're reading this, please:

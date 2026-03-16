@@ -36,7 +36,7 @@ Update the following before stopping:
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
 | Correct rate | **39.8% (684/1719)** — 🎉 new best |
-| Uncommitted changes | merge_overlapping_reactive_scopes_hir.rs +7, merge_reactive_scopes_that_invalidate_together.rs +4/-1 (unchanged diff, streak 9 — worker stalled, no new activity) |
+| Uncommitted changes | merge_overlapping +7, merge_reactive_scopes +4/-1, prune_non_escaping_scopes +6/-1 (streak 10 — worker active but 3 scope files still not helping) |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -310,6 +310,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-15 | 82.7 | **39.7** | — | — | — | supervisor check — ~683/1719 (noise), streak 7 — worker reverted bulk but has +4/-1 still in merge_reactive_scopes |
 | 2026-03-16 | 82.7 | **39.7** | — | — | — | supervisor check — ~683/1719 (noise), streak 8 — 2hrs no improvement, now also touching merge_overlapping_reactive_scopes_hir |
 | 2026-03-16 | 82.7 | **39.8** | — | — | — | supervisor check — 684/1719, streak 9 — diff identical to last round, worker appears stalled |
+| 2026-03-16 | 82.7 | **39.8** | — | — | — | supervisor check — 684/1719, streak 10 — worker active, 3 scope files modified, still not improving |
 
 ---
 
