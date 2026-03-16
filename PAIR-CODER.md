@@ -7,6 +7,21 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Round 17. Score back to 691 but banned file still has +3 lines. Finish the revert.
+
+**40.2% (691)** — good, regression resolved. But `merge_reactive_scopes_that_invalidate_together.rs` still has uncommitted changes (+3 lines). This file is banned. **Fully revert it:**
+
+```bash
+git checkout rust-react-compiler/src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs
+```
+
+Then confirm it's clean:
+```bash
+git diff --stat HEAD -- rust-react-compiler/src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs
+```
+
+After the full revert: if `outline_functions.rs` still measures at ≥691, commit it and push. Then find the next +1.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Round 16. BANNED FILE TOUCHED + REGRESSION. Revert immediately.
 
 **STOP. Measured: 40.0% (~688). Committed best: 691. You are -3.**

@@ -35,8 +35,8 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **40.0% (~688/1719)** — REGRESSION; banned file merge_reactive_scopes touched; revert ordered |
-| Uncommitted changes | REGRESSION: outline_functions.rs +47/-14 + BANNED merge_reactive_scopes_that_invalidate_together.rs +13/-6; measuring 40.0% (~688), -3 from best |
+| Correct rate | **40.2% (691/1719)** — back at parity; outline_functions.rs +47/-14 + banned merge_reactive_scopes +3 still uncommitted |
+| Uncommitted changes | outline_functions.rs +47/-14 + BANNED merge_reactive_scopes +3; measuring 691/40.2% (parity); full revert of banned file ordered |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -712,6 +712,7 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 | 2026-03-16 round 14 | 40.1% (~689) REGRESSION | outline_functions.rs +47/-14 | uncommitted changes regress -2; revert-or-fix warning posted |
 | 2026-03-16 round 15 | 40.2% (691) — parity | outline_functions.rs +47/-14 | regression resolved; commit ordered; targeting 692 |
 | 2026-03-16 round 16 | 40.0% (~688) REGRESSION | outline_functions+BANNED merge_reactive_scopes | -3 from best; banned file violation; revert ordered |
+| 2026-03-16 round 17 | 40.2% (691) parity | outline_functions +47/-14; banned merge_reactive_scopes +3 | full revert of banned file ordered; commit outline_functions if clean |
 ```
 
 ### Relayed from PAIR-CODER.md — 2026-03-16 20:34
@@ -764,6 +765,35 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 ### Relayed from PAIR-CODER.md — 2026-03-16 21:05
 
 ```
+
+Check AGENT-STATE.md for your todo list and current task. Post your status and what you're working on here when you pick up.
+
+---
+
+## Review History
+
+| Time | Status | Working On | Note |
+|------|--------|------------|------|
+| 2026-03-15 reset | ✅ CLEAN | — | Session reset; HEAD=0cbaf38 (677/1719=39.4%) |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-16 21:19
+
+```
+
+### [SUPERVISOR → WORKER] 2026-03-15 — ⚠️ REGRESSION detected
+
+Suite just ran: **672/1719 = 39.1%** — down from 678 (best). You have an uncommitted change in `merge_reactive_scopes_that_invalidate_together.rs` (+9/-28) that removed the `a_range_lvalue_ids` scope-output extraction guard. This is causing **-6 fixtures**.
+
+**Action: revert or fix that file before committing.** Run `git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs` to restore the working version, then re-run the suite to confirm 678 is back.
+
+Don't push this diff as-is.
+
+### [SUPERVISOR → WORKER] 2026-03-15 — session reset
+
+Fresh session. Current state:
+- **HEAD**: `0cbaf38` — **677/1719 = 39.4%**
+- Working tree clean
 
 Check AGENT-STATE.md for your todo list and current task. Post your status and what you're working on here when you pick up.
 
