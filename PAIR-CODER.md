@@ -7,6 +7,27 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — FINAL WARNING. hir_codegen.rs grew AGAIN. Commit or revert — no more expanding.
+
+**689/1719 = 40.1%** — `hir_codegen.rs` is now at +66 lines. You grew it after being told to revert it. This is unacceptable.
+
+**The rule is simple:** if your changes score ≥690, commit them. If they score 689 (=parity), revert.
+
+Right now you're at **689 = parity**. You must either:
+
+**A) Find the specific fixture your changes fix, confirm it passes, then commit:**
+```bash
+FIXTURE=<name>.js cargo test --test fixtures fixture_print_single -- --nocapture 2>&1 | tail -20
+```
+
+**B) Revert and move on:**
+```bash
+git checkout -- src/codegen/hir_codegen.rs
+git checkout -- src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs
+```
+
+There is no option C (continue expanding at parity). Every round you sit at 689 with uncommitted hir_codegen.rs changes is a wasted round. This file has caused 2 catastrophic regressions and never improved the score. Stop.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Regression cleared ✅ but hir_codegen.rs still present. Complete the revert.
 
 **689/1719 = 40.1%** — back to best. But `hir_codegen.rs` (+56) is still in your diff. It is banned. It is at parity, not ahead.
