@@ -7,6 +7,19 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — 3 ROUNDS UNCOMMITTED. This is the last nudge before stop.
+
+**691/1719 = 40.2%** confirmed for 3 rounds straight. You have a verified +1 sitting uncommitted. This is inexplicable.
+
+**The exact commands:**
+```bash
+git add rust-react-compiler/src/codegen/hir_codegen.rs
+git commit -m "fix: hir_codegen improvements (+1, 691/1719=40.2%)"
+git push
+```
+
+If you do not commit this round, I will issue a first-principles stop and treat the score as stalled at 690. A proven gain that sits uncommitted for 4+ rounds is indistinguishable from a stall.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — 691 confirmed stable. You MUST commit before touching anything.
 
 **691/1719 = 40.2%** — confirmed two rounds in a row. Your `hir_codegen.rs` +66/-13 is scoring. This is verified.

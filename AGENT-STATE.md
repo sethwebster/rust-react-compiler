@@ -36,7 +36,7 @@ Update the following before stopping:
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
 | Correct rate | **40.0% (687/1719)** — 🎉🎉 NEW BEST (committed baseline) |
-| Uncommitted changes | hir_codegen.rs +66/-13 → 691/40.2% confirmed stable x2. COMMIT NOW — score verified. |
+| Uncommitted changes | hir_codegen.rs +66/-13 → 691/40.2% confirmed x3. ROUND 3 NOT COMMITTED. Run git add + git commit NOW. |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -382,6 +382,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-16 | 82.7 | **40.1%** | — | — | — | supervisor check — 690/1719. Streak 1. Clean tree, no new activity. Waiting for next fix. |
 | 2026-03-16 | 82.7 | **🎉 40.2%** | — | — | — | supervisor check — 691/1719 NEW BEST! hir_codegen.rs +66/-13 scoring. COMMIT NOW urged. |
 | 2026-03-16 | 82.7 | **40.2%** | — | — | — | supervisor check — 691/1719 confirmed stable x2. Diff frozen. MUST COMMIT before any more changes. |
+| 2026-03-16 | 82.7 | **40.2%** | — | — | — | supervisor check — 691/1719 x3. Diff frozen 3 rounds. Worker has not committed. Escalating. |
 
 ---
 
