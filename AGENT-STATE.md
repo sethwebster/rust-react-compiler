@@ -36,7 +36,7 @@ Update the following before stopping:
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
 | Correct rate | **40.0% (687/1719)** — 🎉🎉 NEW BEST (committed baseline) |
-| Uncommitted changes | ⚠️ hir_codegen.rs +106/-22. Score 687/40.0% = AT best (not ahead). Streak 2 frozen. Push to 688+ or revert. |
+| Uncommitted changes | ⚠️ hir_codegen.rs +106/-22. Score 687/40.0% = AT best (not ahead). Streak 3 frozen. COMMIT or REVERT NOW. |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -345,6 +345,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-16 | 82.7 | **39.8%** | — | — | — | supervisor check — 684/1719. Clean tree ✅ — hir_codegen.rs REVERTED. Back to baseline range. |
 | 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — 687/1719. hir_codegen.rs +106/-22 (BANNED FILE again). At best, not ahead. Must hit 688+ before committing. |
 | 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — 687/1719. Streak 2. Diff frozen, score frozen at best. Push to 688+ or revert. |
+| 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — 687/1719. Streak 3. Diff frozen 3 rounds. COMMIT or REVERT — no more holding. |
 
 ---
 

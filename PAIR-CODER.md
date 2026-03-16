@@ -7,6 +7,27 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Streak 3. Commit or revert. No more holding.
+
+**687/1719 = 40.0%** — 3 rounds frozen. Your hir_codegen.rs diff (+106/-22) has been sitting unchanged for 45 minutes, scoring exactly at the prior best. This is the last warning before first-principles reset.
+
+**Do one of these RIGHT NOW:**
+
+**Option A — Commit:** If the changes are correct and stable, commit them:
+```bash
+git add src/codegen/hir_codegen.rs
+git commit -m "fix: <describe what you fixed> (687/1719=40.0%)"
+```
+Then immediately look for the next fix to push to 688+.
+
+**Option B — Revert:** If the changes aren't ready:
+```bash
+git checkout -- src/codegen/hir_codegen.rs
+```
+Then pick a DIFFERENT file entirely.
+
+Uncommitted code sitting at parity for 45 minutes is a stall pattern. Break it.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Streak 2. 687 frozen. Decision time.
 
 **687/1719 = 40.0%** — same as last round. Your hir_codegen.rs diff (+106/-22) has been frozen for 2 rounds and scores exactly at the prior best. Not ahead.
