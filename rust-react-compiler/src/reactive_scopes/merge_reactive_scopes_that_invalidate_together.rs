@@ -100,6 +100,20 @@ pub fn run_with_env(hir: &mut HIRFunction, env: &mut Environment) {
         by_ident.max(by_decl)
     };
 
+    // Pre-compute set of reactive lvalue identifiers (lvalue.reactive == true).
+    // Used to guard dead-result MethodCall absorption in gap: if any operand of the
+    // MethodCall is reactive, we should NOT treat it as safe — absorbing it could
+    // change when reactive side-effects execute relative to the memoization check.
+    let reactive_ids: HashSet<IdentifierId> = hir.body.blocks.values()
+        .flat_map(|b| b.instructions.iter())
+        .filter(|i| i.lvalue.reactive)
+        .map(|i| i.lvalue.identifier)
+        .collect();
+
+    // Maps LoadLocal result → source identifier (the variable being loaded).
+    // Used to trace receiver temps back to their source variables for gap checks.
+    let mut load_local_source: HashMap<IdentifierId, IdentifierId> = HashMap::new();
+
     let mut store_local_value: HashMap<IdentifierId, IdentifierId> = HashMap::new();
     let mut is_always_invalidating: HashMap<IdentifierId, bool> = HashMap::new();
 
@@ -119,12 +133,17 @@ pub fn run_with_env(hir: &mut HIRFunction, env: &mut Environment) {
             if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
                 store_local_value.insert(lvalue.place.identifier, value.identifier);
             }
+            if let InstructionValue::LoadLocal { place, .. } = &instr.value {
+                load_local_source.insert(instr.lvalue.identifier, place.identifier);
+            }
 
             if let InstructionValue::LoadGlobal { binding, .. } = &instr.value {
                 let name = match binding {
                     crate::hir::hir::NonLocalBinding::Global { name } => name.clone(),
                     crate::hir::hir::NonLocalBinding::ModuleLocal { name } => name.clone(),
-                    _ => String::new(),
+                    crate::hir::hir::NonLocalBinding::ImportSpecifier { name, .. } => name.clone(),
+                    crate::hir::hir::NonLocalBinding::ImportDefault { name, .. } => name.clone(),
+                    crate::hir::hir::NonLocalBinding::ImportNamespace { name, .. } => name.clone(),
                 };
                 if !name.is_empty() {
                     global_name_of.insert(instr.lvalue.identifier, name);
@@ -263,7 +282,68 @@ pub fn run_with_env(hir: &mut HIRFunction, env: &mut Environment) {
                                 for instr in &block.instructions {
                                     let iid = instr.id.0;
                                     if iid >= a_end && iid < b_start {
-                                        let safe = is_safe_gap_instruction(&instr.value);
+                                        let mut safe = is_safe_gap_instruction(&instr.value);
+                                        // Dead-result MethodCall (result never used) can be safely
+                                        // absorbed into the merged scope body. Their side effects
+                                        // will still execute inside the merged cache block.
+                                        // Only MethodCall (not CallExpression): hook calls are
+                                        // CallExpressions that must run unconditionally per React's
+                                        // rules of hooks, so we must not absorb them into scopes.
+                                        // A dead-result MethodCall (result never used after the
+                                        // instruction) can be safely absorbed into the merged scope
+                                        // body if:
+                                        //   1. Result is dead (lu <= iid)
+                                        //   2. No ARGUMENT (non-receiver) is reactive — reactive
+                                        //      args indicate the call has side effects depending on
+                                        //      reactive state that might not be tracked by the
+                                        //      merged scope's deps.
+                                        //   3. The RECEIVER is a dep of scope B (so the call still
+                                        //      executes whenever B's deps change, maintaining
+                                        //      correct semantics).
+                                        //
+                                        // Example safe: entries.map(_temp) with receiver=entries
+                                        //   and JSX scope B has dep on entries → safe.
+                                        // Example unsafe: console.log(x) with receiver=console
+                                        //   and x not in B's deps → unsafe.
+                                        if !safe && matches!(&instr.value, InstructionValue::MethodCall { .. }) {
+                                            let lu = last_use(instr.lvalue.identifier);
+                                            if lu <= iid {
+                                                let has_reactive_arg = if let InstructionValue::MethodCall { args, .. } = &instr.value {
+                                                    args.iter().any(|arg| {
+                                                        let arg_id = match arg {
+                                                            crate::hir::hir::CallArg::Place(p) => p.identifier,
+                                                            crate::hir::hir::CallArg::Spread(s) => s.place.identifier,
+                                                        };
+                                                        reactive_ids.contains(&arg_id)
+                                                    })
+                                                } else { false };
+                                                if !has_reactive_arg {
+                                                    // Check receiver is declared by scope A (the current candidate).
+                                                    // If the receiver's value comes from scope A's declarations,
+                                                    // then absorbing this call is safe — scope A already tracks
+                                                    // when the receiver changes, so the merged scope will too.
+                                                    // Note: receiver is often a LoadLocal temp; trace back via
+                                                    // load_local_source to find the underlying named variable.
+                                                    let receiver_from_a = if let InstructionValue::MethodCall { receiver, .. } = &instr.value {
+                                                        let recv_id = receiver.identifier;
+                                                        // Trace through LoadLocal chain to find source var
+                                                        let recv_source = load_local_source.get(&recv_id).copied().unwrap_or(recv_id);
+                                                        let recv_val = store_local_value.get(&recv_source).copied();
+                                                        if std::env::var("RC_DEBUG").is_ok() {
+                                                            eprintln!("[gap_dead_mc] recv_id={} recv_source={} recv_val={:?}", recv_id.0, recv_source.0, recv_val);
+                                                            eprintln!("  a_decl_ids={:?}", a_decl_ids.iter().map(|id| id.0).collect::<Vec<_>>());
+                                                        }
+                                                        a_decl_ids.contains(&recv_source)
+                                                            || recv_val.map_or(false, |v| a_decl_ids.contains(&v))
+                                                            || a_range_lvalue_ids.contains(&recv_source)
+                                                            || recv_val.map_or(false, |v| a_range_lvalue_ids.contains(&v))
+                                                    } else { false };
+                                                    if receiver_from_a {
+                                                        safe = true;
+                                                    }
+                                                }
+                                            }
+                                        }
                                         if std::env::var("RC_DEBUG").is_ok() {
                                             let kind_str = if let InstructionValue::StoreLocal { lvalue, .. } = &instr.value {
                                                 format!("{:?}", lvalue.kind)
@@ -311,6 +391,7 @@ pub fn run_with_env(hir: &mut HIRFunction, env: &mut Environment) {
                         } else {
                             let cur_scope = &env.scopes[&cur.scope_id];
                             let next_scope = &env.scopes[&sid];
+
                             let can_merge = can_merge_scopes(
                                 cur_scope,
                                 next_scope,

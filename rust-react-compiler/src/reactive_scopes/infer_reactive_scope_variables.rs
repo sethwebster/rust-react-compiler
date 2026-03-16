@@ -84,6 +84,29 @@ fn find_disjoint_mutable_values(
     let mut set = DisjointSet::new();
     let mut declarations: HashMap<DeclarationId, IdentifierId> = HashMap::new();
 
+    // Pre-compute set of all identifiers used as operands in any instruction, terminal, or phi.
+    // This is used to detect "dead" results (MethodCall/CallExpression whose lvalue is
+    // never referenced by anything else), which should not get memoized scopes.
+    let used_as_operand: HashSet<IdentifierId> = {
+        let mut used = HashSet::new();
+        for (_, block) in &hir.body.blocks {
+            for phi in &block.phis {
+                for op in phi.operands.values() {
+                    used.insert(op.identifier);
+                }
+            }
+            for instr in &block.instructions {
+                for op in each_instruction_value_operand(&instr.value) {
+                    used.insert(op.identifier);
+                }
+            }
+            for op in crate::hir::visitors::each_terminal_operand(&block.terminal) {
+                used.insert(op.identifier);
+            }
+        }
+        used
+    };
+
     // Build a map: identifier id → binding name, for detecting hook calls.
     // Covers all NonLocalBinding variants (Global, ImportSpecifier, etc.)
     // AND locally-defined hooks loaded via LoadLocal (e.g., `function useFreeze(x) {}`
@@ -323,7 +346,33 @@ fn find_disjoint_mutable_values(
                 InstructionValue::CallExpression { callee, .. }
                     if global_names.get(&callee.identifier).map_or(false, |n| is_hook_name(n))
             );
-            if !is_hook_call && (may_alloc || (lvalue_mutable && lvalue_reactive && !is_transparent_read)) {
+            // Skip dead-result MethodCall: if the lvalue is never used as an operand by
+            // any instruction, terminal, or phi, AND no operand of the call is reactive,
+            // there's no value in memoizing it.
+            // This mirrors TS behavior where MemoLevel=Never values don't get scopes.
+            // Only MethodCall — CallExpression covers hooks which must run unconditionally
+            // and may have other side effects we should not skip.
+            //
+            // Guard: if any ARGUMENT (non-receiver) is reactive, keep the call in the disjoint set.
+            // Example: `x.y.push(props.p0)` — arg props.p0 is reactive; excluding the call
+            // would cause x's scope to lose props.p0 as a reactive dependency.
+            // But `entries.map(_temp)` — arg _temp is NOT reactive, so we can safely exclude it.
+            let is_dead_result_call = matches!(
+                &instr.value,
+                InstructionValue::MethodCall { .. }
+            ) && !used_as_operand.contains(&lvalue_id)
+                && if let InstructionValue::MethodCall { args, .. } = &instr.value {
+                    !args.iter().any(|arg| {
+                        let arg_id = match arg {
+                            crate::hir::hir::CallArg::Place(p) => p.identifier,
+                            crate::hir::hir::CallArg::Spread(s) => s.place.identifier,
+                        };
+                        ident_reactive.contains(&arg_id)
+                    })
+                } else {
+                    true
+                };
+            if !is_hook_call && !is_dead_result_call && (may_alloc || (lvalue_mutable && lvalue_reactive && !is_transparent_read)) {
                 operands.push(lvalue_id);
             }
 
