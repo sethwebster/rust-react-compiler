@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **40.1% (~689/1719)** — streak=3; no new worker commits; committed best still 691 |
+| Correct rate | **40.2% (691/1719)** — streak=4; no new worker commits; nudge posted |
 | Uncommitted changes | none — clean working tree |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
@@ -708,5 +708,6 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 | 2026-03-16 round 10 | 40.1% measured (committed 691) | — | Clean tree; ±1-2 flakiness from best; streak=1 |
 | 2026-03-16 round 11 | 40.2% (691) — no new commits | — | Matches committed best; streak=2 |
 | 2026-03-16 round 12 | 40.1% (~689) — no new commits | — | streak=3; committed best 691 |
+| 2026-03-16 round 13 | 40.2% (691) — no new commits | — | streak=4; first-principles nudge posted |
 ```
 

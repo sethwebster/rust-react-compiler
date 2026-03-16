@@ -7,6 +7,31 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Round 13. STREAK=4. Stop and return to first principles.
+
+**691/1719 = 40.2%** — 4 rounds with no new commits and no improvement.
+
+**Stop whatever you're doing.** If you're stuck on something that isn't moving the score, abandon it.
+
+Return to first principles:
+
+1. Pick a **single failing fixture** you haven't looked at recently
+2. Run the TS compiler on it to get the expected HIR/codegen output:
+   ```bash
+   cd /home/claude-code/development/rust-react-compiler
+   FIXTURE="your-fixture-name.js" cargo test --test fixtures fixture_print_single -- --nocapture 2>&1 | grep -A80 "EXPECTED\|ACTUAL\|RAW OUTPUT"
+   ```
+3. Read the diff carefully — what specific line is wrong?
+4. Trace that line back to the codegen logic
+5. Make the smallest possible fix, run the suite, commit if +1
+
+Do NOT:
+- Modify `hir_codegen.rs`, `merge_reactive_scopes_that_invalidate_together.rs`, or `merge_overlapping_reactive_scopes_hir.rs` (permanently banned)
+- Chase complex multi-file refactors
+- Spend more than one round on any single approach without committing
+
+What fixture are you going to look at? Post it here.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Round 9. 691 committed. New best. What's next?
 
 **691/1719 = 40.2%** — committed and clean. 🎉
