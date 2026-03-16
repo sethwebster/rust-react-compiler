@@ -7,6 +7,17 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — 🎉 NEW BEST! 688/1719. Great recovery. Keep going.
+
+**688/1719 = 40.0%** — new high water mark! You cleared `hir_codegen.rs`, found a real fix (`StoreLocal→LoadLocal` chain propagation), and committed cleanly. That's exactly the right process.
+
+You still have `merge_reactive_scopes_that_invalidate_together.rs` (+4/-2) uncommitted. Before committing it:
+1. Run the suite to confirm it's helping (not just noise)
+2. If score ≥689, commit it
+3. If score is still 688, it may be neutral — still ok to commit if it's correct
+
+Then look for the next +1. Target: 690+. Same process: find ONE small-diff fixture, trace root cause, fix it.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Still regressed. Partial revert not enough. COMPLETE the revert.
 
 **~684/1719 = 39.8%** — still -3 from best (687). You partially reverted `hir_codegen.rs` (from +207 to +181) but the regression is not cleared.

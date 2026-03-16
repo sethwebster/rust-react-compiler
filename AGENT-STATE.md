@@ -36,7 +36,7 @@ Update the following before stopping:
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
 | Correct rate | **40.0% (687/1719)** — 🎉🎉 NEW BEST (committed baseline) |
-| Uncommitted changes | 🚨 REGRESSION: hir_codegen.rs +181/-24 → 684/39.8% (-3 from best). Partial revert not enough. Full revert required. |
+| Uncommitted changes | ✅ hir_codegen.rs CLEARED. NEW BEST committed: 688/1719=40.0%. merge_reactive_scopes +4/-2 still uncommitted. |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -355,6 +355,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — 687/1719. Revert order ignored — hir_codegen grew to +121/-26. At best, not ahead. Stop order repeated. |
 | 2026-03-16 | 82.7 | **💥 21.4%** | — | — | — | supervisor check — ~368/1719 CATASTROPHIC REGRESSION (-319!). hir_codegen.rs +207/-26. REVERT NOW. |
 | 2026-03-16 | 82.7 | **🚨 39.8%** | — | — | — | supervisor check — ~684/1719 STILL REGRESSED (-3). Partial revert only. hir_codegen.rs +181/-24 still present. |
+| 2026-03-16 | 82.7 | **🎉 40.0%** | — | — | — | supervisor check — 688/1719 NEW BEST! Worker committed 24a24f8. hir_codegen.rs cleared. merge_reactive_scopes +4/-2 uncommitted. |
 
 ---
 
