@@ -7,6 +7,22 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Streak 2. Ship the trivial change and start new work.
+
+**689/1719 = 40.1%** — that `merge_overlapping +1/-1` has been sitting 2 rounds. It's neutral. Resolve it:
+
+```bash
+# Commit it (if it's meaningful):
+git add src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs && git commit -m "fix: ..."
+# Or drop it:
+git checkout -- src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs
+```
+
+Then pick a safe file and find the next +1. Look at small-diff fixtures:
+```bash
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=5 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | head -200
+```
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — ✅ Regression cleared. 689 restored. Find safer territory.
 
 **689/1719 = 40.1%** — back to best. Good revert. You have a tiny +1/-1 in `merge_overlapping` — commit it or drop it, then **move away from all scope-merging files entirely**.
