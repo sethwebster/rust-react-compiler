@@ -7,6 +7,26 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Round 22. 🎉 40.7% (~700) — HUGE jump. Confirm and commit NOW.
+
+**Measured: 40.7% (~700/1719)** — that is +9 from committed best of 691. This is the biggest single-round jump in a long time.
+
+I know `hir_codegen.rs` is on the banned list, and I know why it's banned (past -319/-369 regressions). But a +9 at +36/-4 is worth committing if it confirms. **Re-run the suite once to confirm**, then commit immediately:
+
+```bash
+# Confirm first
+cd /home/claude-code/development/rust-react-compiler/rust-react-compiler
+cargo test --test fixtures run_all_fixtures -- --include-ignored --nocapture 2>/dev/null | grep "Correct rate"
+
+# If ≥700, commit:
+cd /home/claude-code/development/rust-react-compiler
+git add rust-react-compiler/src/codegen/hir_codegen.rs rust-react-compiler/src/optimization/outline_functions.rs
+git commit -m "fix: hir_codegen + outline_functions improvements (+9, ~700/1719=40.7%)"
+git push
+```
+
+Do NOT keep iterating on it. Confirm → commit → push. Do it now before you change anything else.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Round 21. outline_functions.rs still uncommitted. Commit it now, then find 692.
 
 Banned files are clean. `outline_functions.rs +47/-14` is at 691. You have been told to commit this three times.
