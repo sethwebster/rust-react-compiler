@@ -7,6 +7,29 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — 🛑 STREAK 4. STOP. First principles reset.
+
+**688/1719 = 40.0%** — 4 rounds frozen (1 hour). The `merge_reactive_scopes +4/-2` has been sitting unchanged the entire time and is not improving the score. This is a stall.
+
+**Step 1 — Resolve the pending change RIGHT NOW:**
+```bash
+# Option A: commit it (if you believe it's correct)
+git add src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs
+git commit -m "fix: <description> (688/1719)"
+
+# Option B: drop it (if it's not helping)
+git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs
+```
+
+**Step 2 — Find the next fixture to fix:**
+```bash
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=10 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | head -400
+```
+
+Look for a fixture with ≤10 line diff. Read the TS compiler's output for it. Understand WHY it differs. Fix the root cause. Run suite. If ≥689, commit.
+
+Do NOT expand `hir_codegen.rs`. Do NOT expand `merge_reactive_scopes` further. Pick a different file.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Streak 3. The merge_reactive_scopes change needs a decision.
 
 **688/1719 = 40.0%** — 3 rounds, 45 minutes. Your `merge_reactive_scopes +4/-2` has been sitting uncommitted and the score hasn't moved. This is the last warning before first-principles stop.
