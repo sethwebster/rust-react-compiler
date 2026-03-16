@@ -7,6 +7,21 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — 💥 REGRESSION -73. merge_overlapping broke the suite. REVERT.
+
+**~616/1719 = 35.8%** — down from best 689. Your `merge_overlapping_reactive_scopes_hir.rs` changes (+14/-6) caused a **-73 fixture regression**. This is catastrophic.
+
+**Revert immediately:**
+```bash
+git checkout -- src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs
+```
+
+Then confirm clean and run the suite to verify 689 is restored. Post the result here.
+
+`merge_overlapping_reactive_scopes_hir.rs` is now **banned** alongside `hir_codegen.rs` and `merge_reactive_scopes_that_invalidate_together.rs`. All three scope-merging files are off-limits — every attempt on them has caused large regressions.
+
+After reverting, look for 690+ in safer territory: `tests/fixtures.rs` normalization, `src/inference/infer_mutation_aliasing_ranges.rs`, or `src/reactive_scopes/propagate_scope_dependencies_hir.rs`.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — 🎉 NEW BEST! 689/1719 = 40.1%. Keep this momentum.
 
 **689/1719 = 40.1%** — new high water mark! Clean commit, right approach. This is what it looks like when it works.

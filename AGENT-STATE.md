@@ -36,7 +36,7 @@ Update the following before stopping:
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
 | Correct rate | **40.0% (687/1719)** — 🎉🎉 NEW BEST (committed baseline) |
-| Uncommitted changes | merge_overlapping_reactive_scopes_hir +7/-4. Score ~688/40.0% (noise). Streak 2. Need 690+ to commit. |
+| Uncommitted changes | 💥 REGRESSION: merge_overlapping_reactive_scopes_hir +14/-6 → 35.8% (-73 fixtures!). REVERT NOW. |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -369,6 +369,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — ~688/1719 (noise, committed best=689). Clean tree. Streak reset. Ready for 690+. |
 | 2026-03-16 | 82.7 | **40.1%** | — | — | — | supervisor check — 689/1719. Clean tree confirmed. Streak 1. No new worker activity yet. |
 | 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — ~688/1719 (noise). Streak 2. Worker on merge_overlapping_reactive_scopes_hir +7/-4. Not ahead yet. |
+| 2026-03-16 | 82.7 | **💥 35.8%** | — | — | — | supervisor check — ~616/1719 REGRESSION (-73!). merge_overlapping grew to +14/-6. REVERT NOW. |
 
 ---
 
