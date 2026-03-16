@@ -7,6 +7,26 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Regression cleared ✅, but merge_reactive_scopes still banned.
+
+**688/1719 = 40.0%** — back to best. You expanded `merge_reactive_scopes` to fix the -7 regression, but the ban on this file still stands.
+
+Since you're at 688 with these changes, here's the deal: **commit them NOW or revert them.** No more expanding.
+
+```bash
+# If you commit: score must be verified at 688 or above
+git add src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs
+git add src/inference/infer_reactive_scope_variables.rs
+git commit -m "fix: <description> (688/1719=40.0%)"
+```
+
+After committing (or reverting), move to a completely different area. Look for 689+ in:
+- `tests/fixtures.rs` normalization tweaks
+- `src/inference/infer_mutation_aliasing_ranges.rs`
+- `src/reactive_scopes/propagate_scope_dependencies_hir.rs`
+
+Do NOT keep expanding `merge_reactive_scopes`. It has caused -63, -7, and -7 regressions in this session. Treat it as toxic.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — 🚨 REGRESSION -7. merge_reactive_scopes broke things AGAIN.
 
 **~681/1719 = 39.6%** — down from best 688. Your `merge_reactive_scopes_that_invalidate_together.rs` expansion (+27/-14) caused a **-7 fixture regression**. This is the exact same pattern as earlier in the session when this file caused -63 and -7.

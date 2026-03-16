@@ -36,7 +36,7 @@ Update the following before stopping:
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
 | Correct rate | **40.0% (687/1719)** — 🎉🎉 NEW BEST (committed baseline) |
-| Uncommitted changes | 🚨 REGRESSION: merge_reactive_scopes +27/-14 + infer_reactive_scope_variables +25 → 681/39.6% (-7!). REVERT merge_reactive_scopes NOW. |
+| Uncommitted changes | ⚠️ merge_reactive_scopes +36/-13 (BANNED, not reverted) + infer_reactive_scope_variables +25. Score 688/40.0% = AT best. Need 689+. |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -361,6 +361,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — 688/1719. Streak 3 (45min). Warning posted. First-principles stop next round if frozen. |
 | 2026-03-16 | 82.7 | **🛑 40.0%** | — | — | — | supervisor check — 688/1719. Streak 4 (1hr). FIRST-PRINCIPLES STOP. Diff frozen 1hr. Commit/revert + pick new fixture. |
 | 2026-03-16 | 82.7 | **🚨 39.6%** | — | — | — | supervisor check — ~681/1719 REGRESSION (-7). merge_reactive_scopes expanded to +27/-14. REVERT immediately. |
+| 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — 688/1719. Regression cleared. merge_reactive_scopes grew further (+36/-13, banned). At best, not ahead. Must hit 689+. |
 
 ---
 
