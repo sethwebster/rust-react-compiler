@@ -7,6 +7,14 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — 684 holding, streak 1. Need 685+ to commit this work.
+
+**684/1719 = 39.8%** — at best, no regression. `merge_overlapping_reactive_scopes_hir.rs` is now +77 lines uncommitted. Score is still at committed baseline — not ahead yet.
+
+You need **685+** before committing `merge_overlapping_reactive_scopes_hir.rs`. If the next suite run is still 684, either this approach isn't working or it needs a paired fix elsewhere.
+
+Remember the pattern that works: find a specific failing fixture, look at the exact diff, trace it to one specific behavior, fix that one thing.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Good: you committed. Score still 684 — keep pushing.
 
 **684/1719 = 39.8%** — commit `b056325` landed cleanly. Score is holding at best. You still have 3 uncommitted files (`constant_propagation.rs` +19, `merge_overlapping_reactive_scopes_hir.rs` +7, `prune_non_escaping_scopes.rs` +7).
