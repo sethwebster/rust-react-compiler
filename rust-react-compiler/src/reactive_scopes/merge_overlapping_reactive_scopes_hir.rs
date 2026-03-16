@@ -407,7 +407,7 @@ pub fn run_with_env(hir: &mut HIRFunction, env: &mut Environment) {
                 if survivor_always_inv && new_always_inv {
                     if std::env::var("RC_DEBUG").is_ok() {
                         eprintln!(
-                            "[merge] merging {:?} into {:?}: both always-invalidating",
+                            "[merge] merging {:?} into {:?}: both always-invalidating (truly overlapping)",
                             sid.0, survivor.0
                         );
                     }

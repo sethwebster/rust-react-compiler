@@ -1637,9 +1637,64 @@ impl<'a> Codegen<'a> {
                     continue;
                 }
 
+                Terminal::Branch { test, consequent, alternate, fallthrough, logical_op: None, .. } => {
+                    // Ternary branch (logical_op: None). Loop test blocks are always
+                    // pre-marked visited before body walks, so if we reach a Branch here
+                    // it must be a side-effectful ternary. Buffer each arm; if they
+                    // produce statements, emit as a ternary expression statement:
+                    // `test ? (arm1_stmts_as_expr) : (arm2_stmts_as_expr);`
+                    let test_expr = self.expr(test);
+
+                    // Snapshot scope state — restore if arms produce no output
+                    // (pure-value arms are handled by phi resolution, not by statement emission).
+                    let saved_emitted_scopes = emitted_scopes.clone();
+                    let saved_scope_index = *scope_index;
+
+                    let mut arm1_buf = String::new();
+                    let mut vis2 = visited.clone();
+                    for &bid in &self.early_return_handled_blocks.clone() {
+                        vis2.insert(bid);
+                    }
+                    self.emit_cfg_region(
+                        *consequent, Some(*fallthrough), indent + 1, &mut arm1_buf,
+                        &mut vis2, emitted_scopes, scope_index, instr_scope, inlined_ids, scope_instrs,
+                    );
+
+                    let mut arm2_buf = String::new();
+                    let mut vis3 = visited.clone();
+                    for &bid in &self.early_return_handled_blocks.clone() {
+                        vis3.insert(bid);
+                    }
+                    self.emit_cfg_region(
+                        *alternate, Some(*fallthrough), indent + 1, &mut arm2_buf,
+                        &mut vis3, emitted_scopes, scope_index, instr_scope, inlined_ids, scope_instrs,
+                    );
+
+                    let arm1_expr = stmts_to_ternary_arm(&arm1_buf);
+                    let arm2_expr = stmts_to_ternary_arm(&arm2_buf);
+
+                    if arm1_expr.is_some() || arm2_expr.is_some() {
+                        let a1 = arm1_expr.as_deref().unwrap_or("undefined");
+                        let a2 = arm2_expr.as_deref().unwrap_or("undefined");
+                        let _ = writeln!(out, "{pad}{test_expr} ? {a1} : {a2};");
+                    } else {
+                        // Arms produced no statements — restore scope state so that any
+                        // scope instructions in the arms are re-processed at the correct
+                        // level (they'll be handled by the fallthrough block or outer walk).
+                        *emitted_scopes = saved_emitted_scopes;
+                        *scope_index = saved_scope_index;
+                    }
+
+                    if Some(*fallthrough) == stop_at {
+                        return;
+                    }
+                    current = *fallthrough;
+                    continue;
+                }
+
                 Terminal::Branch { fallthrough, .. } => {
-                    // Branch terminals appear in while/for test blocks.
-                    // The caller handles the loop structure; just follow fallthrough.
+                    // logical_op: Some(_) Branch — logical expression (&&, ||, ??).
+                    // The expression value is computed via phi nodes; just follow fallthrough.
                     if Some(*fallthrough) == stop_at {
                         return;
                     }
@@ -1815,14 +1870,32 @@ impl<'a> Codegen<'a> {
                     };
 
                     // Reconstruct update expression by walking the entire update sub-CFG
-                    // (from update_bid to just before test_bid). Complex updates (ternary
-                    // conditionals) span multiple blocks; collect all non-inlined instructions
-                    // and join as comma-separated expressions.
-                    let update_expr = if let Some(ubid) = update_bid {
-                        let exprs = self.collect_for_update_exprs(ubid, test_bid);
-                        exprs.join(", ")
+                    // (from update_bid to just before test_bid). If the update block is
+                    // unreachable from the loop body (e.g., all paths break/return),
+                    // suppress the update. Also promote loop variable from `let` to `const`.
+                    let update_reachable = update_bid.map_or(false, |ubid| {
+                        self.is_update_reachable(loop_bid, ubid, test_bid, fall_bid)
+                    });
+                    let update_expr = if update_reachable {
+                        if let Some(ubid) = update_bid {
+                            let exprs = self.collect_for_update_exprs(ubid, test_bid);
+                            exprs.join(", ")
+                        } else {
+                            String::new()
+                        }
                     } else {
                         String::new()
+                    };
+
+                    // When there IS an update block but it's dead (unreachable from the
+                    // loop body), the loop variable is never mutated by the update step,
+                    // so `let` can be promoted to `const`.
+                    // NOTE: Do NOT promote when update_bid is None — the loop body might
+                    // manually mutate the variable (e.g., `i += 1` inside the body).
+                    let init_expr = if update_bid.is_some() && !update_reachable && init_expr.starts_with("let ") {
+                        format!("const {}", &init_expr[4..])
+                    } else {
+                        init_expr
                     };
 
                     let _ = writeln!(out, "{pad}for ({init_expr}; {test_expr}; {update_expr}) {{");
@@ -6477,6 +6550,65 @@ impl<'a> Codegen<'a> {
     /// Walks the entire sub-CFG from `start` to just before `stop` (exclusive),
     /// collecting all non-inlined instructions and emitting them as expressions.
     /// Returns them as comma-separated strings (e.g. "x = x + t, x").
+    /// Check whether the for-loop's update block is reachable from the loop body.
+    /// If the loop body always exits (break/return) without reaching the update block,
+    /// returns false (update is dead and can be suppressed).
+    ///
+    /// Uses a two-phase approach:
+    /// 1. Mark "always-exit" blocks: blocks that unconditionally jump to fall_bid/return.
+    /// 2. BFS from loop_bid following only edges that don't go through always-exit branches.
+    fn is_update_reachable(&self, loop_bid: crate::hir::hir::BlockId, update_bid: crate::hir::hir::BlockId, test_bid: crate::hir::hir::BlockId, fall_bid: crate::hir::hir::BlockId) -> bool {
+        use std::collections::{HashSet, VecDeque};
+
+        // Phase 1: compute "always-exits" set — blocks that are guaranteed to
+        // transfer control to fall_bid or Return without reaching update_bid.
+        // Iterate to fixpoint (max 64 iterations for typical loops).
+        let mut always_exits: HashSet<crate::hir::hir::BlockId> = HashSet::new();
+        for _ in 0..64 {
+            let prev_size = always_exits.len();
+            for (bid, block) in &self.hir.body.blocks {
+                if always_exits.contains(bid) { continue; }
+                if *bid == update_bid || *bid == test_bid { continue; }
+                let exits = match &block.terminal {
+                    Terminal::Return { .. } => true,
+                    Terminal::Goto { block: dest, .. } => {
+                        // Exit means: goes to fall_bid (break) or to a block that always exits.
+                        // NOTE: Goto to update_bid is NOT an exit — it means "continue the loop".
+                        *dest == fall_bid || always_exits.contains(dest)
+                    }
+                    Terminal::If { consequent, alternate, .. } => {
+                        // All-exit if BOTH branches exit, making the fallthrough unreachable.
+                        let cons_exits = *consequent == fall_bid || always_exits.contains(consequent);
+                        let alt_exits = *alternate == fall_bid || always_exits.contains(alternate);
+                        cons_exits && alt_exits
+                    }
+                    _ => false,
+                };
+                if exits { always_exits.insert(*bid); }
+            }
+            if always_exits.len() == prev_size { break; }
+        }
+
+        // Phase 2: BFS from loop_bid, skip always-exit blocks.
+        let mut q: VecDeque<crate::hir::hir::BlockId> = VecDeque::new();
+        let mut visited_bfs: HashSet<crate::hir::hir::BlockId> = HashSet::new();
+        q.push_back(loop_bid);
+        while let Some(bid) = q.pop_front() {
+            if visited_bfs.contains(&bid) { continue; }
+            if bid == test_bid || bid == fall_bid || bid == update_bid { continue; }
+            if always_exits.contains(&bid) { continue; } // dead path, skip
+            visited_bfs.insert(bid);
+            let Some(block) = self.hir.body.blocks.get(&bid) else { continue };
+            for succ in block.terminal.successors() {
+                if succ == update_bid {
+                    return true; // live path reaches update
+                }
+                q.push_back(succ);
+            }
+        }
+        false // update not reachable from live loop body paths
+    }
+
     fn collect_for_update_exprs(&mut self, start: crate::hir::hir::BlockId, stop: crate::hir::hir::BlockId) -> Vec<String> {
         use std::collections::{HashSet, VecDeque};
 
@@ -9144,6 +9276,24 @@ fn resolve_through_loads(
             None => return current,
         }
     }
+}
+
+/// Convert a buffer of emitted statements into a ternary arm expression.
+/// e.g. "  x = 1;\n" → "(x = 1)"
+///      "  x = 1;\n  y = 2;\n" → "(x = 1, y = 2)"
+/// Returns None if the buffer has no statements (pure-value arm, handled by phi).
+fn stmts_to_ternary_arm(buf: &str) -> Option<String> {
+    let stmts: Vec<&str> = buf.lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if stmts.is_empty() {
+        return None;
+    }
+    let exprs: Vec<String> = stmts.iter()
+        .map(|s| s.trim_end_matches(';').to_string())
+        .collect();
+    Some(format!("({})", exprs.join(", ")))
 }
 
 fn reindent_multiline(expr: &str, body_pad: &str) -> String {
