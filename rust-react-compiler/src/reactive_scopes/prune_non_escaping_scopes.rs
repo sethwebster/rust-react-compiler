@@ -475,12 +475,17 @@ pub fn run_with_env(hir: &HIRFunction, env: &mut Environment) {
         .map(|(&d, _)| d)
         .collect();
 
-    // Prune scopes where no declaration's decl_id is in memoized_decls.
+    // Prune scopes where no declaration's or reassignment's decl_id is in memoized_decls.
+    // Note: context variables (declared outside, reassigned inside via StoreContext) appear
+    // in scope.reassignments, not scope.declarations — so we must check both.
     let scopes_to_prune: Vec<ScopeId> = env
         .scopes
         .iter()
         .filter_map(|(&sid, scope)| {
             let any_memoized = scope.declarations.keys().any(|iid| {
+                let d = id_to_decl.get(iid).copied().unwrap_or(DeclarationId(iid.0));
+                memoized_decls.contains(&d)
+            }) || scope.reassignments.iter().any(|iid| {
                 let d = id_to_decl.get(iid).copied().unwrap_or(DeclarationId(iid.0));
                 memoized_decls.contains(&d)
             });

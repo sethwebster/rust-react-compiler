@@ -397,6 +397,13 @@ pub fn run_with_env(hir: &mut HIRFunction, env: &mut Environment) {
                 // This is detected before deps are computed by checking instruction types.
                 let survivor_always_inv = scope_is_always_inv(survivor, env);
                 let new_always_inv = scope_is_always_inv(sid, env);
+                // Only merge if NEITHER scope reads reactive external identifiers.
+                // If either scope reads reactive identifiers (props/state/etc.), it
+                // has real deps that may differ from the other scope's deps — merging
+                // would over-invalidate the combined scope. Such scopes should remain
+                // separate until propagate_scope_dependencies_hir computes their deps,
+                // then merge_reactive_scopes_that_invalidate_together can merge them
+                // correctly (e.g., via Case 2 for always-inv output deps).
                 if survivor_always_inv && new_always_inv {
                     if std::env::var("RC_DEBUG").is_ok() {
                         eprintln!(

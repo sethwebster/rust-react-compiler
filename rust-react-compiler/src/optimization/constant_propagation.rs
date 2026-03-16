@@ -193,6 +193,20 @@ fn constant_propagation_round(hir: &mut HIRFunction) -> bool {
         })
         .collect();
 
+    // Collect identifiers captured by closures.
+    let mut closure_captured_ids: std::collections::HashSet<IdentifierId> = std::collections::HashSet::new();
+    for block in hir.body.blocks.values() {
+        for instr in &block.instructions {
+            if let InstructionValue::FunctionExpression { lowered_func, .. }
+               | InstructionValue::ObjectMethod { lowered_func, .. } = &instr.value
+            {
+                for ctx_place in &lowered_func.func.context {
+                    closure_captured_ids.insert(ctx_place.identifier);
+                }
+            }
+        }
+    }
+
     // Rewrite pass: substitute constants into instructions.
     // Uses ssa_constants (cross-block) + local_constants (per-block, for let vars).
     // Must update ssa_constants as we replace instructions, so that downstream
@@ -219,8 +233,11 @@ fn constant_propagation_round(hir: &mut HIRFunction) -> bool {
             }
 
             // Track non-const StoreLocals as block-local constants.
+            // Skip closure-captured vars — they may be mutated by closures called later.
             if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
-                if lvalue.kind != InstructionKind::Const && lvalue.kind != InstructionKind::HoistedConst {
+                if lvalue.kind != InstructionKind::Const && lvalue.kind != InstructionKind::HoistedConst
+                    && !closure_captured_ids.contains(&lvalue.place.identifier)
+                {
                     let val = ssa_constants.get(&value.identifier)
                         .or_else(|| local_constants.get(&value.identifier))
                         .cloned();
