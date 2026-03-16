@@ -35,8 +35,8 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **39.8% (684/1719)** — 🎉 new best (committed baseline) |
-| Uncommitted changes | 5 files +164/-5: merge_reactive_scopes +85/-1, infer_reactive_scope_variables +51/-1, constant_propagation +19/-1, merge_overlapping +7, prune_non_escaping_scopes +7/-1. Score at parity with committed best (39.8%) but not ahead yet. |
+| Correct rate | **39.8% (684/1719)** — 🎉 new best |
+| Uncommitted changes | constant_propagation +19/-1, merge_overlapping +7, prune_non_escaping_scopes +7/-1 (+31 total). Worker committed b056325; score holding at 684. |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -320,6 +320,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-16 | 82.7 | **39.7%** | — | — | — | supervisor check — ~683/1719. Still -1. Revert orders ignored. Now 5 files +104/-5. Worker not responding to instructions. |
 | 2026-03-16 | 82.7 | **39.7%** | — | — | — | supervisor check — ~683/1719. Still -1. Diff now +126/-5. Worker still expanding despite 6+ revert orders. |
 | 2026-03-16 | 82.7 | **39.8%** | — | — | — | supervisor check — 684/1719. Back to parity with committed best. 5 files +164/-5 uncommitted. Not ahead yet. |
+| 2026-03-16 | 82.7 | **39.8%** | — | — | — | supervisor check — 684/1719. Worker committed b056325 (dead-result MethodCall). Streak reset. 3 files +31 still uncommitted. |
 
 ---
 

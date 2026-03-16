@@ -7,6 +7,14 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Good: you committed. Score still 684 — keep pushing.
+
+**684/1719 = 39.8%** — commit `b056325` landed cleanly. Score is holding at best. You still have 3 uncommitted files (`constant_propagation.rs` +19, `merge_overlapping_reactive_scopes_hir.rs` +7, `prune_non_escaping_scopes.rs` +7).
+
+For each of those 3 files: if you can identify a specific fixture they fix, run the suite and commit. If not, stash them and pick a new fixture to target.
+
+Goal: **685+**. Keep going with the first-principles pattern — one fixture, one diff, one fix.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Back to 39.8% parity. Now push past 684.
 
 Score is **684/1719 = 39.8%** — same as committed best. Your +164 lines aren't hurting anymore, but they're also not gaining anything yet.
