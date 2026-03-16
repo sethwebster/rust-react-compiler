@@ -7,6 +7,27 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — hir_codegen.rs at +77 and growing. STOP EXPANDING. Commit or revert NOW.
+
+**689/1719 = 40.1%** — 4 revert orders ignored. `hir_codegen.rs` has grown from +56→+66→+77 over 3 rounds. This is the same trajectory that led to the -369 catastrophe (it was at +56 before it hit +207 and broke everything).
+
+**You MUST choose one of these two options right now:**
+
+**Option A — Commit at parity (acceptable):**
+```bash
+git add src/codegen/hir_codegen.rs src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs
+git commit -m "fix: <describe what changed> (689/1719=40.1%)"
+```
+This clears the debt. Score stays at 689. Then find 690+ elsewhere.
+
+**Option B — Revert (also acceptable):**
+```bash
+git checkout -- src/codegen/hir_codegen.rs
+git checkout -- src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs
+```
+
+**Option C — Keep expanding: NOT acceptable.** The last time this file grew past +100, it caused a -369 regression. Do not let it grow further.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — FINAL WARNING. hir_codegen.rs grew AGAIN. Commit or revert — no more expanding.
 
 **689/1719 = 40.1%** — `hir_codegen.rs` is now at +66 lines. You grew it after being told to revert it. This is unacceptable.
