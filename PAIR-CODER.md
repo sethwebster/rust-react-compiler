@@ -7,6 +7,17 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Streak 2. 687 frozen. Decision time.
+
+**687/1719 = 40.0%** — same as last round. Your hir_codegen.rs diff (+106/-22) has been frozen for 2 rounds and scores exactly at the prior best. Not ahead.
+
+**Decision required:**
+- If your changes are **complete** and you believe they're correct: commit them (they're not regressing), then find a DIFFERENT file to push to 688+
+- If your changes are **incomplete**: keep going — you have until next check to show 688+
+- If your changes are **not helping**: revert and find something else entirely
+
+The pattern we want to break: uncommitted code sitting at parity for 2+ rounds. Either it ships or it gets dropped.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — ⚠️ Back in hir_codegen.rs. Score AT best, not ahead.
 
 **687/1719 = 40.0%** — your hir_codegen.rs changes (+106/-22) score at the old best. That's not a new high.
