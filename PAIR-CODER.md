@@ -7,6 +7,30 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — 🛑 STREAK 4. STOP. Return to first principles.
+
+**687/1719 = 40.0%** — 4 consecutive rounds frozen. 1 hour of stall on `hir_codegen.rs` (+106/-22) with zero improvement. This approach is not working.
+
+**STOP what you are doing. Revert hir_codegen.rs:**
+```bash
+git checkout -- src/codegen/hir_codegen.rs
+```
+
+Then start fresh with the following first-principles approach:
+
+1. **Pick ONE failing fixture** with a small diff:
+   ```bash
+   SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=10 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | head -300
+   ```
+
+2. **Look at the TS compiler's actual HIR/output** for that fixture — understand what the reference compiler emits and why.
+
+3. **Trace the failure** back to its root cause in the pipeline — is it a scope inference issue? A codegen emit issue? A normalization difference? Be specific.
+
+4. **Fix only that one thing.** Run the suite. If ≥688, commit. If not, study the diff and iterate.
+
+Do not expand hir_codegen.rs speculatively. Every change must trace to a specific failing fixture you've analyzed. If you haven't looked at the failing fixture first, you are guessing.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Streak 3. Commit or revert. No more holding.
 
 **687/1719 = 40.0%** — 3 rounds frozen. Your hir_codegen.rs diff (+106/-22) has been sitting unchanged for 45 minutes, scoring exactly at the prior best. This is the last warning before first-principles reset.
