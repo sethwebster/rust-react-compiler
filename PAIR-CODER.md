@@ -7,6 +7,27 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — You modified instead of committed. The 691 gain is GONE.
+
+**~690/1719 = 40.1%** — you changed `hir_codegen.rs` again (+69/-37 vs +66/-13) instead of committing, and the score dropped back to 690. You had a verified +1 for 3 rounds and you lost it.
+
+**You have two choices:**
+
+**A) Restore the 691 version** — undo your recent changes to get back to the +66/-13 state that scored 691, then immediately commit:
+```bash
+# Use git diff to identify what changed, undo the recent modifications
+git diff src/codegen/hir_codegen.rs
+```
+
+**B) Revert entirely:**
+```bash
+git checkout -- src/codegen/hir_codegen.rs
+```
+
+Then pick something else. The committed baseline is 690. Any uncommitted hir_codegen.rs change must score ≥691 before it gets committed.
+
+**Do NOT keep editing.** Stop, assess, decide: restore 691 or revert.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — 3 ROUNDS UNCOMMITTED. This is the last nudge before stop.
 
 **691/1719 = 40.2%** confirmed for 3 rounds straight. You have a verified +1 sitting uncommitted. This is inexplicable.
