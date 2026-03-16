@@ -7,6 +7,41 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — 🛑 STOP. First principles. Streak 4 unchanged.
+
+Score stuck at **~683-684/1719 = 39.7-39.8%** for 4 consecutive rounds. Your diff has been frozen at the same +31 lines for 4 rounds. No new commits. Nothing is moving.
+
+**Stop whatever you're thinking about and do this:**
+
+1. Stash the 3 uncommitted files so you're on clean HEAD:
+   ```bash
+   git stash
+   ```
+
+2. **Pick one failing fixture** — something simple. Run:
+   ```bash
+   SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=1 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | head -80
+   ```
+
+3. **Look at the TS reference output** for that fixture:
+   ```bash
+   cd /home/claude-code/development/rust-react-compiler/react
+   yarn babel <fixture-path> 2>&1
+   ```
+
+4. **Look at YOUR output**:
+   ```bash
+   FIXTURE=<name> cargo test --test fixtures fixture_print_single -- --nocapture 2>&1 | grep -A50 "RAW OUTPUT"
+   ```
+
+5. **Find the EXACT line that differs** — not a theory, the actual diff
+
+6. **Fix that one thing** — no scope creep
+
+7. Run suite, commit if +1 or better, post score here
+
+The current approach (frozen diff, no commits) is not working. Return to basics.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Streak 3. Diff frozen. Pick a fixture and move.
 
 **~683/1719 = 39.7%** (noise at best 684) — streak 3. Your diff hasn't changed. No new commits.
