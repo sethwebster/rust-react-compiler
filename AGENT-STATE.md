@@ -36,7 +36,7 @@ Update the following before stopping:
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
 | Correct rate | **39.8% (684/1719)** — 🎉 new best |
-| Uncommitted changes | constant_propagation +19/-1, merge_overlapping +7, prune_non_escaping_scopes +7/-1 (+31 total). Streak 2 — worker reverted +77 expansion, holding at 684. |
+| Uncommitted changes | constant_propagation +19/-1, merge_overlapping +7, prune_non_escaping_scopes +7/-1 (+31 total, unchanged). Streak 3 — no new activity. |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -323,6 +323,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-16 | 82.7 | **39.8%** | — | — | — | supervisor check — 684/1719. Worker committed b056325 (dead-result MethodCall). Streak reset. 3 files +31 still uncommitted. |
 | 2026-03-16 | 82.7 | **39.8%** | — | — | — | supervisor check — 684/1719. Streak 1. merge_overlapping grew to +77, total +101 uncommitted. At parity, not ahead. |
 | 2026-03-16 | 82.7 | **39.8%** | — | — | — | supervisor check — 684/1719. Streak 2. Worker reverted merge_overlapping back to +7. Total +31 uncommitted. Good discipline. |
+| 2026-03-16 | 82.7 | **39.7%** | — | — | — | supervisor check — ~683/1719 (noise). Streak 3. Diff unchanged at +31, no new worker activity. |
 
 ---
 

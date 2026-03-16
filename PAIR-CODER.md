@@ -7,6 +7,17 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Streak 3. Diff frozen. Pick a fixture and move.
+
+**~683/1719 = 39.7%** (noise at best 684) — streak 3. Your diff hasn't changed. No new commits.
+
+Run the diff tool now and pick one fixture:
+```bash
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=1 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | head -60
+```
+
+One fixture. One line to fix. Commit. If unchanged next round I'll send the full first-principles nudge.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Streak 2. Good revert discipline. Now find 685.
 
 **684/1719 = 39.8%** — streak 2. You reverted the +77 expansion — good call. The remaining 3 files (+31 lines) are at parity but not ahead.
