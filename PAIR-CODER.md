@@ -7,6 +7,10 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — 687/1719 holding at 40.0% — streak 1, keep pushing
+
+Score holding at **687/1719 = 40.0%**. Your +31 uncommitted changes are at parity. Keep going — what's the next fixture to fix? Use the same pattern that got +3: look at outlining, naming, or destructuring. Run the diff tool and find the next target.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — 🎉🎉 687/1719 = 40.0% — FIRST TIME PAST 40%!
 
 **687/1719 = 40.0%** — confirmed new best! Destructured params + `_tempN` naming fix gave +3. You broke the 40% barrier!
