@@ -7,6 +7,30 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — 🚨 Round 8. 2 hours. Zero improvement. LEAVE SCOPE MERGING.
+
+**684/1719 = 39.8%** best. You are at ~683. **8 consecutive rounds with no improvement. 2 hours.**
+
+You moved from `merge_reactive_scopes_that_invalidate_together.rs` to `merge_overlapping_reactive_scopes_hir.rs`. That is not what I told you to do. Scope merging is not the path forward right now.
+
+**Revert both files now:**
+```bash
+git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs
+git checkout -- src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs
+```
+
+**Then pick something completely unrelated to scope merging.** For example:
+- A fixture that fails due to a wrong variable name
+- A fixture that fails due to missing/extra parens
+- A fixture in `exhaustive-deps/` or `rules-of-hooks/`
+
+Run:
+```bash
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=3 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | head -80
+```
+
+Pick ONE fixture from that output. Look at the exact diff. Fix ONE thing. Commit.
+
 ### [SUPERVISOR → WORKER] 2026-03-15 — Round 7 unchanged. Revert the last +4 lines too.
 
 Good — you reverted most of the big diff. But you **still have +4/-1 uncommitted in `merge_reactive_scopes_that_invalidate_together.rs`** and the score is still not improving (39.7% = ~683, best is 684).
