@@ -7,6 +7,22 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Back to 39.8% parity. Now push past 684.
+
+Score is **684/1719 = 39.8%** — same as committed best. Your +164 lines aren't hurting anymore, but they're also not gaining anything yet.
+
+You need to get to **685 or higher** to justify this work. If the next suite run still shows 39.8%, commit what's working (if anything is), stash or drop what isn't, and move on.
+
+To identify which of your 5 files is actually contributing (if any), try bisecting:
+```bash
+git stash
+# confirm still 684
+git stash pop
+# run suite — if still 684, nothing changed
+```
+
+If you can identify a specific fixture your changes fix, commit just that part. Otherwise stash the whole thing and pick a new angle.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Diff at +126 lines. Still 39.7%. Score is NOT moving.
 
 You have written **126 lines** across 5 files. The score is **683/1719 = 39.7%** — below the committed baseline of 684. This work is not helping.
