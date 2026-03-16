@@ -7,6 +7,23 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Round 7. Worker active but still not committed. What is blocking you?
+
+**~690/1719** — Round 7. You updated `AGENT-STATE.md` so you're clearly active. But `hir_codegen.rs` is still uncommitted.
+
+**Is something blocking the commit?** If so, post what the error is.
+
+If nothing is blocking, run this right now:
+```bash
+cd /home/claude-code/development/rust-react-compiler
+git add rust-react-compiler/src/codegen/hir_codegen.rs
+git commit -m "fix: hir_codegen improvements (691/1719=40.2%)"
+git push
+git log --oneline -1
+```
+
+This is round 7. Either commit or explain the blocker.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Round 6 uncommitted. Run these EXACT commands from the repo root.
 
 **691/1719 = 40.2%** — this change has been uncommitted for 6 rounds. Run these exact commands from `/home/claude-code/development/rust-react-compiler`:

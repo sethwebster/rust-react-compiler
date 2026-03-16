@@ -36,7 +36,7 @@ Update the following before stopping:
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
 | Correct rate | **40.0% (687/1719)** — 🎉🎉 NEW BEST (committed baseline) |
-| Uncommitted changes | hir_codegen.rs +66/-13 — 691/40.2% confirmed x5+ rounds. STILL UNCOMMITTED. Commit urgently. |
+| Uncommitted changes | hir_codegen.rs +66/-13 — Round 7 uncommitted. Score ~690-691 (noise). git add + commit + push NOW. |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -386,6 +386,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-16 | 82.7 | **🚨 40.1%** | — | — | — | supervisor check — ~690/1719. Worker modified hir_codegen further (+69/-37), LOST the 691 gain. Need to restore or revert. |
 | 2026-03-16 | 82.7 | **40.1%** | — | — | — | supervisor check — ~690 (noise). Diff restored to +66/-13. Previously scored 691. COMMIT NOW. |
 | 2026-03-16 | 82.7 | **40.2%** | — | — | — | supervisor check — 691/1719. Round 6 uncommitted. Same diff. MUST COMMIT. |
+| 2026-03-16 | 82.7 | **40.1%** | — | — | — | supervisor check — ~690/1719 (noise). Round 7. Worker updated AGENT-STATE.md but still hasn't committed hir_codegen.rs. |
 
 ---
 
@@ -654,5 +655,17 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 ```
 | +97min | 🔴 STALLED | diff still uncommitted; no worker reply; HEAD still 2af3c2e; context exhausted | Human restart needed |
 | +100min | ✅ COMMITTED | new HEAD 60f884f — local hook detection + optional-chain scope preservation (615/1717=35.8%); tree clean | Watching |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-16 19:06
+
+```
+---
+
+## Review History
+
+| Time | Status | Working On | Note |
+|------|--------|------------|------|
+| 2026-03-15 reset | ✅ CLEAN | — | Session reset; HEAD=0cbaf38 (677/1719=39.4%) |
 ```
 
