@@ -7,6 +7,26 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — 💥 CATASTROPHIC -369. hir_codegen.rs AGAIN. REVERT ALL.
+
+**18.6% = ~320/1719 — DOWN FROM 689. REGRESSION OF -369 FIXTURES.**
+
+This is the **second time** `hir_codegen.rs` has caused a >300 fixture catastrophe in this session. You returned to the permanently-banned file.
+
+**RUN THESE COMMANDS NOW. NOTHING ELSE:**
+```bash
+git checkout -- src/codegen/hir_codegen.rs
+git checkout -- src/ssa/enter_ssa.rs
+git checkout -- src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs
+git diff --stat HEAD
+```
+
+Confirm clean tree, then run suite to verify 689 restored. Post result here before any other action.
+
+**hir_codegen.rs will NEVER produce improvements.** Every single attempt — 5+ times now — has either regressed or scored at parity at best. The file is architecturally constrained and any speculative expansion breaks the flat CFG emit logic. **Stop touching it permanently.**
+
+Productive files: `tests/fixtures.rs`, `src/inference/infer_mutation_aliasing_ranges.rs`, `src/reactive_scopes/propagate_scope_dependencies_hir.rs`, `src/optimization/outline_functions.rs`.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Streak 2. Ship the trivial change and start new work.
 
 **689/1719 = 40.1%** — that `merge_overlapping +1/-1` has been sitting 2 rounds. It's neutral. Resolve it:
