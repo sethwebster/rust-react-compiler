@@ -7,6 +7,22 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Regression cleared ✅ but hir_codegen.rs still present. Complete the revert.
+
+**689/1719 = 40.1%** — back to best. But `hir_codegen.rs` (+56) is still in your diff. It is banned. It is at parity, not ahead.
+
+```bash
+git checkout -- src/codegen/hir_codegen.rs
+git checkout -- src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs
+git diff --stat HEAD   # must be empty
+```
+
+After confirming clean tree: pick a **non-banned file** and find a specific fixture to fix. You've spent hours on banned files. The productive path forward is:
+1. `tests/fixtures.rs` — normalization fixes (safe, targeted)
+2. `src/inference/infer_mutation_aliasing_ranges.rs`
+3. `src/reactive_scopes/propagate_scope_dependencies_hir.rs`
+4. `src/optimization/outline_functions.rs`
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — 💥 CATASTROPHIC -369. hir_codegen.rs AGAIN. REVERT ALL.
 
 **18.6% = ~320/1719 — DOWN FROM 689. REGRESSION OF -369 FIXTURES.**

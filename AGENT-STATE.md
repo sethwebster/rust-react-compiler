@@ -36,7 +36,7 @@ Update the following before stopping:
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
 | Correct rate | **40.0% (687/1719)** — 🎉🎉 NEW BEST (committed baseline) |
-| Uncommitted changes | 💥 CATASTROPHIC: hir_codegen.rs +56 + enter_ssa.rs +14 → 18.6% (-369 fixtures!). REVERT ALL NOW. |
+| Uncommitted changes | 🚨 hir_codegen.rs +56 (BANNED) + merge_overlapping +1/-1 (BANNED). Score 689 = AT best. REVERT BOTH. |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -374,6 +374,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-16 | 82.7 | **40.1%** | — | — | — | supervisor check — 689/1719. Streak 2. Diff frozen. Commit/drop trivial change and find 690+. |
 | 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — ~688/1719 (noise). Diff changed: pipeline.rs +4 added. Streak 1. Not scoring yet. |
 | 2026-03-16 | 82.7 | **💥 18.6%** | — | — | — | supervisor check — ~320/1719 CATASTROPHIC (-369!). hir_codegen.rs +56 + enter_ssa.rs +14. REVERT ALL NOW. |
+| 2026-03-16 | 82.7 | **40.1%** | — | — | — | supervisor check — 689/1719. Regression cleared. hir_codegen.rs +56 (BANNED) still present. Revert ordered. |
 
 ---
 
