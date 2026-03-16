@@ -3961,24 +3961,77 @@ impl<'a> Codegen<'a> {
             LoopType::While { test_bid: while_test_bid } => {
                 // test_bid == while_test_bid for While loops
                 visited.insert(while_test_bid);
-                let test_expr = self.hir.body.blocks.get(&while_test_bid).and_then(|b| {
-                    if let Terminal::Branch { test, .. } = &b.terminal {
-                        Some(self.expr(test))
-                    } else { None }
-                }).unwrap_or_else(|| "true".to_string());
-                // Emit test block instructions (condition computations).
                 let test_block_instrs = self.hir.body.blocks.get(&while_test_bid)
                     .map(|b| b.instructions.clone())
                     .unwrap_or_default();
-                for instr in &test_block_instrs {
-                    if inlined_ids.contains(&instr.lvalue.identifier.0) { continue; }
-                    if self.inlined_exprs.contains_key(&instr.lvalue.identifier.0) { continue; }
-                    if let Some(s) = self.emit_stmt(instr, None, &[]) {
-                        for line in s.lines() {
-                            let _ = writeln!(out, "{loop_body_pad}{line}");
+                // Check if the Branch test is defined by a StoreLocal in the test block.
+                // If so, inline the assignment (e.g. `while ((item = items.pop()))`)
+                // instead of emitting `item = items.pop(); while (item)`.
+                let branch_test_id = self.hir.body.blocks.get(&while_test_bid).and_then(|b| {
+                    if let Terminal::Branch { test, .. } = &b.terminal { Some(test.identifier.0) } else { None }
+                });
+                let inline_assign_idx = branch_test_id.and_then(|test_id| {
+                    test_block_instrs.iter().enumerate().find_map(|(i, instr)| {
+                        if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
+                            let defined_id = lvalue.place.identifier.0;
+                            let value_id = value.identifier.0;
+                            // Check if this StoreLocal defines the branch's test variable
+                            // (direct: lvalue.id == test_id)
+                            // OR stores the branch's test value (value.id == test_id)
+                            // The latter handles: $t = items.pop(); item = $t; Branch($t)
+                            // where we want: while ((item = items.pop()))
+                            if defined_id == test_id || value_id == test_id {
+                                return Some((i, lvalue.place.identifier, value.clone()));
+                            }
+                        }
+                        None
+                    })
+                });
+let test_expr = if let Some((skip_idx, store_lv_id, value_place)) = inline_assign_idx {
+                    let var_name = self.ident_name(store_lv_id);
+                    // Force-inline the RHS: if value_place is in inlined_exprs, use that.
+                    // Otherwise, try to inline via try_inline_instr (ignoring use_count).
+                    let rhs = if let Some(s) = self.inlined_exprs.get(&value_place.identifier.0) {
+                        s.clone()
+                    } else if let Some(instr) = self.instr_map.get(&value_place.identifier.0) {
+                        self.try_inline_instr(instr).unwrap_or_else(|| self.ident_name(value_place.identifier))
+                    } else {
+                        self.expr(&value_place)
+                    };
+                    // The value_place's instruction is inlined into the condition — skip it in the loop.
+                    let skip_value_id = value_place.identifier.0;
+                    // Emit non-skipped test block instructions as statements
+                    for (i, instr) in test_block_instrs.iter().enumerate() {
+                        if i == skip_idx { continue; }
+                        if instr.lvalue.identifier.0 == skip_value_id { continue; }
+                        if inlined_ids.contains(&instr.lvalue.identifier.0) { continue; }
+                        if self.inlined_exprs.contains_key(&instr.lvalue.identifier.0) { continue; }
+                        if let Some(s) = self.emit_stmt(instr, None, &[]) {
+                            for line in s.lines() {
+                                let _ = writeln!(out, "{loop_body_pad}{line}");
+                            }
                         }
                     }
-                }
+                    // While condition inlines the assignment
+                    format!("({var_name} = {rhs})")
+                } else {
+                    let test_expr = self.hir.body.blocks.get(&while_test_bid).and_then(|b| {
+                        if let Terminal::Branch { test, .. } = &b.terminal {
+                            Some(self.expr(test))
+                        } else { None }
+                    }).unwrap_or_else(|| "true".to_string());
+                    // Emit test block instructions as separate statements
+                    for instr in &test_block_instrs {
+                        if inlined_ids.contains(&instr.lvalue.identifier.0) { continue; }
+                        if self.inlined_exprs.contains_key(&instr.lvalue.identifier.0) { continue; }
+                        if let Some(s) = self.emit_stmt(instr, None, &[]) {
+                            for line in s.lines() {
+                                let _ = writeln!(out, "{loop_body_pad}{line}");
+                            }
+                        }
+                    }
+                    test_expr
+                };
                 let _ = writeln!(out, "{loop_body_pad}while ({test_expr}) {{");
                 let mut vis2 = visited.clone();
                 vis2.insert(while_test_bid);
