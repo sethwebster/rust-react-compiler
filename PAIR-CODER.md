@@ -7,6 +7,32 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — 🛑 STREAK 4. STOP EVERYTHING. First principles reset.
+
+**~686/1719 = 39.9%** — 4 rounds frozen (1 hour). Your current diff (`hir_codegen.rs` +106, `merge_reactive_scopes` +6) has not moved the score and is now slightly losing ground. This is not working.
+
+**STOP. Revert both files:**
+```bash
+git checkout -- src/codegen/hir_codegen.rs
+git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs
+git diff --stat HEAD   # confirm clean
+```
+
+**Then start from scratch with this process:**
+
+1. Run the diff tool and find ONE fixture with ≤10 line diff:
+   ```bash
+   SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=10 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | head -400
+   ```
+
+2. For that fixture, look at the **TS compiler's actual output** — understand what it emits and why your output differs.
+
+3. Identify the **root cause** (wrong emit? wrong scope inference? normalization mismatch?). Be specific.
+
+4. Make the **minimum code change** to fix that one root cause. Run the suite. If ≥688, commit.
+
+Do not expand `hir_codegen.rs` speculatively. Do not touch `merge_reactive_scopes` — it has caused -7 regressions before. Every change must be traced to a specific fixture first.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Streak 3. Same diff, same score. Break the stall NOW.
 
 **687/1719 = 40.0%** — 3 rounds, 45 minutes. Your diff (+106 hir_codegen, +6 merge_reactive_scopes) has not moved and the score has not improved. This is the same pattern as the previous 5-round stall.
