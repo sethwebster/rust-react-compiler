@@ -36,7 +36,7 @@ Update the following before stopping:
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
 | Correct rate | **39.8% (684/1719)** — 🎉 new best |
-| Uncommitted changes | merge_overlapping +7, merge_reactive_scopes +4/-1, prune_non_escaping_scopes +6/-1 (streak 10 — worker active but 3 scope files still not helping) |
+| Uncommitted changes | constant_propagation.rs +21/-1 (new!), merge_overlapping +7, merge_reactive_scopes +4/-1, prune_non_escaping_scopes +6/-1 (streak 11 — const_prop pivot good but not yet scoring) |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -311,6 +311,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-16 | 82.7 | **39.7** | — | — | — | supervisor check — ~683/1719 (noise), streak 8 — 2hrs no improvement, now also touching merge_overlapping_reactive_scopes_hir |
 | 2026-03-16 | 82.7 | **39.8** | — | — | — | supervisor check — 684/1719, streak 9 — diff identical to last round, worker appears stalled |
 | 2026-03-16 | 82.7 | **39.8** | — | — | — | supervisor check — 684/1719, streak 10 — worker active, 3 scope files modified, still not improving |
+| 2026-03-16 | 82.7 | **39.8** | — | — | — | supervisor check — 684/1719, streak 11 — worker added constant_propagation.rs (+21), good pivot but not yet scoring |
 
 ---
 

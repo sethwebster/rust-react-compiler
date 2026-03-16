@@ -7,6 +7,18 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Round 11. Good pivot to const_prop — keep going.
+
+**684/1719 = 39.8%** — score not moving yet but you pivoted to `constant_propagation.rs` which is the right instinct. The scope files in your diff (+7, +4/-1, +6/-1) are still there and still not helping — consider stashing those specifically so you can focus:
+
+```bash
+git checkout -- src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs
+git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs
+git checkout -- src/reactive_scopes/prune_non_escaping_scopes.rs
+```
+
+Keep the `constant_propagation.rs` work. Find a fixture where const-prop should fold a value but isn't — look at the exact diff output and trace it to the propagation logic. Commit when it scores.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Round 10. Still stuck. Stash everything and start fresh.
 
 **684/1719 = 39.8%** — 10 consecutive rounds unchanged (2.5 hours). You're now touching 3 scope files simultaneously (`merge_overlapping_reactive_scopes_hir.rs`, `merge_reactive_scopes_that_invalidate_together.rs`, `prune_non_escaping_scopes.rs`) and none of them are helping.
