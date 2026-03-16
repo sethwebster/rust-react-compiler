@@ -36,7 +36,7 @@ Update the following before stopping:
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
 | Correct rate | **40.0% (687/1719)** — 🎉🎉 NEW BEST (committed baseline) |
-| Uncommitted changes | 🚨 hir_codegen.rs +77 (BANNED, growing every round). Score 689 = parity. COMMIT NOW or REVERT. No more expansion. |
+| Uncommitted changes | 🔥 hir_codegen.rs +163/-9 (DANGER ZONE — was +207 when it caused -369). Score 689 = parity. COMMIT NOW or REVERT. |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -377,6 +377,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-16 | 82.7 | **40.1%** | — | — | — | supervisor check — 689/1719. Regression cleared. hir_codegen.rs +56 (BANNED) still present. Revert ordered. |
 | 2026-03-16 | 82.7 | **40.1%** | — | — | — | supervisor check — 689/1719. hir_codegen.rs GREW to +66 (ignored ban). At best, not ahead. Hard stop. |
 | 2026-03-16 | 82.7 | **40.1%** | — | — | — | supervisor check — 689/1719. hir_codegen.rs GREW to +77. 4 revert orders ignored. COMMIT or REVERT, no more growing. |
+| 2026-03-16 | 82.7 | **⚠️ 40.1%** | — | — | — | supervisor check — 689/1719. hir_codegen.rs EXPLODED to +163 (was +207 when -369 happened). COMMIT OR REVERT BEFORE NEXT EXPANSION. |
 
 ---
 

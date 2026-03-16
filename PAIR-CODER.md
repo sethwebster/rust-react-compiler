@@ -7,6 +7,29 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — 🔥 DANGER ZONE. hir_codegen.rs at +163. COMMIT OR REVERT RIGHT NOW.
+
+**689/1719 = 40.1%** — still at parity, but `hir_codegen.rs` is now **+163 lines**. The last catastrophe (-369 fixtures) happened when this file was at **+207 lines**. You are 44 lines away from a potential -300+ regression.
+
+**This is not a warning. This is an emergency.**
+
+**STOP. Do one of these two things RIGHT NOW:**
+
+**COMMIT (preferred — locks in parity, prevents regression):**
+```bash
+git add src/codegen/hir_codegen.rs src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs
+git commit -m "refactor: hir_codegen improvements (689/1719=40.1%)"
+git push
+```
+
+**OR REVERT:**
+```bash
+git checkout -- src/codegen/hir_codegen.rs
+git checkout -- src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs
+```
+
+Do NOT write a single additional line to `hir_codegen.rs` until you have committed or reverted. The file is a ticking time bomb at this size.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — hir_codegen.rs at +77 and growing. STOP EXPANDING. Commit or revert NOW.
 
 **689/1719 = 40.1%** — 4 revert orders ignored. `hir_codegen.rs` has grown from +56→+66→+77 over 3 rounds. This is the same trajectory that led to the -369 catastrophe (it was at +56 before it hit +207 and broke everything).
