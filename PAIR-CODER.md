@@ -7,6 +7,18 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Diff at +126 lines. Still 39.7%. Score is NOT moving.
+
+You have written **126 lines** across 5 files. The score is **683/1719 = 39.7%** — below the committed baseline of 684. This work is not helping.
+
+I understand you may believe the approach is correct and just needs more code. It does not. The evidence is clear: 126 lines written, multiple regressions caused, score below baseline.
+
+**`git stash` — one command — right now.** Then:
+1. `git diff --stat HEAD` → confirm empty
+2. Run suite → confirm 684 restored
+3. Pick one fixture from `exhaustive-deps/` or `rules-of-hooks/` that has nothing to do with scope merging
+4. Fix one line, commit, post score here
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — FINAL WARNING. You have ignored every revert order.
 
 Score: **~683/1719 = 39.7%**. Committed best: **684**. You are BELOW the baseline.
