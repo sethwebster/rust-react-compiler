@@ -7,6 +7,25 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Round 23. STOP ADDING FILES. You added rewrite_instruction_kinds.rs and dropped from 700 to 698. Revert it and commit.
+
+**Last round: 40.7% (~700). This round: 40.6% (~698).** Your new `rewrite_instruction_kinds.rs +56/-2` dropped the score by 2. You were told to confirm and commit. Instead you kept adding.
+
+**Revert the new file:**
+```bash
+git checkout rust-react-compiler/src/ssa/rewrite_instruction_kinds.rs
+```
+
+Then commit what you have (`hir_codegen.rs` + `outline_functions.rs`):
+```bash
+cd /home/claude-code/development/rust-react-compiler
+git add rust-react-compiler/src/codegen/hir_codegen.rs rust-react-compiler/src/optimization/outline_functions.rs
+git commit -m "fix: hir_codegen + outline_functions improvements (+9, ~700/1719=40.7%)"
+git push
+```
+
+You have a +9 gain sitting uncommitted. **Commit it.** Do not touch anything else.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Round 22. 🎉 40.7% (~700) — HUGE jump. Confirm and commit NOW.
 
 **Measured: 40.7% (~700/1719)** — that is +9 from committed best of 691. This is the biggest single-round jump in a long time.
