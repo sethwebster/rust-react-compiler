@@ -279,6 +279,10 @@ struct ScopeOutputItem {
     /// True if this output comes from a Reassign StoreLocal (variable declared before scope).
     /// Used to order cache slots: non-reassign declarations first, sentinel second, reassigns last.
     is_reassign: bool,
+    /// True if this output's variable is captured by a function expression that is also called
+    /// within the scope (IIFE pattern). When true AND the var is pre-declared, the named-var
+    /// approach is kept (no temp), because the flat fallback emits the assignment directly.
+    captured_and_called: bool,
 }
 
 /// Complete analysis of a scope's outputs, intra-scope variables, and whether
@@ -1446,8 +1450,12 @@ impl<'a> Codegen<'a> {
             for instr in &block.instructions {
                 let lv_id = instr.lvalue.identifier.0;
                 if std::env::var("RC_DEBUG_INSTR").is_ok() {
-                    eprintln!("[DEBUG_INSTR] lv_id={} discriminant={:?} inlined={} in_scope={:?}",
-                        lv_id, std::mem::discriminant(&instr.value),
+                    let name = self.env.get_identifier(instr.lvalue.identifier)
+                        .and_then(|i| i.name.as_ref())
+                        .map(|n| n.value().to_string())
+                        .unwrap_or_default();
+                    eprintln!("[DEBUG_INSTR] lv_id={} name={:?} discriminant={:?} inlined={} in_scope={:?}",
+                        lv_id, name, std::mem::discriminant(&instr.value),
                         inlined_ids.contains(&lv_id), instr_scope.get(&instr.id));
                 }
 
@@ -2425,6 +2433,56 @@ impl<'a> Codegen<'a> {
         // pre_scope_lines: const declarations emitted before the scope block.
         let mut pre_scope_lines: Vec<String> = Vec::new();
 
+        // TDZ-violation prevention: detect scope instructions (StoreLocal) that define
+        // a named variable also used as a dep expression. Such instructions would generate
+        // `const a = ...` INSIDE the scope block while `a` is also referenced in the
+        // dep condition BEFORE the block — a JavaScript TDZ violation.
+        // Fix: hoist these instructions to pre_scope_lines and exclude from scope body.
+        //
+        // Example: `const a = props.a + props.b` is a scope instruction (BinaryExpr, never
+        // memoized), but `a` is also a dep → `$[1] !== a` uses `a` before it's declared.
+        let dep_names: std::collections::HashSet<String> = if has_deps {
+            scope_deps.iter()
+                .filter(|dep| dep.path.is_empty())
+                .map(|dep| self.dep_expr(dep))
+                .filter(|name| !name.starts_with("$t") && !name.contains('.'))
+                .collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+        let mut tzdep_hoist_ids: std::collections::HashSet<crate::hir::hir::InstructionId> =
+            std::collections::HashSet::new();
+        if !dep_names.is_empty() {
+            for instr in instrs.iter() {
+                if let InstructionValue::StoreLocal { lvalue, .. } = &instr.value {
+                    // Use the emitted name (ident_name, which accounts for SSA renaming),
+                    // NOT the source name (i.name.value()), to avoid false matches where
+                    // a variable has source name "a" but emits as "a_0".
+                    let emitted_name = self.ident_name(lvalue.place.identifier);
+                    if !emitted_name.starts_with("$t") && dep_names.contains(emitted_name.as_str()) {
+                        if std::env::var("RC_DEBUG_TDZ").is_ok() {
+                            eprintln!("[TDZ_HOIST] hoisting instr.id={:?} emitted={:?}", instr.id, emitted_name);
+                        }
+                        tzdep_hoist_ids.insert(instr.id);
+                    }
+                }
+            }
+        }
+        // Emit hoisted TDZ-dep instructions as pre-scope lines.
+        if !tzdep_hoist_ids.is_empty() {
+            let hoist_instrs: Vec<&Instruction> = instrs.iter()
+                .filter(|i| tzdep_hoist_ids.contains(&i.id))
+                .copied()
+                .collect();
+            for instr in hoist_instrs {
+                if let Some(s) = self.emit_stmt(instr, None, &[]) {
+                    for line in s.lines() {
+                        pre_scope_lines.push(format!("{pad}{line}"));
+                    }
+                }
+            }
+        }
+
         if has_deps {
             for (dep_idx, dep) in scope_deps.iter().enumerate() {
                 let dep_base_id = dep.place.identifier;
@@ -2542,32 +2600,44 @@ impl<'a> Codegen<'a> {
         // Post-process: for outputs with is_named_var=true whose name is pre-declared
         // in an outer scope (via DeclareLocal before this scope in tree walk),
         // convert to temp+reassignment so we don't double-declare.
+        // Exception: IIFE-captured-and-called outputs keep the named-var approach since
+        // the flat fallback directly emits the StoreLocal assignment (e.g. `x = {};`).
         for output in &mut analysis.outputs {
             if output.is_named_var {
                 if let Some(ref name) = output.out_name {
                     if declared_names.contains(name.as_str()) {
-                        // Find the StoreLocal that writes to this name to get skip_idx and cache_expr.
-                        let found = instrs.iter().enumerate().find(|(_, instr)| {
-                            if let InstructionValue::StoreLocal { lvalue, .. } = &instr.value {
-                                self.env.get_identifier(lvalue.place.identifier)
-                                    .and_then(|i| i.name.as_ref())
-                                    .map(|n| n.value() == name.as_str())
-                                    .unwrap_or(false)
-                            } else {
-                                false
-                            }
-                        });
-                        if let Some((idx, instr)) = found {
-                            if let InstructionValue::StoreLocal { value, .. } = &instr.value {
-                                let value_expr = self.expr(value);
-                                output.is_named_var = false;
-                                output.out_kw = "";  // plain reassignment
-                                output.skip_idx = Some(idx);
-                                output.cache_expr = value_expr;
-                            }
-                        } else {
-                            output.is_named_var = false;
+                        if output.captured_and_called {
+                            // IIFE pattern: variable is captured by a FunctionExpression that
+                            // is also called within the scope. The flat fallback will emit the
+                            // StoreLocal assignment (e.g. `x = {};`) directly. Keep is_named_var=true
+                            // so we use the named var as the cache var (no temp needed).
+                            // Just remove the `let` keyword since the var is pre-declared.
                             output.out_kw = "";
+                        } else {
+                            // Regular reassign case: flip to temp approach.
+                            // Find the StoreLocal that writes to this name to get skip_idx/cache_expr.
+                            let found = instrs.iter().enumerate().find(|(_, instr)| {
+                                if let InstructionValue::StoreLocal { lvalue, .. } = &instr.value {
+                                    self.env.get_identifier(lvalue.place.identifier)
+                                        .and_then(|i| i.name.as_ref())
+                                        .map(|n| n.value() == name.as_str())
+                                        .unwrap_or(false)
+                                } else {
+                                    false
+                                }
+                            });
+                            if let Some((idx, instr)) = found {
+                                if let InstructionValue::StoreLocal { value, .. } = &instr.value {
+                                    let value_expr = self.expr(value);
+                                    output.is_named_var = false;
+                                    output.out_kw = "";  // plain reassignment
+                                    output.skip_idx = Some(idx);
+                                    output.cache_expr = value_expr;
+                                }
+                            } else {
+                                output.is_named_var = false;
+                                output.out_kw = "";
+                            }
                         }
                     }
                 }
@@ -2688,8 +2758,9 @@ impl<'a> Codegen<'a> {
 
         // --- CFG-based scope body emission ---
         // Build the set of instructions and blocks belonging to this scope.
+        // Exclude TDZ-hoisted instructions — they've already been emitted as pre_scope_lines.
         let scope_instr_set: std::collections::HashSet<InstructionId> =
-            instrs.iter().map(|i| i.id).collect();
+            instrs.iter().filter(|i| !tzdep_hoist_ids.contains(&i.id)).map(|i| i.id).collect();
         let skip_instr_set: std::collections::HashSet<InstructionId> =
             skip_set.iter().filter_map(|&i| instrs.get(i).map(|instr| instr.id)).collect();
         let intra_instr_ids: std::collections::HashSet<InstructionId> =
@@ -2813,6 +2884,7 @@ impl<'a> Codegen<'a> {
             for (i, instr) in instrs.iter().enumerate() {
                 if skip_set.contains(&i) { continue; }
                 if hoisted_declare_skip.contains(&i) { continue; }
+                if tzdep_hoist_ids.contains(&instr.id) { continue; } // already emitted as pre-scope
                 if inlined_ids.contains(&instr.lvalue.identifier.0) && !intra_set.contains(&i) {
                     continue;
                 }
@@ -2829,6 +2901,14 @@ impl<'a> Codegen<'a> {
                 };
                 if intra_set.contains(&i) {
                     if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
+                        // Skip StoreLocals that were inlined away (const store whose value was
+                        // propagated through LoadLocals — e.g. `const value = null` when `null`
+                        // is inlined at the use site).
+                        if self.inlined_exprs.contains_key(&instr.lvalue.identifier.0)
+                            && matches!(lvalue.kind, InstructionKind::Const | InstructionKind::HoistedConst)
+                        {
+                            continue;
+                        }
                         let var_name = self.env
                             .get_identifier(lvalue.place.identifier)
                             .and_then(|id| id.name.as_ref())
@@ -3740,6 +3820,12 @@ impl<'a> Codegen<'a> {
             }
             if intra_set.contains(&i) {
                 if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
+                    // Skip StoreLocals inlined away by build_inline_map Pass 3.
+                    if self.inlined_exprs.contains_key(&instr.lvalue.identifier.0)
+                        && matches!(lvalue.kind, InstructionKind::Const | InstructionKind::HoistedConst)
+                    {
+                        continue;
+                    }
                     // Use ident_name so name_overrides (shadowing renaming) is applied.
                     let var_name = self.env
                         .get_identifier(lvalue.place.identifier)
@@ -4008,6 +4094,73 @@ impl<'a> Codegen<'a> {
             // Check if we can compute an inlinable expression.
             if let Some(expr) = self.try_inline_instr(instr) {
                 self.inlined_exprs.insert(instr.lvalue.identifier.0, expr);
+            }
+        }
+
+        // Pass 3: propagate inlined values through StoreLocal → LoadLocal chains.
+        // For `const value = $call` where $call is inlined as "null":
+        //   - The StoreLocal instruction's slot ($value) is NOT in inlined_exprs
+        //   - A subsequent LoadLocal of that slot resolves to ident_name("value") in Pass 1
+        //   - We need `LoadLocal($value)` to resolve to "null" instead
+        //
+        // Step 3a: build slot_inlined map for const StoreLocals whose stored value is inlined.
+        // Step 3b: update LoadLocal lvalue entries that read from those slots.
+        // Step 3c: mark the StoreLocal instruction's lvalue in inlined_exprs to suppress emission.
+        // Only suppress const StoreLocals when the stored value inlines to a trivial
+        // primitive literal (null, undefined, true, false, number, simple string).
+        // This prevents over-suppression of complex expressions (arrays, calls, etc.)
+        // that should be emitted as declarations.
+        fn is_trivial_primitive_literal(s: &str) -> bool {
+            matches!(s, "null" | "undefined" | "true" | "false")
+                || s.parse::<f64>().is_ok()
+                || (s.starts_with('"') && s.ends_with('"'))
+                || (s.starts_with('\'') && s.ends_with('\''))
+        }
+        // Collect slot identifiers captured by FunctionExpressions/ObjectMethods.
+        // We must NOT suppress const StoreLocals whose slot is captured in a closure,
+        // because the closure body references the variable by name (not inlined value).
+        let mut closure_captured_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for instr in instrs {
+            if let InstructionValue::FunctionExpression { lowered_func, .. }
+            | InstructionValue::ObjectMethod { lowered_func, .. } = &instr.value
+            {
+                for ctx_place in &lowered_func.func.context {
+                    closure_captured_ids.insert(ctx_place.identifier.0);
+                }
+            }
+        }
+        let mut slot_inlined: HashMap<u32, String> = HashMap::new();
+        for instr in instrs {
+            if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
+                if matches!(lvalue.kind, InstructionKind::Const | InstructionKind::HoistedConst) {
+                    // Don't suppress if the slot is captured by a closure.
+                    if closure_captured_ids.contains(&lvalue.place.identifier.0) {
+                        continue;
+                    }
+                    if let Some(inlined) = self.inlined_exprs.get(&value.identifier.0).cloned() {
+                        if is_trivial_primitive_literal(&inlined) {
+                            slot_inlined.insert(lvalue.place.identifier.0, inlined.clone());
+                            // Mark instruction lvalue to suppress this StoreLocal in emit_stmt.
+                            self.inlined_exprs.insert(instr.lvalue.identifier.0, inlined);
+                        }
+                    }
+                }
+            }
+        }
+        // Step 3b: update LoadLocal lvalue entries.
+        for instr in instrs {
+            if let InstructionValue::LoadLocal { place, .. }
+            | InstructionValue::LoadContext { place, .. } = &instr.value
+            {
+                // Check slot_inlined first (StoreLocal propagation), then plain inlined_exprs chain.
+                let maybe_inlined = slot_inlined.get(&place.identifier.0).cloned()
+                    .or_else(|| self.inlined_exprs.get(&place.identifier.0).cloned());
+                if let Some(inlined) = maybe_inlined {
+                    let lv_id = instr.lvalue.identifier.0;
+                    if self.inlined_exprs.contains_key(&lv_id) {
+                        self.inlined_exprs.insert(lv_id, inlined);
+                    }
+                }
             }
         }
 
@@ -4967,6 +5120,7 @@ impl<'a> Codegen<'a> {
                         out_kw: "let",
                         is_named_var: true,
                         is_reassign: esc_is_reassign,
+                        captured_and_called,
                     }
                 } else {
                     ScopeOutputItem {
@@ -4976,6 +5130,7 @@ impl<'a> Codegen<'a> {
                         out_kw: "const",
                         is_named_var: false,
                         is_reassign: esc_is_reassign,
+                        captured_and_called,
                     }
                 };
                 return ScopeOutput { outputs: vec![output], intra_scope_stores: esc_intra, terminal_place_id: None, terminal_type_cast_annotation: None, post_scope_destructure_idx: None };
@@ -5003,6 +5158,7 @@ impl<'a> Codegen<'a> {
                         out_kw: "let",
                         is_named_var: true,
                         is_reassign: false,
+                        captured_and_called: false,
                     }],
                     intra_scope_stores,
                     terminal_place_id: Some(feed_id),
@@ -5039,6 +5195,7 @@ impl<'a> Codegen<'a> {
                     out_kw: "const",
                     is_named_var: false,
                         is_reassign: false,
+                        captured_and_called: false,
                     }],
                 intra_scope_stores,
                 terminal_place_id: Some(feed_id),
@@ -5149,6 +5306,7 @@ impl<'a> Codegen<'a> {
                         out_kw: "let",
                         is_named_var: true,
                         is_reassign,
+                        captured_and_called,
                     });
                 } else {
                     outputs.push(ScopeOutputItem {
@@ -5158,6 +5316,7 @@ impl<'a> Codegen<'a> {
                         out_kw: "const",
                         is_named_var: false,
                         is_reassign,
+                        captured_and_called,
                     });
                 }
             }
@@ -5219,6 +5378,7 @@ impl<'a> Codegen<'a> {
                 out_kw: "const",
                 is_named_var: false,
                         is_reassign: false,
+                        captured_and_called: false,
                     });
         }
         if !multi_outputs.is_empty() {
@@ -5257,6 +5417,7 @@ impl<'a> Codegen<'a> {
                         out_kw: "const",
                         is_named_var: false,
                         is_reassign: false,
+                        captured_and_called: false,
                     }],
                     intra_scope_stores,
                     terminal_place_id: None,
@@ -5288,6 +5449,7 @@ impl<'a> Codegen<'a> {
                     out_kw: "const",
                     is_named_var: false,
                         is_reassign: false,
+                        captured_and_called: false,
                     }],
                 intra_scope_stores,
                 terminal_place_id: None,
@@ -5321,6 +5483,7 @@ impl<'a> Codegen<'a> {
                         out_kw: "const",
                         is_named_var: false,
                         is_reassign: false,
+                        captured_and_called: false,
                     }],
                     intra_scope_stores,
                     terminal_place_id: None,
@@ -5343,6 +5506,7 @@ impl<'a> Codegen<'a> {
                     out_kw: "const",
                     is_named_var: false,
                         is_reassign: false,
+                        captured_and_called: false,
                     }],
                 intra_scope_stores,
                 terminal_place_id: None,
@@ -5359,6 +5523,7 @@ impl<'a> Codegen<'a> {
                 out_kw: "const",
                 is_named_var: false,
                         is_reassign: false,
+                        captured_and_called: false,
                     }],
             intra_scope_stores,
             terminal_place_id: None,
@@ -5634,6 +5799,14 @@ impl<'a> Codegen<'a> {
             }
 
             InstructionValue::StoreLocal { lvalue, value, .. } => {
+                // If build_inline_map marked this StoreLocal as "inlined away" (const store
+                // If build_inline_map marked this StoreLocal as "inlined away" (const store
+                // whose value was fully inlined and propagated through LoadLocals), suppress it.
+                if self.inlined_exprs.contains_key(&instr.lvalue.identifier.0)
+                    && matches!(lvalue.kind, InstructionKind::Const | InstructionKind::HoistedConst)
+                {
+                    return None;
+                }
                 // Use ident_name() so that name_overrides (shadowing renaming) is applied.
                 let raw_name = self.env.get_identifier(lvalue.place.identifier)
                     .and_then(|i| i.name.as_ref())
