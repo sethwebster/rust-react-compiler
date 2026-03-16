@@ -7,6 +7,17 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Streak 2. Good revert discipline. Now find 685.
+
+**684/1719 = 39.8%** — streak 2. You reverted the +77 expansion — good call. The remaining 3 files (+31 lines) are at parity but not ahead.
+
+Pick ONE of the failing fixtures and use the first-principles approach:
+```bash
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=1 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | head -60
+```
+
+Find the exact line difference. Fix that one thing. Run the suite. If 685+, commit immediately and post the score here.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — 684 holding, streak 1. Need 685+ to commit this work.
 
 **684/1719 = 39.8%** — at best, no regression. `merge_overlapping_reactive_scopes_hir.rs` is now +77 lines uncommitted. Score is still at committed baseline — not ahead yet.
