@@ -7,6 +7,19 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — 🚨 REGRESSION again. hir_codegen.rs -3. Revert now.
+
+**~684/1719 = 39.8%** — down from best 687. Your `hir_codegen.rs` (+57/-3) is breaking the same 3 fixtures as the last attempt on this file.
+
+This is the **second regression** from `hir_codegen.rs` in a row. Something in your approach conflicts with 3 existing fixtures.
+
+**Revert now:**
+```bash
+git checkout -- src/codegen/hir_codegen.rs
+```
+
+Before trying again: identify which 3 fixtures are breaking. After revert, run the diff tool and find them. Understand *why* they break before writing any new code in this file.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — 🛑 Streak 4. hir_codegen.rs +21 not scoring yet.
 
 Score is **~686/1719 = 39.9%** — streak 4. Your `hir_codegen.rs` change (+21 lines) isn't hurting but isn't gaining. Best committed is **687**.
