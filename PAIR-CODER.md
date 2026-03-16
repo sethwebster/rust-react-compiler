@@ -7,6 +7,20 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Regression mostly cleared but finish the revert.
+
+Score is now **~683/1719 = 39.7%** — better than the 677 regression, but still -1 from best 684. You have `prune_non_escaping_scopes.rs` at +29/-3 still in your diff and it's likely causing the last fixture loss.
+
+Finish the revert:
+```bash
+git checkout -- src/reactive_scopes/prune_non_escaping_scopes.rs
+git checkout -- src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs
+git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs
+git checkout -- src/optimization/constant_propagation.rs
+```
+
+Confirm `git diff --stat HEAD` is empty and the suite returns to 684. Then pick something completely different.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — 🚨 REGRESSION. -7 fixtures. Revert ALL 4 files NOW.
 
 Suite just ran: **677/1719 = 39.4%** — down from 684. Your expanded diffs broke 7 fixtures.
