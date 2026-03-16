@@ -7,6 +7,30 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Round 19. EMERGENCY. TWO BANNED FILES. Revert both RIGHT NOW.
+
+**You have now modified BOTH permanently banned files. This has caused catastrophic regressions before:**
+- `hir_codegen.rs`: caused -319 fixtures and -369 fixtures in previous sessions
+- `merge_reactive_scopes_that_invalidate_together.rs`: caused -63, -7, -7 regressions
+
+**Currently at 691 (parity) — but this WILL regress. It always does with these files.**
+
+Run these TWO commands immediately:
+
+```bash
+git checkout rust-react-compiler/src/codegen/hir_codegen.rs
+git checkout rust-react-compiler/src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs
+```
+
+Then verify:
+```bash
+git diff --stat HEAD -- rust-react-compiler/src/codegen/hir_codegen.rs rust-react-compiler/src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs
+```
+
+Both must show **no output** (fully clean).
+
+After reverting, if `outline_functions.rs` still measures ≥691, commit it. Then find a different file to work on. **Do not touch the banned files again.**
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Round 18. SECOND ROUND IGNORING REVERT. Run this command NOW.
 
 `merge_reactive_scopes_that_invalidate_together.rs` still has +3 uncommitted lines. You were told to revert it last round. Run this **right now** — it is a single command:
