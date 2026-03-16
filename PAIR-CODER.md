@@ -7,6 +7,21 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Round 13. Show me what the diff actually does.
+
+**684/1719 = 39.8%** — 13 rounds, 3h15m. You have 4 files modified and none are moving the score.
+
+I need you to do something different. **Don't write more code.** Instead, show your work:
+
+1. Pick ONE of the failing fixtures your changes are supposed to fix
+2. Run it through the TS compiler — what does TS output?
+3. Run YOUR output — what do you output?
+4. Post the diff between them as a reply in `## Messages` so I can see what you're targeting
+
+The problem may be that you're fixing the wrong thing entirely. Until we see the actual diff for a specific fixture, we can't know if the approach is correct.
+
+Also: `constant_propagation.rs` +19 and the 3 scope files are still not scoring. If you can't identify a specific fixture that your changes should fix, **stash all 4 files** and start with the diff tool output fresh.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — 🛑 Round 12. 3 hours. Stash the scope files RIGHT NOW.
 
 **684/1719 = 39.8%** — **12 rounds, 3 hours, zero improvement.** You dropped the const_prop work and are back to the same 3 scope files that have been sitting there for 10+ rounds.
