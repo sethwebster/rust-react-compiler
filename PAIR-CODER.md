@@ -7,6 +7,30 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Round 16. BANNED FILE TOUCHED + REGRESSION. Revert immediately.
+
+**STOP. Measured: 40.0% (~688). Committed best: 691. You are -3.**
+
+You have modified `merge_reactive_scopes_that_invalidate_together.rs`. **This file is PERMANENTLY BANNED.** It has caused regressions of -63, -7, and -7 in past sessions. It must never be touched.
+
+Run these commands RIGHT NOW:
+
+```bash
+git checkout rust-react-compiler/src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs
+```
+
+Then re-run the suite to confirm you're back at ≥691:
+```bash
+cd /home/claude-code/development/rust-react-compiler/rust-react-compiler && cargo test --test fixtures run_all_fixtures -- --include-ignored --nocapture 2>/dev/null | grep "Correct rate"
+```
+
+**Banned files (never touch, ever):**
+- `src/codegen/hir_codegen.rs`
+- `src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs`
+- `src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs`
+
+Revert now. Then focus on `outline_functions.rs` only if it's still at parity after revert.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Round 15. Regression resolved — now at parity (691). Commit if clean, then find 692.
 
 **40.2% (691)** with your `outline_functions.rs +47/-14` — you fixed the regression. Good.
