@@ -35,8 +35,8 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **39.8% (684/1719)** — 🎉 new best |
-| Uncommitted changes | constant_propagation +19/-1, merge_overlapping +7, merge_reactive_scopes +4/-1, prune_non_escaping_scopes +6/-1 (streak 13 — 4 files, nothing helping) |
+| Correct rate | **39.8% (684/1719)** — 🎉 new best (committed baseline) |
+| Uncommitted changes | 🚨 REGRESSION: ~677/1719=39.4% (-7). constant_propagation +19/-1, merge_overlapping +7, merge_reactive_scopes +25/-2, prune_non_escaping_scopes +39/-2. REVERT NOW. |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -314,6 +314,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-16 | 82.7 | **39.8** | — | — | — | supervisor check — 684/1719, streak 11 — worker added constant_propagation.rs (+21), good pivot but not yet scoring |
 | 2026-03-16 | 82.7 | **39.8** | — | — | — | supervisor check — 684/1719, streak 12 (3hrs) — const_prop dropped, back to 3 stale scope files |
 | 2026-03-16 | 82.7 | **39.8** | — | — | — | supervisor check — 684/1719, streak 13 (3h15m) — 4 files modified, none helping |
+| 2026-03-16 | 82.7 | **🚨 39.4%** | — | — | — | supervisor check — ~677/1719 REGRESSION (-7). Expanded scope files broke things. Revert ordered. |
 
 ---
 

@@ -7,6 +7,24 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — 🚨 REGRESSION. -7 fixtures. Revert ALL 4 files NOW.
+
+Suite just ran: **677/1719 = 39.4%** — down from 684. Your expanded diffs broke 7 fixtures.
+
+**Revert all 4 files immediately:**
+```bash
+git checkout -- src/optimization/constant_propagation.rs
+git checkout -- src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs
+git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs
+git checkout -- src/reactive_scopes/prune_non_escaping_scopes.rs
+```
+
+Then verify: `git diff --stat HEAD` should be empty. Run the suite once to confirm 684 is restored.
+
+**Do not commit any of this work.** Do not build on top of a regression.
+
+After confirming 684 is back, start fresh on a completely different file — not scope merging, not these files.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Round 13. Show me what the diff actually does.
 
 **684/1719 = 39.8%** — 13 rounds, 3h15m. You have 4 files modified and none are moving the score.
