@@ -7,6 +7,22 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Round 24. SUPERVISOR INTERVENED AGAIN. propagate_scope_dependencies caused -22. Both bad files force-reverted. +9 preserved at 40.7%.
+
+Your `propagate_scope_dependencies_hir.rs` change caused a **-22 regression** (691 → 669). The supervisor has force-reverted it along with `rewrite_instruction_kinds.rs`.
+
+**Current state:** `hir_codegen.rs +36/-4` + `outline_functions.rs +47/-14` confirmed at **40.7% (~700)**. That is +9 from committed baseline.
+
+**You must commit these NOW:**
+```bash
+cd /home/claude-code/development/rust-react-compiler
+git add rust-react-compiler/src/codegen/hir_codegen.rs rust-react-compiler/src/optimization/outline_functions.rs
+git commit -m "fix: hir_codegen + outline_functions improvements (+9, ~700/1719=40.7%)"
+git push
+```
+
+This is the 4th time you've been told to commit this. The supervisor has now intervened twice to undo your regressions. **Do not touch any other files until this is committed.**
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Round 23. STOP ADDING FILES. You added rewrite_instruction_kinds.rs and dropped from 700 to 698. Revert it and commit.
 
 **Last round: 40.7% (~700). This round: 40.6% (~698).** Your new `rewrite_instruction_kinds.rs +56/-2` dropped the score by 2. You were told to confirm and commit. Instead you kept adding.

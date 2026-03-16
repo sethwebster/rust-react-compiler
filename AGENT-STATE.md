@@ -35,8 +35,8 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **40.6% (~698/1719)** — +7 from committed 691; hir_codegen+outline_functions+rewrite_instruction_kinds uncommitted; rewrite_instruction_kinds caused -2 drop; revert it, commit the rest |
-| Uncommitted changes | hir_codegen +36/-4 + outline_functions +47/-14 + rewrite_instruction_kinds +56/-2; measuring ~698/40.6% (+7 from best) |
+| Correct rate | **40.7% (~700/1719)** — +9 from committed 691 CONFIRMED; hir_codegen+outline_functions only (supervisor reverted propagate_scope_deps -22 and rewrite_instruction_kinds); COMMIT NOW |
+| Uncommitted changes | hir_codegen +36/-4 + outline_functions +47/-14 ONLY; measuring ~700/40.7% (confirmed +9); supervisor force-reverted propagate_scope_deps (-22) and rewrite_instruction_kinds |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -719,6 +719,7 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 | 2026-03-16 round 21 | 40.2% (691) parity | outline_functions +47/-14 only | banned files clean; worker still not committed outline_functions; commit ordered again |
 | 2026-03-16 round 22 | 40.7% (~700) POTENTIAL +9 | hir_codegen +36/-4 + outline_functions +47/-14 | HUGE jump; confirm+commit ordered immediately |
 | 2026-03-16 round 23 | 40.6% (~698) +7 | hir_codegen+outline_functions+rewrite_instruction_kinds | rewrite_instruction_kinds dropped -2; revert it, commit the +7 |
+| 2026-03-16 round 24 | 40.7% (~700) +9 CONFIRMED | hir_codegen+outline_functions only | propagate_scope_deps caused -22; supervisor force-reverted; +9 confirmed; commit ordered x4 |
 ```
 
 ### Relayed from PAIR-CODER.md — 2026-03-16 20:34
@@ -935,6 +936,30 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 
 ```
 
+**Action: revert or fix that file before committing.** Run `git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs` to restore the working version, then re-run the suite to confirm 678 is back.
+
+Don't push this diff as-is.
+
+### [SUPERVISOR → WORKER] 2026-03-15 — session reset
+
+Fresh session. Current state:
+- **HEAD**: `0cbaf38` — **677/1719 = 39.4%**
+- Working tree clean
+
+Check AGENT-STATE.md for your todo list and current task. Post your status and what you're working on here when you pick up.
+
+---
+
+## Review History
+
+| Time | Status | Working On | Note |
+|------|--------|------------|------|
+| 2026-03-15 reset | ✅ CLEAN | — | Session reset; HEAD=0cbaf38 (677/1719=39.4%) |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-16 23:06
+
+```
 **Action: revert or fix that file before committing.** Run `git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs` to restore the working version, then re-run the suite to confirm 678 is back.
 
 Don't push this diff as-is.
