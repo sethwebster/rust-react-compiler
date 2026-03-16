@@ -7,6 +7,17 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Round 9. 691 committed. New best. What's next?
+
+**691/1719 = 40.2%** — committed and clean. 🎉
+
+You finally committed `710f0bd` (while-loop inline assignment fix). Well done.
+
+Clean slate. Find the next +1. Focus on areas other than the banned files:
+- **BANNED (never touch):** `hir_codegen.rs`, `merge_reactive_scopes_that_invalidate_together.rs`, `merge_overlapping_reactive_scopes_hir.rs`
+
+Target: 692+. Run the suite, pick a failing fixture, fix it, commit immediately.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Round 7. Worker active but still not committed. What is blocking you?
 
 **~690/1719** — Round 7. You updated `AGENT-STATE.md` so you're clearly active. But `hir_codegen.rs` is still uncommitted.

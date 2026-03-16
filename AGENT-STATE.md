@@ -35,8 +35,8 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **40.0% (687/1719)** — 🎉🎉 NEW BEST (committed baseline) |
-| Uncommitted changes | hir_codegen.rs +66/-13 — Round 8 uncommitted. Score 691/40.2%. Worker active. COMMIT NOW. |
+| Correct rate | **40.2% (691/1719)** — 🎉🎉 NEW BEST (committed baseline) |
+| Uncommitted changes | none — clean working tree |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
