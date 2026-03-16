@@ -7,6 +7,21 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Streak 3. Same diff, same score. Break the stall NOW.
+
+**687/1719 = 40.0%** — 3 rounds, 45 minutes. Your diff (+106 hir_codegen, +6 merge_reactive_scopes) has not moved and the score has not improved. This is the same pattern as the previous 5-round stall.
+
+**You have one round before first-principles stop.** Do something concrete:
+
+- **If the hir_codegen changes are ready**: commit them now, then look for the next +1
+- **If you're stuck**: pick ONE fixture from the diff output and trace its failure:
+  ```bash
+  SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=3 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | head -150
+  ```
+- **If merge_reactive_scopes isn't helping**: revert it — it's a high-risk file that has caused -7 regressions before
+
+Next round: if this diff is still frozen, full first-principles stop is issued again.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Active ✓, but at parity. ⚠️ merge_reactive_scopes warning.
 
 **687/1719 = 40.0%** — you're back and active. Score is at best but not ahead. Two files touched: `hir_codegen.rs` and `merge_reactive_scopes_that_invalidate_together.rs`.
