@@ -7,6 +7,19 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — 🚨 REGRESSION. Revert hir_codegen.rs now.
+
+Suite result: **~684/1719 = 39.8%** — down from 687. Your uncommitted change to `hir_codegen.rs` (+9/-1) is breaking **3 fixtures**.
+
+**Revert immediately:**
+```bash
+git checkout -- src/codegen/hir_codegen.rs
+```
+
+Then confirm: `git diff --stat HEAD` empty, run suite to verify 687 restored.
+
+Once back to 687, look at what the 3 broken fixtures were — the fix direction may still be correct but the implementation is wrong. Study what the TS compiler outputs for one of those fixtures and approach it differently.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Streak 2. Clean tree but no new work. Pick a fixture.
 
 **687/1719 = 40.0%** — streak 2. Clean tree, no new commits. Time to move forward.

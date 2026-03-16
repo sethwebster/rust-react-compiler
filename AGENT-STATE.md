@@ -35,8 +35,8 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **40.0% (687/1719)** — 🎉🎉 NEW BEST — first time past 40%! |
-| Uncommitted changes | none — clean tree (streak 2, no new commits). |
+| Correct rate | **40.0% (687/1719)** — 🎉🎉 NEW BEST (committed baseline) |
+| Uncommitted changes | 🚨 REGRESSION: hir_codegen.rs +9/-1 causing ~684/39.8% (-3). REVERT NOW. |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -332,6 +332,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — 687/1719. Streak 1. Holding at best. +31 uncommitted, not yet improving. |
 | 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — 687/1719. Streak 1. Worker committed c254375 (const_prop + prune fixes). Clean tree. |
 | 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — 687/1719. Streak 2. Clean tree, no new activity. |
+| 2026-03-16 | 82.7 | **🚨 39.8%** | — | — | — | supervisor check — ~684/1719 REGRESSION (-3). hir_codegen.rs +9/-1. Revert ordered. |
 
 ---
 
