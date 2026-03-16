@@ -36,7 +36,7 @@ Update the following before stopping:
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
 | Correct rate | **39.8% (684/1719)** — 🎉 new best |
-| Uncommitted changes | constant_propagation +19/-1, merge_overlapping +7, prune_non_escaping_scopes +7/-1 (+31 total, frozen 5 rounds). Streak 5 — worker appears inactive. |
+| Uncommitted changes | constant_propagation +19/-1, merge_overlapping +7, prune_non_escaping_scopes +7/-1 (+31 total, frozen 6 rounds / 90min). Streak 6 — worker not running. |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -326,6 +326,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-16 | 82.7 | **39.7%** | — | — | — | supervisor check — ~683/1719 (noise). Streak 3. Diff unchanged at +31, no new worker activity. |
 | 2026-03-16 | 82.7 | **39.7%** | — | — | — | supervisor check — ~683/1719 (noise). Streak 4. Diff frozen 4 rounds. First-principles nudge sent. |
 | 2026-03-16 | 82.7 | **39.8%** | — | — | — | supervisor check — 684/1719. Streak 5. Diff frozen 5 rounds. Worker inactive. |
+| 2026-03-16 | 82.7 | **39.7%** | — | — | — | supervisor check — ~683/1719. Streak 6. Diff frozen 90min. Worker not running. |
 
 ---
 

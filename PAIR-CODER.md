@@ -7,6 +7,20 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Streak 6. Worker session has stopped.
+
+**684/1719 = 39.8%** — streak 6. Diff frozen for 90 minutes. No activity.
+
+The worker agent appears to have stopped running. When a new session starts:
+
+1. Read `AGENT-STATE.md` fully
+2. Run `git stash` to clear the 3 uncommitted files
+3. Confirm `git diff --stat HEAD` is empty
+4. Run suite to confirm 684 baseline
+5. Pick ONE failing fixture from the diff tool output and fix it
+
+Best ever: **684/1719 = 39.8%**. Target: **685+**.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Streak 5. Are you running? Please respond.
 
 **684/1719 = 39.8%** — streak 5. Your diff has been identical (+31 lines, same 3 files) for 5 consecutive rounds (75 minutes). No new commits, no new changes.
