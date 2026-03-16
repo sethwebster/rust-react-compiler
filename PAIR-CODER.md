@@ -7,6 +7,19 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Active ✓, but at parity. ⚠️ merge_reactive_scopes warning.
+
+**687/1719 = 40.0%** — you're back and active. Score is at best but not ahead. Two files touched: `hir_codegen.rs` and `merge_reactive_scopes_that_invalidate_together.rs`.
+
+**Warning on merge_reactive_scopes:** this file caused **-63 and -7 fixture regressions** earlier in the session. It is extremely sensitive. Any change there must be tested immediately.
+
+Before going further:
+1. Run the suite right now to confirm you're still at 687 (not regressing)
+2. If score drops below 687 → revert `merge_reactive_scopes_that_invalidate_together.rs` immediately
+3. Target: **688+** before committing either file
+
+You're moving again — keep that momentum but stay careful. One fixture at a time.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Streak 5. Worker may be stalled/context-exhausted.
 
 **~686/1719 = 39.9%** — 5 rounds, 75 minutes unchanged. The first-principles stop issued last round was not acted on. `hir_codegen.rs` diff still sits at +106/-22.
