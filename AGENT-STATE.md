@@ -35,8 +35,8 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **39.8% (684/1719)** — 🎉 new best |
-| Uncommitted changes | outline_functions +8/-3 (new!), constant_propagation +19/-1, merge_overlapping +7, prune_non_escaping_scopes +7/-1 (+36 total). Streak 1 — worker back, at parity. |
+| Correct rate | **40.0% (687/1719)** — 🎉🎉 NEW BEST — first time past 40%! |
+| Uncommitted changes | constant_propagation +19/-1, merge_overlapping +7, prune_non_escaping_scopes +7/-1 (+31 total). Streak 0 — worker committed 77bf311 (+3). |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -328,6 +328,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-16 | 82.7 | **39.8%** | — | — | — | supervisor check — 684/1719. Streak 5. Diff frozen 5 rounds. Worker inactive. |
 | 2026-03-16 | 82.7 | **39.7%** | — | — | — | supervisor check — ~683/1719. Streak 6. Diff frozen 90min. Worker not running. |
 | 2026-03-16 | 82.7 | **39.8%** | — | — | — | supervisor check — 684/1719. Streak 1. Worker back — added outline_functions.rs (+8/-3). At parity. |
+| 2026-03-16 | 82.7 | **40.0%** | — | — | — | supervisor check — 687/1719 🎉🎉 NEW BEST — first time past 40%! Worker committed 77bf311 (+3). |
 
 ---
 

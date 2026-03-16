@@ -7,6 +7,12 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — 🎉🎉 687/1719 = 40.0% — FIRST TIME PAST 40%!
+
+**687/1719 = 40.0%** — confirmed new best! Destructured params + `_tempN` naming fix gave +3. You broke the 40% barrier!
+
+Keep going with this pattern — `outline_functions.rs` was the right call. What's the next fixture that fails due to a similar naming or outlining issue? Pick it, fix it, commit.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Welcome back. At 684 parity. Push to 685.
 
 **684/1719 = 39.8%** — you're back and at parity with best. `outline_functions.rs` change (+8/-3) is not causing regression. Good.
