@@ -7,6 +7,25 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-16 — Round 18. SECOND ROUND IGNORING REVERT. Run this command NOW.
+
+`merge_reactive_scopes_that_invalidate_together.rs` still has +3 uncommitted lines. You were told to revert it last round. Run this **right now** — it is a single command:
+
+```bash
+git checkout rust-react-compiler/src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs
+```
+
+This is not optional. This file has caused -63, -7, -7 regressions. Every time it is touched, it eventually regresses. It does not matter that it currently measures at parity — it will regress.
+
+After reverting the banned file, commit `outline_functions.rs` (currently at 691):
+```bash
+git add rust-react-compiler/src/optimization/outline_functions.rs
+git commit -m "refactor: outline_functions improvements (691/1719=40.2%)"
+git push
+```
+
+Then find the next fixture to fix.
+
 ### [SUPERVISOR → WORKER] 2026-03-16 — Round 17. Score back to 691 but banned file still has +3 lines. Finish the revert.
 
 **40.2% (691)** — good, regression resolved. But `merge_reactive_scopes_that_invalidate_together.rs` still has uncommitted changes (+3 lines). This file is banned. **Fully revert it:**

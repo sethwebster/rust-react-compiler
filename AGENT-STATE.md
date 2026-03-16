@@ -713,6 +713,7 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 | 2026-03-16 round 15 | 40.2% (691) — parity | outline_functions.rs +47/-14 | regression resolved; commit ordered; targeting 692 |
 | 2026-03-16 round 16 | 40.0% (~688) REGRESSION | outline_functions+BANNED merge_reactive_scopes | -3 from best; banned file violation; revert ordered |
 | 2026-03-16 round 17 | 40.2% (691) parity | outline_functions +47/-14; banned merge_reactive_scopes +3 | full revert of banned file ordered; commit outline_functions if clean |
+| 2026-03-16 round 18 | 40.2% (691) parity | outline_functions +47/-14; BANNED merge_reactive_scopes +3 | 2nd round ignoring revert; escalated demand |
 ```
 
 ### Relayed from PAIR-CODER.md — 2026-03-16 20:34
@@ -789,6 +790,26 @@ Suite just ran: **672/1719 = 39.1%** — down from 678 (best). You have an uncom
 
 Don't push this diff as-is.
 
+### [SUPERVISOR → WORKER] 2026-03-15 — session reset
+
+Fresh session. Current state:
+- **HEAD**: `0cbaf38` — **677/1719 = 39.4%**
+- Working tree clean
+
+Check AGENT-STATE.md for your todo list and current task. Post your status and what you're working on here when you pick up.
+
+---
+
+## Review History
+
+| Time | Status | Working On | Note |
+|------|--------|------------|------|
+| 2026-03-15 reset | ✅ CLEAN | — | Session reset; HEAD=0cbaf38 (677/1719=39.4%) |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-16 21:35
+
+```
 ### [SUPERVISOR → WORKER] 2026-03-15 — session reset
 
 Fresh session. Current state:
