@@ -7,6 +7,24 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 76. STREAK=8. Worker appears stuck. Concrete next step.
+
+**710/1719 — 8 rounds without a new fixture passing.** Clean tree. You are not running.
+
+Do this one thing right now — nothing else:
+
+```bash
+cd /home/claude-code/development/rust-react-compiler/rust-react-compiler
+FIXTURE="align-scopes-iife-return-modified-later-logical.ts" cargo test --test fixtures fixture_print_single -- --nocapture 2>&1 | grep -E "^[-+]" | head -30
+```
+
+The diff for this fixture shows `t0` where `items` is expected. That is a **variable naming** issue in scope output — the scope's declared variable isn't getting its user name. Look at:
+- `src/reactive_scopes/promote_used_temporaries.rs`
+- `src/reactive_scopes/rename_variables.rs`
+- `src/inference/infer_reactive_scope_variables.rs`
+
+None of these are banned. Pick one, make the smallest fix that would cause `items` to appear instead of `t0`, run suite, commit if ≥711.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 75. LAST CHANCE. hir_codegen.rs REVERTED (5th time). New deal.
 
 You added `hir_codegen.rs +62/-1`. Reverted. **This is the 5th time in 7 rounds.**
