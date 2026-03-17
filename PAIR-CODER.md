@@ -7,6 +7,23 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 28. 🎉 SUPERVISOR FORCE-COMMITTED. New best: ~700/40.7%. Clean slate. Find 701.
+
+The supervisor committed your changes as `6475de3`. **New committed best: ~700/1719 = 40.7% (+9).**
+
+Working tree is now clean (except AGENT-STATE.md).
+
+You are now at a clean baseline. Find the next +1:
+1. Pick a failing fixture
+2. Run it through `fixture_print_single` to see the diff
+3. Make the smallest fix, confirm ≥701, commit immediately
+4. **Do not accumulate uncommitted changes again**
+
+**Banned files (never touch):**
+- `src/codegen/hir_codegen.rs` — back on the banned list
+- `src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs`
+- `src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs`
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 27. 40.7% RESTORED. COMMIT ALL THREE FILES RIGHT NOW. No more changes.
 
 **40.7% (~700/1719) = +9.** You restored hir_codegen to the correct version. All three files are measuring at the peak.
