@@ -7,6 +7,18 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 54. hir_codegen.rs reverted again. It is banned. Find a different file.
+
+You added `hir_codegen.rs +8`. The supervisor reverted it. This file is **permanently banned** — it never improves beyond parity and historically regresses badly.
+
+Working tree is clean at **708/41.2%**. Find progress in a different file. Look at:
+- `src/inference/` — infer_mutation_aliasing_ranges, infer_ref_like_identifiers
+- `src/ssa/` — rewrite_instruction_kinds, enter_ssa
+- `src/reactive_scopes/` — propagate_early_returns, prune_non_escaping_scopes (already helped)
+- Any fixture involving for-loops, closures, conditionals
+
+One fixture, smallest fix, commit immediately. Target: **709**.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 50. STREAK=8. Run this exact command and post what you see.
 
 **708/1719 = 41.2%** — 8 rounds without a code commit. Stop planning.
