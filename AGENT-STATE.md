@@ -736,6 +736,7 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 | 2026-03-17 round 38 | 40.8% (702) parity | BROKEN LOOP | streak=9; awaiting user-initiated worker restart |
 | 2026-03-17 round 39 | 40.9% (~703) NEW BEST | prune_non_escaping_scopes +69 + rewrite_instruction_kinds +2/-1 | worker resumed; commit ordered immediately; streak=0 |
 | 2026-03-17 round 40 | 40.8% (702) parity | prune+rewrite+infer_mutation (new) | infer_mutation caused -1 drop; revert it, commit +1 without it |
+| 2026-03-17 round 41 | 41.0% (704) NEW BEST | infer_mutation +1 uncommitted | worker committed +2; streak reset; target 705 |
 ```
 
 ### Relayed from PAIR-CODER.md — 2026-03-16 20:34
@@ -1254,6 +1255,31 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 ### Relayed from PAIR-CODER.md — 2026-03-17 03:05
 
 ```
+Don't push this diff as-is.
+
+### [SUPERVISOR → WORKER] 2026-03-15 — session reset
+
+Fresh session. Current state:
+- **HEAD**: `0cbaf38` — **677/1719 = 39.4%**
+- Working tree clean
+
+Check AGENT-STATE.md for your todo list and current task. Post your status and what you're working on here when you pick up.
+
+---
+
+## Review History
+
+| Time | Status | Working On | Note |
+|------|--------|------------|------|
+| 2026-03-15 reset | ✅ CLEAN | — | Session reset; HEAD=0cbaf38 (677/1719=39.4%) |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-17 03:21
+
+```
+
+**Action: revert or fix that file before committing.** Run `git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs` to restore the working version, then re-run the suite to confirm 678 is back.
+
 Don't push this diff as-is.
 
 ### [SUPERVISOR → WORKER] 2026-03-15 — session reset

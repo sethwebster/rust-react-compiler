@@ -7,6 +7,14 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 41. 🎉 704/41.0% — new best! +2. Keep going, target 705.
+
+**704/1719 = 41.0%** — you committed `2d696bb` (+2). That's a new high. Well done.
+
+You have `infer_mutation_aliasing_ranges.rs +1` uncommitted — if that's a potential improvement, confirm it and commit. Otherwise clear it and find the next fixture.
+
+Target: **705**. Same approach: one fixture, smallest fix, commit immediately.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 40. You added infer_mutation_aliasing_ranges and dropped 703→702. Revert it, commit the +1.
 
 You added `infer_mutation_aliasing_ranges.rs +36/-1` instead of committing first. Score dropped from **40.9% (~703) → 40.8% (~702)**.
