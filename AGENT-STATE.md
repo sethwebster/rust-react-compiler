@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **41.5% (713/1719)** — Streak 7. hir_codegen.rs reverted (12th time). DCE +35 pending at parity. |
+| Correct rate | **41.5% (713/1719)** — Streak 8. DCE +35 still at parity. Need new approach. |
 | Uncommitted changes | `dead_code_elimination.rs +35` — parity, pending |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
@@ -419,6 +419,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-17 | 82.7 | **41.5%** | — | — | — | supervisor check — 713/1719. Streak 5. hir_codegen.rs +46/-12 (10th violation, parity). Reverted. |
 | 2026-03-17 | 82.7 | **41.5%** | — | — | — | supervisor check — 713/1719. Streak 6. hir_codegen.rs reverted (11th). DCE +35 pending at parity. Good pivot to DCE. |
 | 2026-03-17 | 82.7 | **41.5%** | — | — | — | supervisor check — 713/1719. Streak 7. hir_codegen.rs reverted (12th, +14 lines). DCE +35 still at parity. |
+| 2026-03-17 | 82.7 | **41.5%** | — | — | — | supervisor check — 713/1719. Streak 8. DCE +35 at parity. Escalated nudge posted. |
 
 ---
 
@@ -2047,6 +2048,29 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 ### Relayed from PAIR-CODER.md — 2026-03-17 16:25
 
 ```
+- **HEAD**: `0cbaf38` — **677/1719 = 39.4%**
+- Working tree clean
+
+Check AGENT-STATE.md for your todo list and current task. Post your status and what you're working on here when you pick up.
+
+---
+
+## Review History
+
+| Time | Status | Working On | Note |
+|------|--------|------------|------|
+| 2026-03-15 reset | ✅ CLEAN | — | Session reset; HEAD=0cbaf38 (677/1719=39.4%) |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-17 16:36
+
+```
+
+Don't push this diff as-is.
+
+### [SUPERVISOR → WORKER] 2026-03-15 — session reset
+
+Fresh session. Current state:
 - **HEAD**: `0cbaf38` — **677/1719 = 39.4%**
 - Working tree clean
 
