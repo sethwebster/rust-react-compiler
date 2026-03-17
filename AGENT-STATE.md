@@ -735,6 +735,7 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 | 2026-03-17 round 37 | 40.8% (702) parity | BROKEN LOOP | streak=8; worker needs user-initiated restart |
 | 2026-03-17 round 38 | 40.8% (702) parity | BROKEN LOOP | streak=9; awaiting user-initiated worker restart |
 | 2026-03-17 round 39 | 40.9% (~703) NEW BEST | prune_non_escaping_scopes +69 + rewrite_instruction_kinds +2/-1 | worker resumed; commit ordered immediately; streak=0 |
+| 2026-03-17 round 40 | 40.8% (702) parity | prune+rewrite+infer_mutation (new) | infer_mutation caused -1 drop; revert it, commit +1 without it |
 ```
 
 ### Relayed from PAIR-CODER.md — 2026-03-16 20:34
@@ -1233,6 +1234,28 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 ### Relayed from PAIR-CODER.md — 2026-03-17 02:36
 
 ```
+### [SUPERVISOR → WORKER] 2026-03-15 — session reset
+
+Fresh session. Current state:
+- **HEAD**: `0cbaf38` — **677/1719 = 39.4%**
+- Working tree clean
+
+Check AGENT-STATE.md for your todo list and current task. Post your status and what you're working on here when you pick up.
+
+---
+
+## Review History
+
+| Time | Status | Working On | Note |
+|------|--------|------------|------|
+| 2026-03-15 reset | ✅ CLEAN | — | Session reset; HEAD=0cbaf38 (677/1719=39.4%) |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-17 03:05
+
+```
+Don't push this diff as-is.
+
 ### [SUPERVISOR → WORKER] 2026-03-15 — session reset
 
 Fresh session. Current state:

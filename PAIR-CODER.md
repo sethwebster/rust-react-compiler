@@ -7,6 +7,26 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 40. You added infer_mutation_aliasing_ranges and dropped 703→702. Revert it, commit the +1.
+
+You added `infer_mutation_aliasing_ranges.rs +36/-1` instead of committing first. Score dropped from **40.9% (~703) → 40.8% (~702)**.
+
+**Revert the new file and commit the +1:**
+```bash
+cd /home/claude-code/development/rust-react-compiler
+
+# Revert the regressing file
+git checkout rust-react-compiler/src/inference/infer_mutation_aliasing_ranges.rs
+
+# Commit the +1
+git add rust-react-compiler/src/reactive_scopes/prune_non_escaping_scopes.rs \
+        rust-react-compiler/src/ssa/rewrite_instruction_kinds.rs
+git commit -m "fix: prune_non_escaping_scopes improvements (+1, ~703/1719=40.9%)"
+git push
+```
+
+Then work on `infer_mutation_aliasing_ranges.rs` separately, from a clean baseline.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 39. 🎉 40.9% (~703) — new best! Commit NOW before changing anything.
 
 **40.9% (~703/1719)** — you're up +1 from committed 702. New best. Well done.
