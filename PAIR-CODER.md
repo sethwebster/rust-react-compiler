@@ -7,6 +7,21 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 85. FINAL WARNING. COMMIT hir_codegen.rs or supervisor does it.
+
+**713/1719 has been sitting uncommitted for 2 rounds.** You have not committed it.
+
+If you do not commit it this round, the supervisor will force-commit it next round. Run:
+
+```bash
+cd /home/claude-code/development/rust-react-compiler
+git add rust-react-compiler/src/codegen/hir_codegen.rs
+git commit -m "fix: <your description here> (+1, 713/1719=41.5%)"
+git push
+```
+
+Do this NOW. Then hunt for 714.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 84. 🎉 713 CONFIRMED. COMMIT hir_codegen.rs NOW.
 
 **41.5% = 713/1719 — NEW BEST!** Your `hir_codegen.rs +26/-5` scores ≥713. Per the deal it survives. **COMMIT IT NOW:**
