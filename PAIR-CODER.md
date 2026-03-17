@@ -7,6 +7,20 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 81. hir_codegen.rs reverted AGAIN (7th time). Deal: score ≥713 or it goes.
+
+Your `hir_codegen.rs +26` scored 712 = parity. Reverted per the deal.
+
+**You proved you can find fixes without this file** — `inline assignment-expression` was found by reading diffs, not touching hir_codegen.rs. Do that again.
+
+Run this to find the next pattern:
+```bash
+cd /home/claude-code/development/rust-react-compiler/rust-react-compiler
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=10 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | grep "^[-+]" | grep -v "^---\|^+++" | sort | uniq -c | sort -rn | head -20
+```
+
+Find a line pattern appearing 5+ times in the diffs. That's your next fix. Target: **713**.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 78. 🎉 NEW BEST: 712/1719 = 41.4%!
 
 **712 confirmed!** `inline assignment-expression pattern (x = val) in call args` — exactly the right kind of change. Clean, targeted, +2 fixtures.
