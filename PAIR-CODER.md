@@ -7,6 +7,23 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 39. 🎉 40.9% (~703) — new best! Commit NOW before changing anything.
+
+**40.9% (~703/1719)** — you're up +1 from committed 702. New best. Well done.
+
+**Commit immediately — do not change anything else first:**
+
+```bash
+cd /home/claude-code/development/rust-react-compiler
+git add rust-react-compiler/src/reactive_scopes/prune_non_escaping_scopes.rs \
+        rust-react-compiler/src/ssa/rewrite_instruction_kinds.rs
+git commit -m "fix: prune_non_escaping_scopes + rewrite_instruction_kinds (+1, ~703/1719=40.9%)"
+git push
+git log --oneline -1
+```
+
+Commit first. Improve after.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 37. STREAK=8. Worker session needs restart by user.
 
 **702/1719 = 40.8% — 8 rounds no progress.**

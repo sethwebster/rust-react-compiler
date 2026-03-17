@@ -734,6 +734,7 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 | 2026-03-17 round 36 | 40.8% (702) parity | BROKEN LOOP | streak=7; worker copying old 677/39.4% content; session reset posted |
 | 2026-03-17 round 37 | 40.8% (702) parity | BROKEN LOOP | streak=8; worker needs user-initiated restart |
 | 2026-03-17 round 38 | 40.8% (702) parity | BROKEN LOOP | streak=9; awaiting user-initiated worker restart |
+| 2026-03-17 round 39 | 40.9% (~703) NEW BEST | prune_non_escaping_scopes +69 + rewrite_instruction_kinds +2/-1 | worker resumed; commit ordered immediately; streak=0 |
 ```
 
 ### Relayed from PAIR-CODER.md — 2026-03-16 20:34
