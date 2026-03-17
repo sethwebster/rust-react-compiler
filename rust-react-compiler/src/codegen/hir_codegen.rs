@@ -2997,9 +2997,10 @@ impl<'a> Codegen<'a> {
                     if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
                         // Skip StoreLocals that were inlined away (const store whose value was
                         // propagated through LoadLocals — e.g. `const value = null` when `null`
-                        // is inlined at the use site).
+                        // is inlined at the use site; or Reassign stores that are part of an
+                        // inlined assignment-expression like `(x = val)` in a call arg).
                         if self.inlined_exprs.contains_key(&instr.lvalue.identifier.0)
-                            && matches!(lvalue.kind, InstructionKind::Const | InstructionKind::HoistedConst)
+                            && matches!(lvalue.kind, InstructionKind::Const | InstructionKind::HoistedConst | InstructionKind::Reassign)
                         {
                             continue;
                         }
@@ -3929,9 +3930,10 @@ impl<'a> Codegen<'a> {
             }
             if intra_set.contains(&i) {
                 if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
-                    // Skip StoreLocals inlined away by build_inline_map Pass 3.
+                    // Skip StoreLocals inlined away by build_inline_map Pass 3, or
+                    // Reassign stores that are part of an inlined assignment-expression.
                     if self.inlined_exprs.contains_key(&instr.lvalue.identifier.0)
-                        && matches!(lvalue.kind, InstructionKind::Const | InstructionKind::HoistedConst)
+                        && matches!(lvalue.kind, InstructionKind::Const | InstructionKind::HoistedConst | InstructionKind::Reassign)
                     {
                         continue;
                     }
@@ -4228,6 +4230,34 @@ let test_expr = if let Some((skip_idx, store_lv_id, value_place)) = inline_assig
             }
         }
 
+        // Pass 1.6: detect assignment-expression pattern `foo((x = val))`.
+        // When a Reassign StoreLocal has use_count==0 (its result is unused)
+        // and its stored value temp has use_count==2 (in StoreLocal + as call arg),
+        // the original source was `foo((x = val))`. We inline value as `(x = val)`.
+        // Adjust the value's effective use count down by 1 so it inlines normally.
+        let mut reassign_wrap: HashMap<u32, String> = HashMap::new();
+        for instr in instrs.iter() {
+            if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
+                if lvalue.kind != InstructionKind::Reassign { continue; }
+                if *self.use_count.get(&instr.lvalue.identifier.0).unwrap_or(&0) != 0 { continue; }
+                let var_name = match self.env.get_identifier(lvalue.place.identifier)
+                    .and_then(|i| i.name.as_ref())
+                    .map(|_| self.ident_name(lvalue.place.identifier))
+                {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let val_uses = *self.use_count.get(&value.identifier.0).unwrap_or(&0);
+                if val_uses != 2 { continue; }
+                reassign_wrap.insert(value.identifier.0, var_name.clone());
+                if let Some(cnt) = adjusted_use_count.get_mut(&value.identifier.0) {
+                    *cnt = cnt.saturating_sub(1);
+                }
+                // Mark StoreLocal result as suppressed (empty = skip emission).
+                self.inlined_exprs.insert(instr.lvalue.identifier.0, String::new());
+            }
+        }
+
         // Pass 2: for single-use temps whose only use is as the value in
         // another instruction, inline the expression chain.
         // We do a topological walk (instructions are already in order).
@@ -4254,7 +4284,12 @@ let test_expr = if let Some((skip_idx, store_lv_id, value_place)) = inline_assig
                 continue;
             }
             // Check if we can compute an inlinable expression.
-            if let Some(expr) = self.try_inline_instr(instr) {
+            if let Some(base_expr) = self.try_inline_instr(instr) {
+                let expr = if let Some(var_name) = reassign_wrap.get(&instr.lvalue.identifier.0) {
+                    format!("({var_name} = {base_expr})")
+                } else {
+                    base_expr
+                };
                 self.inlined_exprs.insert(instr.lvalue.identifier.0, expr);
             }
         }
@@ -5962,10 +5997,10 @@ let test_expr = if let Some((skip_idx, store_lv_id, value_place)) = inline_assig
 
             InstructionValue::StoreLocal { lvalue, value, .. } => {
                 // If build_inline_map marked this StoreLocal as "inlined away" (const store
-                // If build_inline_map marked this StoreLocal as "inlined away" (const store
-                // whose value was fully inlined and propagated through LoadLocals), suppress it.
+                // whose value was fully inlined and propagated through LoadLocals, or a Reassign
+                // store that is part of an inlined assignment-expression like `(x = val)`), suppress it.
                 if self.inlined_exprs.contains_key(&instr.lvalue.identifier.0)
-                    && matches!(lvalue.kind, InstructionKind::Const | InstructionKind::HoistedConst)
+                    && matches!(lvalue.kind, InstructionKind::Const | InstructionKind::HoistedConst | InstructionKind::Reassign)
                 {
                     return None;
                 }
