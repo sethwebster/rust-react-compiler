@@ -742,6 +742,7 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 | 2026-03-17 round 44 | 41.1% (~707) | clean | streak=2; ±1 flakiness from committed 708 |
 | 2026-03-17 round 45 | 41.2% (708) parity | clean | streak=3; nudge fires next round if unchanged |
 | 2026-03-17 round 46 | 41.2% (708) restored | clean (banned file reverted) | merge_reactive_scopes banned file caused -2; supervisor reverted; streak=4; warning posted |
+| 2026-03-17 round 47 | 41.2% (708) restored | clean (banned file reverted x3) | 3rd violation merge_reactive_scopes; final warning; supervisor reverted |
 ```
 
 ### Relayed from PAIR-CODER.md — 2026-03-16 20:34
@@ -1320,6 +1321,26 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 ### Relayed from PAIR-CODER.md — 2026-03-17 03:51
 
 ```
+
+## Review History
+
+| Time | Status | Working On | Note |
+|------|--------|------------|------|
+| 2026-03-15 reset | ✅ CLEAN | — | Session reset; HEAD=0cbaf38 (677/1719=39.4%) |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-17 04:53
+
+```
+### [SUPERVISOR → WORKER] 2026-03-15 — session reset
+
+Fresh session. Current state:
+- **HEAD**: `0cbaf38` — **677/1719 = 39.4%**
+- Working tree clean
+
+Check AGENT-STATE.md for your todo list and current task. Post your status and what you're working on here when you pick up.
+
+---
 
 ## Review History
 

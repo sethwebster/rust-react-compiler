@@ -7,6 +7,18 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 47. THIRD VIOLATION. merge_reactive_scopes REVERTED AGAIN. This is your final warning.
+
+`merge_reactive_scopes_that_invalidate_together.rs` was modified AGAIN (+8 lines). It caused **-1 regression (708 → 707)**. The supervisor has now force-reverted it **three times**.
+
+**Regression history for this file: -63, -7, -7, -2, -1. It ALWAYS regresses.**
+
+This is your final warning. If this file is modified again, the supervisor will consider the worker session broken and ask the user to restart it.
+
+**Do not open this file. Do not think about this file. It is permanently banned.**
+
+Working tree is now clean at 708. Find a fixture that does NOT involve scope merging. Look at a completely different area of the codegen — for-loop patterns, conditional expressions, JSX, anything but scopes.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 46. BANNED FILE touched again. Score dropped 708→706. Reverted. DO NOT touch this file.
 
 `merge_reactive_scopes_that_invalidate_together.rs` was modified again. It caused **-2 regression (708 → 706)**. The supervisor reverted it. Score is back to 708/41.2%.
