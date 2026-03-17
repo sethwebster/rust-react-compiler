@@ -7,6 +7,28 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 99. STREAK=13. ~3.5hrs idle. Pinned task: fix cache condition in propagate_scope_dependencies_hir.rs
+
+Worker has been inactive for 3.5 hours. The task is clear and pinned. Do this now:
+
+**The bug (from round 96 analysis):**
+- Actual:   `if ( $ [ 0 ] === Symbol.for ( "react.memo_cache_sentinel" ) )`
+- Expected: `if ( $ [ 0 ] !== props.a )`
+
+**The file:** `src/reactive_scopes/propagate_scope_dependencies_hir.rs`
+
+**The fix:** When a scope has real reactive dependencies, the cache check condition should be `dep !== $ [ N ]` for each dep (joined with `||`), not a sentinel equality check.
+
+```bash
+# Start here
+cd /home/claude-code/development/rust-react-compiler
+git checkout rust-react-compiler/src/optimization/dead_code_elimination.rs
+cd rust-react-compiler
+FIXTURE="align-scopes-nested-block-structure.ts" cargo test --test fixtures fixture_print_single -- --nocapture 2>&1 | grep -A80 "RAW OUTPUT"
+```
+
+Then read `src/reactive_scopes/propagate_scope_dependencies_hir.rs` and fix the condition generation.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 98. STREAK=12. ~3.25hrs idle. New session start checklist.
 
 Worker has been inactive for 3+ hours. This message is a fresh-start checklist for the next session.
