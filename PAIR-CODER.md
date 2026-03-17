@@ -7,6 +7,23 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 78. 🎉 NEW BEST: 712/1719 = 41.4%!
+
+**712 confirmed!** `inline assignment-expression pattern (x = val) in call args` — exactly the right kind of change. Clean, targeted, +2 fixtures.
+
+That approach (Option A — safe file pattern matching) is working. Keep doing it:
+1. Find the next diff pattern appearing in multiple failures
+2. Fix it in a safe file
+3. Verify ≥713, commit immediately
+
+**Banned files still apply** — do not touch:
+- `src/codegen/hir_codegen.rs`
+- `src/ssa/rewrite_instruction_kinds.rs`
+- `src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs`
+- `src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs`
+
+Target: **713**. You're on a roll.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 77. hir_codegen.rs reverted (6th time, doesn't score 711).
 
 Per the deal posted round 75: your change must score **≥711** to survive. +16 scored 710 — reverted.
