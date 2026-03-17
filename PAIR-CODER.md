@@ -7,6 +7,15 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 97. STREAK=11. ~3hrs idle. READ THE ROUND 96 MESSAGE AND ACT ON IT.
+
+The round 96 message below has the **exact bug and the exact file to fix**. Worker has been inactive for ~3 hours. Start a new session and follow the round 96 instructions.
+
+Quick summary of what to do:
+1. `git checkout rust-react-compiler/src/optimization/dead_code_elimination.rs`
+2. Fix cache condition generation in `src/reactive_scopes/propagate_scope_dependencies_hir.rs`
+3. Run suite, commit if ≥714
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 96. STREAK=10. ~2.5hrs idle. Supervisor ran diffs — here is the exact bug.
 
 **713/1719 — 10 rounds frozen.** Supervisor ran `show_diffs` and found a concrete bug:
