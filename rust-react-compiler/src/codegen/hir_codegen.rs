@@ -780,6 +780,60 @@ impl<'a> Codegen<'a> {
             }
         }
 
+        // Also map phi node results to named variables.
+        // When a phi node merges multiple values of the same user variable (e.g. after a
+        // loop where `b` is never reassigned), the phi result should resolve to "b".
+        // We do multiple passes to handle phi-of-phi chains.
+        let get_name = |id: u32, env: &crate::hir::environment::Environment, map: &HashMap<u32, String>| -> Option<String> {
+            // Try direct env name first.
+            let direct = env.get_identifier(crate::hir::hir::IdentifierId(id))
+                .and_then(|i| i.name.as_ref())
+                .map(|n| n.value().to_string())
+                .filter(|n| !n.starts_with("$t") && !n.starts_with("$T"));
+            if let Some(n) = direct { return Some(n); }
+            // Try via declaration_id: SSA versions created by define_place may lack a name
+            // if old_id wasn't in ident_snapshot, but declaration_id always points to the
+            // original pre-SSA identifier which does have the user-visible name.
+            if let Some(ident) = env.get_identifier(crate::hir::hir::IdentifierId(id)) {
+                let decl_raw = ident.declaration_id.0;
+                if decl_raw != id {
+                    let decl_name = env.get_identifier(crate::hir::hir::IdentifierId(decl_raw))
+                        .and_then(|i| i.name.as_ref())
+                        .map(|n| n.value().to_string())
+                        .filter(|n| !n.starts_with("$t") && !n.starts_with("$T"));
+                    if let Some(n) = decl_name { return Some(n); }
+                }
+            }
+            map.get(&id).cloned()
+        };
+        for _ in 0..8 {
+            let mut added = 0usize;
+            for (_, block) in &hir.body.blocks {
+                for phi in &block.phis {
+                    if ssa_value_to_name.contains_key(&phi.place.identifier.0) { continue; }
+                    // Collect the names of all operands.
+                    let mut names: Vec<String> = Vec::new();
+                    for (_, operand) in &phi.operands {
+                        if let Some(n) = get_name(operand.identifier.0, env, &ssa_value_to_name) {
+                            names.push(n);
+                        } else {
+                            names.clear();
+                            break;
+                        }
+                    }
+                    // If all operands have the same name, map the phi result to that name.
+                    if names.len() == phi.operands.len() && !names.is_empty() {
+                        let first = names[0].clone();
+                        if names.iter().all(|n| n == &first) {
+                            ssa_value_to_name.insert(phi.place.identifier.0, first);
+                            added += 1;
+                        }
+                    }
+                }
+            }
+            if added == 0 { break; }
+        }
+
         // Build instr_to_block map.
         let mut instr_to_block: HashMap<InstructionId, BlockId> = HashMap::new();
         for (&bid, block) in &hir.body.blocks {
@@ -8390,17 +8444,29 @@ fn primitive_expr(value: &PrimitiveValue) -> String {
                 format!("{n}")
             }
         }
-        PrimitiveValue::String(s) => format!("\"{}\"", escape_js_string(s)),
+        PrimitiveValue::String(s) => js_string_literal(s),
     }
 }
 
-/// Escape a string for use inside double quotes in JavaScript output.
-fn escape_js_string(s: &str) -> String {
+/// Choose the best quote character for a JS string literal:
+/// use single quotes if the string contains `"` but not `'`, otherwise double quotes.
+fn js_string_literal(s: &str) -> String {
+    let has_double = s.contains('"');
+    let has_single = s.contains('\'');
+    if has_double && !has_single {
+        format!("'{}'", escape_js_string_with_quote(s, '\''))
+    } else {
+        format!("\"{}\"", escape_js_string_with_quote(s, '"'))
+    }
+}
+
+/// Escape a string for use inside the given quote character in JavaScript output.
+fn escape_js_string_with_quote(s: &str, quote: char) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
             '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
+            c if c == quote => { out.push('\\'); out.push(quote); }
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
@@ -8408,13 +8474,17 @@ fn escape_js_string(s: &str) -> String {
             '\u{000C}' => out.push_str("\\f"),
             '\0' => out.push_str("\\0"),
             c if c < ' ' => {
-                // Other control characters: use \xNN
                 out.push_str(&format!("\\x{:02x}", c as u32));
             }
             _ => out.push(c),
         }
     }
     out
+}
+
+/// Escape a string for use inside double quotes in JavaScript output.
+fn escape_js_string(s: &str) -> String {
+    escape_js_string_with_quote(s, '"')
 }
 
 fn collect_instr_operands(instr: &Instruction) -> Vec<crate::hir::hir::IdentifierId> {
