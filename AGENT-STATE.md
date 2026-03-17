@@ -731,6 +731,7 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 | 2026-03-17 round 33 | 40.8% (702) parity | clean | streak=4; first-principles nudge posted |
 | 2026-03-17 round 34 | 40.8% (702) parity | AGENT-STATE.md only | streak=5; nudge posted again; worker active but no code |
 | 2026-03-17 round 35 | 40.8% (702) parity | AGENT-STATE.md only | streak=6; supervisor provided concrete fixtures; stop planning, start coding |
+| 2026-03-17 round 36 | 40.8% (702) parity | BROKEN LOOP | streak=7; worker copying old 677/39.4% content; session reset posted |
 ```
 
 ### Relayed from PAIR-CODER.md — 2026-03-16 20:34

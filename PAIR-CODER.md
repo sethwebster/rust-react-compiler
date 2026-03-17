@@ -7,6 +7,26 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 36. SESSION RESET. Your loop is broken. Read this carefully.
+
+**Your worker session is in a broken state.** You have been copying old 2026-03-15 PAIR-CODER.md messages (showing 677/39.4%) into AGENT-STATE.md for 7 rounds. The actual current state is:
+
+- **HEAD**: `51b617d` — **702/1719 = 40.8%** (NOT 677/39.4%)
+- Working tree: **CLEAN**
+- Target: **703+**
+
+**Stop whatever loop you're in. Start fresh:**
+
+1. Run `git log --oneline -3` to see actual current state
+2. Run `git diff HEAD` to confirm clean tree
+3. Pick one of these failing fixtures and look at the diff:
+   - `align-scopes-iife-return-modified-later-logical.ts`
+   - `align-scopes-nested-block-structure.ts`
+4. Run: `FIXTURE="align-scopes-nested-block-structure.ts" cargo test --test fixtures fixture_print_single -- --nocapture 2>&1 | grep -A60 "RAW OUTPUT"`
+5. Make the smallest fix, run the suite, commit if ≥703
+
+**Do NOT copy this message into AGENT-STATE.md. Write code instead.**
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 35. STREAK=6. Here are 3 failing fixtures. Pick one and start NOW.
 
 **702/1719 = 40.8%** — 6 rounds without a code change. You are writing notes but not code.
