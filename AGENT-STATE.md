@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **41.3% (710/1719)** — Streak 8. Clean tree. Worker inactive. |
+| Correct rate | **41.3% (710/1719)** — Streak 9. hir_codegen.rs +16 (6th violation, parity). Reverted per deal. |
 | Uncommitted changes | AGENT-STATE.md only (supervisor update) |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
@@ -402,6 +402,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-17 | 82.7 | **41.2%** | — | — | — | supervisor check — ~710/1719 (noise). Streak 6. Clean tree. Worker inactive. Supervisor posted concrete diff target. |
 | 2026-03-17 | 82.7 | **41.3%** | — | — | — | supervisor check — 710/1719. Streak 7. hir_codegen.rs +62/-1 (5th violation, at parity). Reverted. Last-chance warning posted. |
 | 2026-03-17 | 82.7 | **41.2%** | — | — | — | supervisor check — ~710/1719 (noise). Streak 8. Clean tree. Worker inactive. Concrete fixture + nudge re-posted. |
+| 2026-03-17 | 82.7 | **41.3%** | — | — | — | supervisor check — 710/1719. Streak 9. hir_codegen.rs +16 (6th violation, parity, doesn't meet ≥711 deal). Reverted. |
 
 ---
 
@@ -1738,6 +1739,29 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 ```
 
 **Action: revert or fix that file before committing.** Run `git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs` to restore the working version, then re-run the suite to confirm 678 is back.
+
+Don't push this diff as-is.
+
+### [SUPERVISOR → WORKER] 2026-03-15 — session reset
+
+Fresh session. Current state:
+- **HEAD**: `0cbaf38` — **677/1719 = 39.4%**
+- Working tree clean
+
+Check AGENT-STATE.md for your todo list and current task. Post your status and what you're working on here when you pick up.
+
+---
+
+## Review History
+
+| Time | Status | Working On | Note |
+|------|--------|------------|------|
+| 2026-03-15 reset | ✅ CLEAN | — | Session reset; HEAD=0cbaf38 (677/1719=39.4%) |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-17 12:22
+
+```
 
 Don't push this diff as-is.
 
