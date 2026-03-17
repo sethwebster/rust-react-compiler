@@ -750,6 +750,28 @@ pub fn infer_mutation_aliasing_ranges(
                                 }
                             }
                         }
+                        // Closure argument: when an argument is a closure, its context
+                        // variables may be mutated when the closure is later invoked.
+                        // Extend their mutable ranges at the call site.
+                        // This handles patterns like:
+                        //   let x = null;
+                        //   const reassign = () => { x = newValue; };
+                        //   invoke(reassign);  ← x may be mutated via reassign
+                        for arg in args {
+                            let arg_id = match arg {
+                                crate::hir::hir::CallArg::Place(p) => p.identifier,
+                                crate::hir::hir::CallArg::Spread(s) => s.place.identifier,
+                            };
+                            let arg_source = aliases.get(&arg_id).copied().unwrap_or(arg_id);
+                            if let Some(ctx_ids) = closure_var_contexts.get(&arg_source) {
+                                let ctx_ids_clone: Vec<_> = ctx_ids.clone();
+                                for ctx_id in ctx_ids_clone {
+                                    use_at(&mut named_mut_uses, ctx_id, iid);
+                                    use_at(&mut named_real_muts, ctx_id, iid);
+                                    use_at(&mut last_uses, ctx_id, iid);
+                                }
+                            }
+                        }
                         // Closure call: when the callee is an alias of a named var that
                         // holds a FunctionExpression, the closure's context variables may
                         // be mutated at the call site. Extend their mutable ranges.
@@ -964,6 +986,7 @@ pub fn infer_mutation_aliasing_ranges(
             ident.mutable_range = range;
         }
     }
+
 }
 
 fn use_at(map: &mut HashMap<IdentifierId, InstructionId>, id: IdentifierId, iid: InstructionId) {
