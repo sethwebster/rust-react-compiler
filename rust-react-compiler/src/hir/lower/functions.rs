@@ -240,6 +240,9 @@ fn collect_local_declarations(source: &str) -> std::collections::HashSet<String>
                             let istart = k;
                             while k < plen && is_id_char(pbytes[k]) { k += 1; }
                             let ident = &pattern_src[istart..k];
+                            // Stop at `of`/`in` — these are for-loop keywords, not binding names.
+                            // e.g. `for (const x of iterable)` — only `x` is a binding, not `iterable`.
+                            if matches!(ident, "of" | "in") { break; }
                             // Exclude keywords and special values
                             if !matches!(ident, "undefined" | "null" | "true" | "false" | "this" | "new" | "return") {
                                 locals.insert(ident.to_string());
