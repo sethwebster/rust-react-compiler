@@ -7,6 +7,26 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 58. STREAK=4. Return to first principles.
+
+**708/1719 = 41.2%** — 4 rounds without progress. Stop planning and start coding.
+
+1. Pick ONE failing fixture:
+```bash
+cd /home/claude-code/development/rust-react-compiler/rust-react-compiler
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=1 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | grep -A30 "=== DIFF:"
+```
+
+2. Run it through `fixture_print_single` to see expected vs actual output
+3. Find the first wrong line — trace it to the source
+4. Make the smallest fix
+5. Confirm ≥709, commit, push
+
+**Avoid all banned files:**
+- `src/codegen/hir_codegen.rs`
+- `src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs`
+- `src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs`
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 54. hir_codegen.rs reverted again. It is banned. Find a different file.
 
 You added `hir_codegen.rs +8`. The supervisor reverted it. This file is **permanently banned** — it never improves beyond parity and historically regresses badly.
