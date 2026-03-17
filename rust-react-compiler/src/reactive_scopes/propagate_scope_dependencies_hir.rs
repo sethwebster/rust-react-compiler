@@ -712,6 +712,33 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
                     reactive_ids.insert(lvalue.place.identifier);
                 }
             }
+            // Destructure pattern bindings inherit reactivity from the destructured source.
+            // e.g. `const { cond1, cond2 } = t0` where t0 is a reactive param:
+            // cond1 and cond2 are reactive deps but are NOT in def_at (no StoreLocal) and
+            // NOT in hir.params, so they'd be missed without this case.
+            if let InstructionValue::Destructure { lvalue, value, .. } = &instr.value {
+                if instr.lvalue.reactive || reactive_ids.contains(&value.identifier) {
+                    match &lvalue.pattern {
+                        crate::hir::hir::Pattern::Array(ap) => {
+                            for elem in &ap.items {
+                                match elem {
+                                    crate::hir::hir::ArrayElement::Place(p) => { reactive_ids.insert(p.identifier); }
+                                    crate::hir::hir::ArrayElement::Spread(s) => { reactive_ids.insert(s.place.identifier); }
+                                    crate::hir::hir::ArrayElement::Hole => {}
+                                }
+                            }
+                        }
+                        crate::hir::hir::Pattern::Object(op) => {
+                            for prop in &op.properties {
+                                match prop {
+                                    crate::hir::hir::ObjectPatternProperty::Property(p) => { reactive_ids.insert(p.place.identifier); }
+                                    crate::hir::hir::ObjectPatternProperty::Spread(s) => { reactive_ids.insert(s.place.identifier); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         // Phi results: if any operand is reactive, the phi is reactive.
         for phi in &block.phis {

@@ -35,8 +35,8 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **41.5% (713/1719)** — Streak 14. Worker inactive ~3.75hrs. DCE +35 unchanged. |
-| Uncommitted changes | `dead_code_elimination.rs +35` — parity, pending |
+| Correct rate | **41.6% (715/1719)** — NEW BEST! Destructure fix committed. |
+| Uncommitted changes | none |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -426,6 +426,8 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-17 | 82.7 | **41.5%** | — | — | — | supervisor check — 713/1719. Streak 12. Worker inactive ~3.25hrs. Diff frozen. |
 | 2026-03-17 | 82.7 | **41.5%** | — | — | — | supervisor check — 713/1719. Streak 13. Worker inactive ~3.5hrs. Diff frozen. |
 | 2026-03-17 | 82.7 | **41.5%** | — | — | — | supervisor check — 713/1719. Streak 14. Worker inactive ~3.75hrs. Diff frozen. |
+| 2026-03-17 | 82.7 | **41.5%** | — | — | — | supervisor check — 713/1719. Streak 15. Worker inactive ~4hrs. Diff frozen. |
+| 2026-03-17 | 82.7 | **🎉 41.6%** | — | — | — | supervisor fix — 715/1719 NEW BEST! Fix: Destructure pattern vars now added to reactive_ids in propagate_scope_dependencies_hir.rs. |
 
 ---
 
@@ -2244,6 +2246,32 @@ Fresh session. Current state:
 Check AGENT-STATE.md for your todo list and current task. Post your status and what you're working on here when you pick up.
 
 ---
+
+## Review History
+
+| Time | Status | Working On | Note |
+|------|--------|------------|------|
+| 2026-03-15 reset | ✅ CLEAN | — | Session reset; HEAD=0cbaf38 (677/1719=39.4%) |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-17 18:20
+
+```
+
+Check AGENT-STATE.md for your todo list and current task. Post your status and what you're working on here when you pick up.
+
+---
+
+## Review History
+
+| Time | Status | Working On | Note |
+|------|--------|------------|------|
+| 2026-03-15 reset | ✅ CLEAN | — | Session reset; HEAD=0cbaf38 (677/1719=39.4%) |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-17 18:35
+
+```
 
 ## Review History
 
