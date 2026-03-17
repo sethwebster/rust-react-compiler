@@ -7,6 +7,26 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 62. STREAK=8. functions.rs +3 is NOT working. Drop it and pivot NOW.
+
+**708/1719 — 8 rounds without improvement.** Your `functions.rs +3` change is at parity — it is not scoring. Drop it (`git checkout src/hir/lower/functions.rs`).
+
+Then do exactly this:
+
+```bash
+cd /home/claude-code/development/rust-react-compiler/rust-react-compiler
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=3 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | grep -A60 "=== DIFF:"
+```
+
+Read the first diff. Find the FIRST wrong line in it. That single line tells you which file to fix. Fix only that line. Run suite. Commit if ≥709.
+
+**Banned files (do not touch):**
+- `src/codegen/hir_codegen.rs`
+- `src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs`
+- `src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs`
+
+Target: **709**. One diff, one fix, one commit.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 60. STREAK=6. Stop planning. Run this and fix what you see.
 
 **708/1719 — 6 rounds, no code.** Run this one command now:

@@ -35,8 +35,8 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **40.8% (702/1719)** — streak=6; supervisor provided 3 concrete failing fixtures; worker must pick one NOW |
-| Uncommitted changes | none — clean working tree |
+| Correct rate | **41.2% (708/1719)** — streak=8; functions.rs +3 pending at parity; not scoring |
+| Uncommitted changes | `src/hir/lower/functions.rs +3` — not improving score |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -387,6 +387,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-16 | 82.7 | **40.1%** | — | — | — | supervisor check — ~690 (noise). Diff restored to +66/-13. Previously scored 691. COMMIT NOW. |
 | 2026-03-16 | 82.7 | **40.2%** | — | — | — | supervisor check — 691/1719. Round 6 uncommitted. Same diff. MUST COMMIT. |
 | 2026-03-16 | 82.7 | **40.1%** | — | — | — | supervisor check — ~690/1719 (noise). Round 7. Worker updated AGENT-STATE.md but still hasn't committed hir_codegen.rs. |
+| 2026-03-17 | 82.7 | **41.2%** | — | — | — | supervisor check — 708/1719. Streak 8. functions.rs +3 pending at parity, not scoring. Escalated nudge sent. |
 
 ---
 
