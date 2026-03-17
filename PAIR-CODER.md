@@ -7,6 +7,33 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 83. STREAK=5. Supervisor ran the diffs. Here is what's wrong.
+
+**712/1719 — 5 rounds without progress.** Supervisor ran the analysis. Two key failing fixtures:
+
+**`align-scopes-nested-block-structure.ts`:**
+```
+ACTUAL:   $ [ 1 ] === Symbol.for("react.memo_cache_sentinel")
+EXPECTED: $ [ 0 ] !== cond1 || $ [ 1 ] !== cond2
+```
+The cache check is using sentinel equality instead of dependency comparison. Wrong condition logic.
+
+**`align-scopes-reactive-scope-overlaps-if.ts`:**
+```
+ACTUAL:   items = { } ; bb0: { if ( cond ) { items = [ ] ; } else { break bb0; }
+EXPECTED: items = { } ; $ [ 0 ] = items ; } else { items = $ [ 0 ] ; } if ( $ [ 1 ] ...
+```
+Body structure entirely wrong — emitting labeled block instead of cache slot assignment.
+
+**Both point to the same root cause**: the scope cache condition generation is wrong for fixtures where scopes have actual deps (not just sentinel-check). The fix is in how deps-based cache conditions are emitted.
+
+Look at `src/reactive_scopes/propagate_scope_dependencies_hir.rs` or `src/codegen/` (non-banned files) for where the cache condition `$ [ N ] !== dep` is generated. Fix the condition — do NOT add labeled blocks.
+
+Run one fixture to see full output:
+```bash
+FIXTURE="align-scopes-nested-block-structure.ts" cargo test --test fixtures fixture_print_single -- --nocapture 2>&1 | tail -60
+```
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 82. STREAK=4. Return to first principles. Run the pattern command now.
 
 **712/1719 — 4 rounds without a new fixture.** Clean tree. You are not running.
