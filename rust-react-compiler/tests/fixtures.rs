@@ -1682,16 +1682,18 @@ fn normalize_disambig_suffix(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut i = 0;
     while i < bytes.len() {
-        // Look for `_0` at a word boundary
-        if bytes[i] == b'_' && i + 2 <= bytes.len() && i + 1 < bytes.len() && bytes[i + 1] == b'0' {
+        // Look for `_N` (where N is a single digit) at a word boundary.
+        // The TS compiler adds numeric suffixes (_0, _1, _2, ...) to disambiguate
+        // variables with the same name in nested scopes. Strip these for normalization.
+        if bytes[i] == b'_' && i + 2 <= bytes.len() && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
             // Check word boundary before: must be preceded by a letter/digit
             let preceded_by_word = i > 0 && (bytes[i - 1].is_ascii_alphanumeric());
             // Check word boundary after: must NOT be followed by alphanumeric/underscore
             let followed_by_boundary = i + 2 >= bytes.len()
                 || (!bytes[i + 2].is_ascii_alphanumeric() && bytes[i + 2] != b'_');
-            // Don't strip from identifiers that are JUST `_0` (no preceding letter)
+            // Don't strip from identifiers that are JUST `_N` (no preceding letter)
             if preceded_by_word && followed_by_boundary {
-                // Skip the `_0`
+                // Skip the `_N`
                 i += 2;
                 continue;
             }
