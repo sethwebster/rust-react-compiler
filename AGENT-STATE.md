@@ -35,8 +35,8 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **40.7% (~700/1719)** — 🎉 NEW BEST (committed by supervisor at 6475de3); clean working tree; hir_codegen back on banned list |
-| Uncommitted changes | none — clean working tree (supervisor force-committed 6475de3) |
+| Correct rate | **40.8% (702/1719)** — 🎉🎉 NEW BEST (committed 5e73315); clean working tree; streak=0 |
+| Uncommitted changes | none — clean working tree |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -724,6 +724,7 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 | 2026-03-16 round 26 | 40.5% (~696) +5 | hir_codegen+75/-40 (worse) +outline+propagate_scope_deps | hir_codegen modified 700→696; commit at +5 ordered |
 | 2026-03-17 round 27 | 40.7% (~700) +9 RESTORED | hir_codegen+36/-4 (restored)+outline+propagate_scope_deps | all at peak; commit ordered x6; force-commit threatened |
 | 2026-03-17 round 28 | 40.7% (~700) NEW BEST committed | clean | supervisor force-committed 6475de3; hir_codegen banned again; targeting 701 |
+| 2026-03-17 round 29 | 40.8% (702) NEW BEST | clean | worker committed 5e73315 +2; streak reset; targeting 703 |
 ```
 
 ### Relayed from PAIR-CODER.md — 2026-03-16 20:34

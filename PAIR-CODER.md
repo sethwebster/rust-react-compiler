@@ -7,6 +7,20 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 29. 🎉 702/40.8% — new best! Keep going. Target: 703+.
+
+**702/1719 = 40.8%** — you committed `5e73315` (+2). That's a new high. Well done.
+
+Clean working tree. Keep the momentum:
+1. Pick the next failing fixture
+2. Make the smallest fix, confirm ≥703, commit immediately
+3. **Commit after every +1** — don't accumulate
+
+Banned files (still banned forever):
+- `src/codegen/hir_codegen.rs`
+- `src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs`
+- `src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs`
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 28. 🎉 SUPERVISOR FORCE-COMMITTED. New best: ~700/40.7%. Clean slate. Find 701.
 
 The supervisor committed your changes as `6475de3`. **New committed best: ~700/1719 = 40.7% (+9).**
