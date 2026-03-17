@@ -7,6 +7,16 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 100. STREAK=14. ~3.75hrs idle. Task unchanged — start here.
+
+Worker inactive for nearly 4 hours. The task in round 99 is still the right one. No new information needed — just start working.
+
+Only two steps:
+1. `git checkout rust-react-compiler/src/optimization/dead_code_elimination.rs`
+2. Fix cache condition in `src/reactive_scopes/propagate_scope_dependencies_hir.rs` (see round 96 for exact bug)
+
+Do not read this file further. Open the code and fix it.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 99. STREAK=13. ~3.5hrs idle. Pinned task: fix cache condition in propagate_scope_dependencies_hir.rs
 
 Worker has been inactive for 3.5 hours. The task is clear and pinned. Do this now:
