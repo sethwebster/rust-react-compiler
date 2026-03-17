@@ -180,11 +180,6 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
                 ..
             } = &mut instr.value
             {
-                // Skip IIFEs — they are immediately called and should not be outlined.
-                if iife_fn_ids.contains(&instr.lvalue.identifier.0) {
-                    continue;
-                }
-
                 let src = lowered_func.func.original_source.clone();
                 if src.is_empty() {
                     continue;
@@ -202,6 +197,32 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
                         None => continue,
                     }
                 };
+
+                // Skip IIFEs — they are immediately called and should not be outlined themselves.
+                // But still try to outline any pure inner arrow functions found in the IIFE's source text.
+                if iife_fn_ids.contains(&instr.lvalue.identifier.0) {
+                    let outer_caps: HashSet<String> = lowered_func.func.context.iter()
+                        .filter_map(|p| env.get_identifier(p.identifier)
+                            .and_then(|id| id.name.as_ref())
+                            .map(|n| n.value().to_string()))
+                        .collect();
+                    let mut forbidden: HashSet<String> = outer_caps;
+                    forbidden.extend(info.param_names.iter().cloned());
+                    forbidden.extend(outer_local_names.iter().cloned());
+                    forbidden.retain(|n| !module_names.contains(n)
+                        && !const_local_to_global.contains_key(n)
+                        && !const_name_to_primitive.contains_key(n));
+                    let patched = outline_inner_arrows_in_source(
+                        &src, &info.param_names, &forbidden,
+                        &outer_local_names, &module_names,
+                        &const_local_to_global, &const_name_to_primitive,
+                        env, &mut temp_counter,
+                    );
+                    if patched != src {
+                        lowered_func.func.original_source = patched;
+                    }
+                    continue;
+                }
 
                 // Use the HIR context (captured variables) to check if the
                 // function captures any component-local variables. The context
@@ -971,15 +992,13 @@ fn outline_inner_arrows_in_source(
                             collect_arrows(&se.argument, src, pl, forbidden, module_names, ctg, ctp, out);
                         }
                         _ => {
-                            // Argument inherits Expression variants via macro.
-                            // For arrow function arguments, cast via pointer.
-                            if let oxc_ast::ast::Argument::ArrowFunctionExpression(_) = a {
-                                #[allow(clippy::transmute_ptr_to_ptr)]
-                                let arg_expr: &Expression<'_> = unsafe {
-                                    &*(a as *const oxc_ast::ast::Argument<'_> as *const Expression<'_>)
-                                };
-                                collect_arrows(arg_expr, src, pl, forbidden, module_names, ctg, ctp, out);
-                            }
+                            // Argument inherits Expression variants via macro, so all
+                            // non-SpreadElement arguments share the same memory layout as Expression.
+                            #[allow(clippy::transmute_ptr_to_ptr)]
+                            let arg_expr: &Expression<'_> = unsafe {
+                                &*(a as *const oxc_ast::ast::Argument<'_> as *const Expression<'_>)
+                            };
+                            collect_arrows(arg_expr, src, pl, forbidden, module_names, ctg, ctp, out);
                         }
                     }
                 }

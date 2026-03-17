@@ -2952,6 +2952,11 @@ impl<'a> Codegen<'a> {
         // the scope output assignment, not before. Split into before/after groups.
         let max_skip_idx = skip_set.iter().copied().max().unwrap_or(0);
         let mut body_lines: Vec<String> = Vec::new();
+        // between_lines: side-effect instructions (non-StoreLocal) that appear after the last
+        // scope output in program order. These must be emitted AFTER the scope output assignment
+        // (e.g. `element = _jsx(...)`) but still INSIDE the if-block, before cache slot stores.
+        // Example: `shallowCopy(childprops)` after `element = _jsx('div', {childprops})`
+        let mut between_lines: Vec<String> = Vec::new();
         let mut post_scope_lines: Vec<String> = Vec::new();
         if body_str_opt.is_none() {
             for (i, instr) in instrs.iter().enumerate() {
@@ -2961,14 +2966,15 @@ impl<'a> Codegen<'a> {
                 if inlined_ids.contains(&instr.lvalue.identifier.0) && !intra_set.contains(&i) {
                     continue;
                 }
-                // Only StoreLocal instructions go to post_scope_lines (e.g. `const arr = t1;`
-                // after the scope block). Side effects (StoreProp, Call, etc.) must stay
-                // inside the scope body even if they appear after the main output StoreLocal.
-                let is_post_scope_store = i > max_skip_idx
-                    && !skip_set.is_empty()
-                    && matches!(&instr.value, InstructionValue::StoreLocal { .. });
-                let target_list = if is_post_scope_store {
+                // Instructions after the last scope-output store (i > max_skip_idx):
+                // - StoreLocals go to post_scope_lines (emitted after the closing `}`)
+                // - Side effects (Call, PropertyStore, etc.) go to between_lines (emitted
+                //   after the scope output assignment but before the cache slot stores)
+                let is_post_scope = i > max_skip_idx && !skip_set.is_empty();
+                let target_list = if is_post_scope && matches!(&instr.value, InstructionValue::StoreLocal { .. }) {
                     &mut post_scope_lines
+                } else if is_post_scope {
+                    &mut between_lines
                 } else {
                     &mut body_lines
                 };
@@ -3094,6 +3100,14 @@ impl<'a> Codegen<'a> {
                     let _ = writeln!(out, "{body_pad}{cache_var} = {};", reindented);
                 }
             }
+            // Emit between_lines: side-effect instructions that appear after the scope output
+            // in program order (e.g. shallowCopy after _jsx). These must run before caching.
+            if body_str_opt.is_none() {
+                for line in &between_lines {
+                    let reindented = reindent_multiline(line, &body_pad);
+                    let _ = writeln!(out, "{body_pad}{reindented}");
+                }
+            }
             for ((_, dep_str), &slot) in hoisted_dep_info.iter().zip(&dep_slot_list) {
                 let _ = writeln!(out, "{body_pad}$[{slot}] = {dep_str};");
             }
@@ -3195,6 +3209,13 @@ impl<'a> Codegen<'a> {
                     let expr_str = maybe_paren_jsx_scope_output(cache_var, &output.cache_expr);
                     let reindented = reindent_multiline(&expr_str, &body_pad);
                     let _ = writeln!(out, "{body_pad}{cache_var} = {};", reindented);
+                }
+            }
+            // Emit between_lines (side effects after scope output, before cache stores).
+            if body_str_opt.is_none() {
+                for line in &between_lines {
+                    let reindented = reindent_multiline(line, &body_pad);
+                    let _ = writeln!(out, "{body_pad}{reindented}");
                 }
             }
             let n_regular_slots_nd = out_slot_list.len().saturating_sub(sentinel_slot_count);
@@ -5112,6 +5133,13 @@ let test_expr = if let Some((skip_idx, store_lv_id, value_place)) = inline_assig
         // For each StoreLocal in the scope, check if the named variable escapes.
         // store_local_info: (idx, name, value_expr, is_intra_scope)
         let mut store_local_info: Vec<(usize, Option<String>, String, bool)> = Vec::new();
+        if std::env::var("RC_DEBUG").is_ok() {
+            for (idx, instr) in instrs.iter().enumerate() {
+                let kind = format!("{:?}", std::mem::discriminant(&instr.value));
+                let blk = self.instr_to_block.get(&instr.id).copied();
+                eprintln!("[analyze_scope] instr[{}] kind={} block={:?}", idx, kind, blk);
+            }
+        }
         for (idx, instr) in instrs.iter().enumerate() {
             if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
                 let var_id = lvalue.place.identifier;
@@ -5167,9 +5195,9 @@ let test_expr = if let Some((skip_idx, store_lv_id, value_place)) = inline_assig
                     used_outside = self.is_var_used_outside_scope(instr.lvalue.identifier, &scope_lvalue_ids);
                 }
                 if std::env::var("RC_DEBUG").is_ok() {
-                    eprintln!("[analyze_scope] StoreLocal idx={} var_id={} name={:?} kind={:?} fallthrough_bid={:?} instr_block={:?} used_outside={}",
+                    eprintln!("[analyze_scope] StoreLocal idx={} var_id={} name={:?} kind={:?} fallthrough_bid={:?} instr_block={:?} used_outside={} value_expr={:?}",
                         idx, var_id.0, var_name, lvalue.kind,
-                        fallthrough_bid, self.instr_to_block.get(&instr.id), used_outside);
+                        fallthrough_bid, self.instr_to_block.get(&instr.id), used_outside, &value_expr);
                 }
                 store_local_info.push((idx, var_name, value_expr, !used_outside));
             }
@@ -7305,7 +7333,6 @@ let test_expr = if let Some((skip_idx, store_lv_id, value_place)) = inline_assig
         let mut visited = std::collections::HashSet::new();
         let mut queue = std::collections::VecDeque::new();
         queue.push_back(self.hir.body.entry);
-
         while let Some(bid) = queue.pop_front() {
             if !visited.insert(bid) { continue; }
             if let Some(block) = self.hir.body.blocks.get(&bid) {

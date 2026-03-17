@@ -607,6 +607,27 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
         }
     }
 
+    // Build reverse map: value_id → named lvalue identifier id (for unnamed dep name resolution).
+    // e.g. `const a = t29` → value_to_named_lvalue[29] = 1 (where id=1 has name "a").
+    // Used in the dep sort to give unnamed temp deps their "effective" user-visible name.
+    let mut value_to_named_lvalue: HashMap<IdentifierId, IdentifierId> = HashMap::new();
+    for (_, block) in &hir.body.blocks {
+        for instr in &block.instructions {
+            if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
+                let has_name = env.get_identifier(lvalue.place.identifier)
+                    .and_then(|i| i.name.as_ref())
+                    .map(|n| {
+                        let v = n.value();
+                        !v.starts_with("$t") && !v.starts_with("$T")
+                    })
+                    .unwrap_or(false);
+                if has_name {
+                    value_to_named_lvalue.insert(value.identifier, lvalue.place.identifier);
+                }
+            }
+        }
+    }
+
     let scope_ids: Vec<_> = env.scopes.keys().copied().collect();
 
     // Build the set of all scope declaration identifiers across all scopes.
@@ -1182,17 +1203,32 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
         }
 
         // Sort deps alphabetically by "name.path" (mirrors TS compiler sort).
-        // Unnamed deps (SSA temps, scope outputs without user-visible names) sort
-        // after named deps using "\xFF" as a high sentinel value.
+        // For unnamed deps (SSA temps whose value flows into a named variable via StoreLocal),
+        // resolve the effective name via value_to_named_lvalue before sorting.
+        // Truly unnamed deps sort after named ones using "\u{FFFF}" as sentinel.
+        let effective_name = |dep: &ReactiveScopeDependency| -> String {
+            let direct_name = env.get_identifier(dep.place.identifier)
+                .and_then(|id| id.name.as_ref())
+                .map(|n| n.value().to_string());
+            if let Some(ref name) = direct_name {
+                if !name.starts_with("$t") && !name.starts_with("$T") {
+                    return name.clone();
+                }
+            }
+            // Try to resolve via value_to_named_lvalue (e.g., unnamed temp is the value of `const a = temp`)
+            if let Some(&lval_id) = value_to_named_lvalue.get(&dep.place.identifier) {
+                if let Some(name) = env.get_identifier(lval_id).and_then(|i| i.name.as_ref()) {
+                    let v = name.value();
+                    if !v.starts_with("$t") && !v.starts_with("$T") {
+                        return v.to_string();
+                    }
+                }
+            }
+            "\u{FFFF}".to_string()
+        };
         dep_list.sort_by(|a, b| {
-            let name_a = env.get_identifier(a.place.identifier)
-                .and_then(|id| id.name.as_ref())
-                .map(|n| n.value().to_string())
-                .unwrap_or_else(|| "\u{FFFF}".to_string());
-            let name_b = env.get_identifier(b.place.identifier)
-                .and_then(|id| id.name.as_ref())
-                .map(|n| n.value().to_string())
-                .unwrap_or_else(|| "\u{FFFF}".to_string());
+            let name_a = effective_name(a);
+            let name_b = effective_name(b);
             let path_a: String = a.path.iter().map(|e| e.property.as_str()).collect::<Vec<_>>().join(".");
             let path_b: String = b.path.iter().map(|e| e.property.as_str()).collect::<Vec<_>>().join(".");
             let key_a = format!("{}.{}", name_a, path_a);
