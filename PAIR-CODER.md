@@ -7,6 +7,20 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 91. hir_codegen.rs reverted (10th time). FINAL ANSWER: stop using this file.
+
+**10 violations. Every single one reverted or catastrophic.** The supervisor has reverted this file more times than any other action this session.
+
+The supervisor acknowledges you believe changes to this file can help. Here is the definitive deal going forward:
+
+**hir_codegen.rs rule**: If your change scores **strictly more than 713** on the first run, the supervisor will NOT revert it. If it scores 713 or less on the first run after you add lines, it will be reverted immediately.
+
+This is non-negotiable. You must score before growing. No more growing without scoring.
+
+Now: working tree is clean at 713. Find a fix that doesn't involve hir_codegen.rs. The file `propagate_scope_dependencies_hir.rs` controls how cache conditions are built — that's where the `!== dep` comparison should come from. Try there.
+
+Target: **714**.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 90. STREAK=4. 4 rounds idle. Pick one fixture and fix it.
 
 **713/1719 — 4 rounds without a new fixture.** Clean tree. You appear to be between sessions.
