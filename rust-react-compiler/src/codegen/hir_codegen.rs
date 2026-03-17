@@ -2675,16 +2675,31 @@ impl<'a> Codegen<'a> {
         // convert to temp+reassignment so we don't double-declare.
         // Exception: IIFE-captured-and-called outputs keep the named-var approach since
         // the flat fallback directly emits the StoreLocal assignment (e.g. `x = {};`).
+        // Also exception: if all scope instructions are in block 0 (function entry block)
+        // and none is a FunctionExpression, the scope is a simple top-level flat scope
+        // where the pre-declared variable is the direct output (e.g., IIFE-inlined pattern).
+        // In this case, use named-var approach (matching TS compiler behavior).
+        let is_simple_top_level_scope = {
+            let all_in_block0 = instrs.iter().all(|i| {
+                self.instr_to_block.get(&i.id).copied() == Some(crate::hir::hir::BlockId(0))
+            });
+            let no_func_expr = !instrs.iter().any(|i|
+                matches!(&i.value,
+                    InstructionValue::FunctionExpression { .. }
+                    | InstructionValue::ObjectMethod { .. })
+            );
+            all_in_block0 && no_func_expr
+        };
         for output in &mut analysis.outputs {
             if output.is_named_var {
                 if let Some(ref name) = output.out_name {
                     if declared_names.contains(name.as_str()) {
-                        if output.captured_and_called {
-                            // IIFE pattern: variable is captured by a FunctionExpression that
-                            // is also called within the scope. The flat fallback will emit the
-                            // StoreLocal assignment (e.g. `x = {};`) directly. Keep is_named_var=true
-                            // so we use the named var as the cache var (no temp needed).
-                            // Just remove the `let` keyword since the var is pre-declared.
+                        if output.captured_and_called || is_simple_top_level_scope {
+                            // IIFE pattern or simple top-level flat scope: the scope's
+                            // assignment to the pre-declared variable is unconditional
+                            // and at the function entry level. Use named-var approach
+                            // (no temp needed). Just remove the `let` since the var is
+                            // pre-declared.
                             output.out_kw = "";
                         } else {
                             // Regular reassign case: flip to temp approach.
@@ -5133,13 +5148,6 @@ let test_expr = if let Some((skip_idx, store_lv_id, value_place)) = inline_assig
         // For each StoreLocal in the scope, check if the named variable escapes.
         // store_local_info: (idx, name, value_expr, is_intra_scope)
         let mut store_local_info: Vec<(usize, Option<String>, String, bool)> = Vec::new();
-        if std::env::var("RC_DEBUG").is_ok() {
-            for (idx, instr) in instrs.iter().enumerate() {
-                let kind = format!("{:?}", std::mem::discriminant(&instr.value));
-                let blk = self.instr_to_block.get(&instr.id).copied();
-                eprintln!("[analyze_scope] instr[{}] kind={} block={:?}", idx, kind, blk);
-            }
-        }
         for (idx, instr) in instrs.iter().enumerate() {
             if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
                 let var_id = lvalue.place.identifier;
@@ -5195,9 +5203,9 @@ let test_expr = if let Some((skip_idx, store_lv_id, value_place)) = inline_assig
                     used_outside = self.is_var_used_outside_scope(instr.lvalue.identifier, &scope_lvalue_ids);
                 }
                 if std::env::var("RC_DEBUG").is_ok() {
-                    eprintln!("[analyze_scope] StoreLocal idx={} var_id={} name={:?} kind={:?} fallthrough_bid={:?} instr_block={:?} used_outside={} value_expr={:?}",
+                    eprintln!("[analyze_scope] StoreLocal idx={} var_id={} name={:?} kind={:?} fallthrough_bid={:?} instr_block={:?} used_outside={}",
                         idx, var_id.0, var_name, lvalue.kind,
-                        fallthrough_bid, self.instr_to_block.get(&instr.id), used_outside, &value_expr);
+                        fallthrough_bid, self.instr_to_block.get(&instr.id), used_outside);
                 }
                 store_local_info.push((idx, var_name, value_expr, !used_outside));
             }
