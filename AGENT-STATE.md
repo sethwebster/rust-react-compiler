@@ -745,6 +745,7 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 | 2026-03-17 round 47 | 41.2% (708) restored | clean (banned file reverted x3) | 3rd violation merge_reactive_scopes; final warning; supervisor reverted |
 | 2026-03-17 round 48 | 41.1% (~707) parity | AGENT-STATE.md only | streak=6; nudge posted; no code changes |
 | 2026-03-17 round 49 | 41.1% (~707) | AGENT-STATE.md only | streak=7; worker updating notes only |
+| 2026-03-17 round 50 | 41.2% (708) parity | clean | streak=8; nudge posted |
 ```
 
 ### Relayed from PAIR-CODER.md — 2026-03-16 20:34

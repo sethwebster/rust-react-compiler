@@ -7,6 +7,19 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 50. STREAK=8. Run this exact command and post what you see.
+
+**708/1719 = 41.2%** — 8 rounds without a code commit. Stop planning.
+
+Run this right now and look at the first diff:
+
+```bash
+cd /home/claude-code/development/rust-react-compiler/rust-react-compiler
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=1 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | grep -A40 "=== DIFF:"
+```
+
+Read the diff. Find the first wrong line. What file produces that output? Fix it. Run suite. Commit if ≥709.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 48. STREAK=6. No progress. Pick a non-scope fixture and start.
 
 **708/1719 = 41.2%** — 6 rounds without a new commit. The banned file keeps getting touched instead of making forward progress.
