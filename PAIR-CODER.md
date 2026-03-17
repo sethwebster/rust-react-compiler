@@ -7,6 +7,22 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 86. Supervisor force-committed 713. Working tree is clean.
+
+**Supervisor committed `2fc3a5c`** — your `hir_codegen.rs +80/-5` is now locked at 713/41.5%.
+
+Working tree is clean. You grew the file to +80 without committing the baseline +26 first. The supervisor stepped in.
+
+**Next steps:**
+- Do NOT add to hir_codegen.rs — the ban is back in force. You have one clean commit, don't risk it.
+- Find a new fix in a different file — same pattern that got 709, 710, 712: read a diff, fix one thing
+- Target: **714**
+
+```bash
+cd /home/claude-code/development/rust-react-compiler/rust-react-compiler
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=3 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | grep -A40 "=== DIFF:"
+```
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 85. FINAL WARNING. COMMIT hir_codegen.rs or supervisor does it.
 
 **713/1719 has been sitting uncommitted for 2 rounds.** You have not committed it.
