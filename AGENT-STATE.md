@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **41.4% (712/1719)** — Streak 1. Clean tree. Holding at best. |
+| Correct rate | **41.4% (712/1719)** — Streak 2. Clean tree. Worker inactive. |
 | Uncommitted changes | AGENT-STATE.md only (supervisor update) |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
@@ -405,6 +405,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-17 | 82.7 | **41.3%** | — | — | — | supervisor check — 710/1719. Streak 9. hir_codegen.rs +16 (6th violation, parity, doesn't meet ≥711 deal). Reverted. |
 | 2026-03-17 | 82.7 | **🎉 41.4%** | — | — | — | supervisor check — 712/1719 NEW BEST! Worker committed a6e8cc3 (inline assignment-expression in call args, +2). Streak reset. |
 | 2026-03-17 | 82.7 | **41.4%** | — | — | — | supervisor check — 712/1719. Streak 1. Clean tree. Holding at best. |
+| 2026-03-17 | 82.7 | **41.4%** | — | — | — | supervisor check — 712/1719. Streak 2. Clean tree. Worker inactive. |
 
 ---
 
