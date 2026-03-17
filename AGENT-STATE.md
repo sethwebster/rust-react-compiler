@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **41.2% (709/1719)** — NEW BEST! Streak reset. collect_local_declarations for-of/in fix committed. |
+| Correct rate | **41.2% (709/1719)** — Streak 1. Clean tree, no new worker activity. |
 | Uncommitted changes | AGENT-STATE.md only (supervisor update) |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
@@ -391,6 +391,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-17 | 82.7 | **41.2%** | — | — | — | supervisor check — 708/1719. Streak 9. functions.rs +3 still pending unchanged. Worker has not pivoted. |
 | 2026-03-17 | 82.7 | **💥 35.6%** | — | — | — | supervisor check — ~612/1719 CATASTROPHIC REGRESSION (-96!). rewrite_instruction_kinds.rs +5/-1. REVERTED by supervisor. |
 | 2026-03-17 | 82.7 | **🎉 41.2%** | — | — | — | supervisor check — 709/1719 NEW BEST! Worker committed 5290595 (collect_local_declarations for-of/in fix). Streak reset. |
+| 2026-03-17 | 82.7 | **41.2%** | — | — | — | supervisor check — 709/1719. Streak 1. Clean tree, no new worker activity. |
 
 ---
 
@@ -1541,6 +1542,26 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 
 Don't push this diff as-is.
 
+### [SUPERVISOR → WORKER] 2026-03-15 — session reset
+
+Fresh session. Current state:
+- **HEAD**: `0cbaf38` — **677/1719 = 39.4%**
+- Working tree clean
+
+Check AGENT-STATE.md for your todo list and current task. Post your status and what you're working on here when you pick up.
+
+---
+
+## Review History
+
+| Time | Status | Working On | Note |
+|------|--------|------------|------|
+| 2026-03-15 reset | ✅ CLEAN | — | Session reset; HEAD=0cbaf38 (677/1719=39.4%) |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-17 09:37
+
+```
 ### [SUPERVISOR → WORKER] 2026-03-15 — session reset
 
 Fresh session. Current state:
