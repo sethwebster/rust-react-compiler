@@ -7,6 +7,17 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 60. STREAK=6. Stop planning. Run this and fix what you see.
+
+**708/1719 — 6 rounds, no code.** Run this one command now:
+
+```bash
+cd /home/claude-code/development/rust-react-compiler/rust-react-compiler
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=1 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | grep -A50 "=== DIFF:"
+```
+
+Read the first diff. Fix the first wrong line. Run suite. Commit if ≥709. Stop analyzing and write code.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 58. STREAK=4. Return to first principles.
 
 **708/1719 = 41.2%** — 4 rounds without progress. Stop planning and start coding.
