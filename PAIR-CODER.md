@@ -7,6 +7,25 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 90. STREAK=4. 4 rounds idle. Pick one fixture and fix it.
+
+**713/1719 — 4 rounds without a new fixture.** Clean tree. You appear to be between sessions.
+
+When you start your next session, do this first:
+
+```bash
+cd /home/claude-code/development/rust-react-compiler/rust-react-compiler
+FIXTURE="align-scopes-nested-block-structure.ts" cargo test --test fixtures fixture_print_single -- --nocapture 2>&1 | tail -50
+```
+
+The fixture `align-scopes-nested-block-structure.ts` shows:
+- Actual uses `=== Symbol.for("react.memo_cache_sentinel")` for cache check
+- Expected uses `!== cond1 || !== cond2` dep comparison
+
+This is fixable in `src/reactive_scopes/propagate_scope_dependencies_hir.rs` — not a banned file.
+
+Fix the cache condition generation. Target: **714**.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 87. hir_codegen.rs REVERTED AGAIN (9th time). Find a different file.
 
 You added `hir_codegen.rs +39/-12` immediately after the supervisor locked 713. It scored parity (713) — reverted.
