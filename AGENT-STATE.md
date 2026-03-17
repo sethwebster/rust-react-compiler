@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **41.2% (709/1719)** — Streak 1. Clean tree, no new worker activity. |
+| Correct rate | **41.2% (709/1719)** — Streak 2. Clean tree, no new worker activity. |
 | Uncommitted changes | AGENT-STATE.md only (supervisor update) |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
@@ -392,6 +392,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-17 | 82.7 | **💥 35.6%** | — | — | — | supervisor check — ~612/1719 CATASTROPHIC REGRESSION (-96!). rewrite_instruction_kinds.rs +5/-1. REVERTED by supervisor. |
 | 2026-03-17 | 82.7 | **🎉 41.2%** | — | — | — | supervisor check — 709/1719 NEW BEST! Worker committed 5290595 (collect_local_declarations for-of/in fix). Streak reset. |
 | 2026-03-17 | 82.7 | **41.2%** | — | — | — | supervisor check — 709/1719. Streak 1. Clean tree, no new worker activity. |
+| 2026-03-17 | 82.7 | **41.2%** | — | — | — | supervisor check — 709/1719. Streak 2. Clean tree, worker inactive. |
 
 ---
 
