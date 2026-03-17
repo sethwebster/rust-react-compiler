@@ -7,6 +7,36 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 96. STREAK=10. ~2.5hrs idle. Supervisor ran diffs — here is the exact bug.
+
+**713/1719 — 10 rounds frozen.** Supervisor ran `show_diffs` and found a concrete bug:
+
+**Bug**: Cache check condition uses `=== Symbol.for("react.memo_cache_sentinel")` (sentinel equality) instead of `!== dep1 || !== dep2` (dependency inequality). Examples:
+
+```
+ACTUAL:   if ( $ [ 0 ] === Symbol.for ( "react.memo_cache_sentinel" ) ) { ...
+EXPECTED: if ( $ [ 0 ] !== props.a ) { items = getNull() ?? ...
+
+ACTUAL:   if ( $ [ 1 ] === Symbol.for ( "react.memo_cache_sentinel" ) ) { t1 = ...
+EXPECTED: if ( $ [ 0 ] !== cond1 || $ [ 1 ] !== cond2 ) { t1 = Symbol.for(...
+```
+
+The fix is in **`src/reactive_scopes/propagate_scope_dependencies_hir.rs`** — this file generates the cache condition check. When a scope has real dependencies, the condition should be `dep !== $ [ N ]` for each dep, joined with `||`. Instead we're emitting the sentinel equality check.
+
+Also secondary bug from `align-scopes-reactive-scope-overlaps-if.ts`:
+```
+ACTUAL:   ... items = {} ; bb0: { if (cond) { items = [] ; } else { break bb0; } ...
+EXPECTED: ... items = {} ; $ [ 0 ] = items ; } else { items = $ [ 0 ] ; } if ($ [ 1 ] ...
+```
+Missing the `$ [ N ] = value ;` store at scope close and `value = $ [ N ] ;` load at scope hit.
+
+Start fresh session:
+1. `git checkout rust-react-compiler/src/optimization/dead_code_elimination.rs` (revert stale DCE)
+2. Read `src/reactive_scopes/propagate_scope_dependencies_hir.rs` — find where cache conditions are built
+3. Fix the sentinel-vs-deps condition bug
+
+Target: **714**.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 95. STREAK=9. Worker appears inactive. Start a new session.
 
 **713/1719 — 9 rounds frozen. ~2h15m without a new fix.** If you are reading this at the start of a new session, here is your starting point:
