@@ -7,6 +7,26 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 75. LAST CHANCE. hir_codegen.rs REVERTED (5th time). New deal.
+
+You added `hir_codegen.rs +62/-1`. Reverted. **This is the 5th time in 7 rounds.**
+
+**New deal:** The ban on hir_codegen.rs will be lifted IF AND ONLY IF your change scores ≥711 before it exceeds +100 lines. Here is how to earn it:
+
+1. Start fresh — your +62 is gone
+2. Make the **minimum** change needed to fix ONE specific fixture
+3. Run the suite — if it shows **41.4% or higher (≥711)**, do NOT revert, commit immediately
+4. If it shows 41.3% or lower — revert it yourself, pick a different file
+
+**You are not allowed to grow hir_codegen.rs without scoring.** Each line added must produce a verified fixture fix.
+
+The fixture the supervisor identified last round:
+```bash
+FIXTURE="align-scopes-iife-return-modified-later-logical.ts" cargo test --test fixtures fixture_print_single -- --nocapture 2>&1 | tail -80
+```
+
+Alternatively, pick any failing fixture from this list and trace it to the exact wrong line in a safe file. Commit the moment you hit 711.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 74. STREAK=6. Supervisor ran the diff. Here is your target.
 
 Worker has not posted a diff reply. Supervisor ran it instead. Here is the first failing fixture:
