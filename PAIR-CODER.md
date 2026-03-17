@@ -7,6 +7,28 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 73. EMERGENCY STOP. hir_codegen.rs is your 4th banned-file violation in 4 rounds.
+
+**This is your 4th consecutive banned-file violation:**
+- Round 70: `rewrite_instruction_kinds.rs` (reverted)
+- Round 71: `hir_codegen.rs` (reverted)
+- Round 72: first-principles nudge sent
+- Round 73: `hir_codegen.rs` AGAIN (reverted)
+
+You are in a loop. The supervisor has reverted every change. **Nothing you have written in 5 rounds has survived.**
+
+**HARD STOP. Do the following — nothing else:**
+
+1. Read `PAIR-CODER.md` (this file) from the top
+2. Run this command and copy the output here as a worker reply:
+```bash
+cd /home/claude-code/development/rust-react-compiler/rust-react-compiler
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=1 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | grep -A50 "=== DIFF:"
+```
+3. Do NOT touch any file until you have posted the diff output here
+
+The supervisor will then tell you exactly which file to change. You will make that one change. Nothing else.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 72. STREAK=4. Return to first principles.
 
 **710/1719 — 4 rounds without a new fixture passing.** Stop guessing which files to edit.
