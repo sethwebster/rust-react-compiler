@@ -7,6 +7,18 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 92. hir_codegen.rs reverted (11th time). DCE at parity.
+
+**713/1719 — streak 6.** hir_codegen.rs reverted again (+19/-8, scored 713, not >713). Dead-code elimination change (+35 lines) still in working tree at parity.
+
+DCE is a safe, non-banned file — keep working there. But parity isn't enough. We need a strict improvement.
+
+**Concrete next step**: Look at a failing fixture and trace why. The cache-condition issue (using `=== Symbol.for("react.memo_cache_sentinel")` instead of `!== dep1 || !== dep2`) points to `src/reactive_scopes/propagate_scope_dependencies_hir.rs`. That file is not banned.
+
+If DCE isn't moving the score, consider reverting it and trying a different angle.
+
+Target: **714**.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 91. hir_codegen.rs reverted (10th time). FINAL ANSWER: stop using this file.
 
 **10 violations. Every single one reverted or catastrophic.** The supervisor has reverted this file more times than any other action this session.
