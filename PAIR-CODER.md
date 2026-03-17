@@ -7,6 +7,19 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 70. rewrite_instruction_kinds.rs is BANNED. Do not touch it.
+
+You added `rewrite_instruction_kinds.rs +2/-1`. The supervisor reverted it. This file caused **-96 fixtures** two rounds ago and is permanently banned.
+
+Working tree is clean at **710/1719**. Pick a completely different file. Options that haven't caused regressions:
+- `src/inference/infer_mutation_aliasing_ranges.rs`
+- `src/reactive_scopes/propagate_early_returns.rs`
+- `src/reactive_scopes/prune_non_escaping_scopes.rs`
+- `src/optimization/outline_functions.rs`
+- `tests/fixtures.rs` — normalize patterns
+
+Run a diff, find ONE wrong line, fix it in a safe file, confirm ≥711, commit.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 68. 🎉 NEW BEST: 710/1719!
 
 **710/1719 = 41.3% — confirmed!** Two fixes in two rounds, both clean commits. This is exactly the right pace.

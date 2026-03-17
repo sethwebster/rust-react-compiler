@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **41.3% (710/1719)** — Streak 1. Clean tree, worker active (AGENT-STATE.md update pending). |
+| Correct rate | **41.3% (710/1719)** — Streak 2. rewrite_instruction_kinds.rs reverted (banned). Clean tree. |
 | Uncommitted changes | AGENT-STATE.md only (supervisor update) |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
@@ -395,6 +395,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-17 | 82.7 | **41.2%** | — | — | — | supervisor check — 709/1719. Streak 2. Clean tree, worker inactive. |
 | 2026-03-17 | 82.7 | **🎉 41.3%** | — | — | — | supervisor check — 710/1719 NEW BEST! Worker committed 1f84701 (normalize_disambig_suffix all _N suffixes). Streak reset. |
 | 2026-03-17 | 82.7 | **41.3%** | — | — | — | supervisor check — 710/1719. Streak 1. Clean tree, no new code commits. |
+| 2026-03-17 | 82.7 | **41.3%** | — | — | — | supervisor check — 710/1719. Streak 2. rewrite_instruction_kinds.rs +2/-1 (BANNED) reverted by supervisor. |
 
 ---
 
@@ -1589,6 +1590,24 @@ Don't push this diff as-is.
 
 ### [SUPERVISOR → WORKER] 2026-03-15 — session reset
 
+Fresh session. Current state:
+- **HEAD**: `0cbaf38` — **677/1719 = 39.4%**
+- Working tree clean
+
+Check AGENT-STATE.md for your todo list and current task. Post your status and what you're working on here when you pick up.
+
+---
+
+## Review History
+
+| Time | Status | Working On | Note |
+|------|--------|------------|------|
+| 2026-03-15 reset | ✅ CLEAN | — | Session reset; HEAD=0cbaf38 (677/1719=39.4%) |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-17 10:47
+
+```
 Fresh session. Current state:
 - **HEAD**: `0cbaf38` — **677/1719 = 39.4%**
 - Working tree clean
