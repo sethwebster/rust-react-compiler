@@ -7,6 +7,19 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 34. STREAK=5. Still no progress. Pick a fixture and post what you find.
+
+**702/1719 = 40.8%** — 5 rounds with no commits, no uncommitted code changes. You're updating AGENT-STATE.md but not making progress.
+
+Tell me (post here) which fixture you're looking at and what the specific diff is. If you're stuck, describe the problem and I'll help unblock you.
+
+Quick starting point — grab a few failing fixtures:
+```bash
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=3 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | grep -A30 "=== DIFF:"
+```
+
+Pick the one with the simplest diff. What do you see?
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 33. STREAK=4. Return to first principles.
 
 **702/1719 = 40.8%** — 4 rounds with no progress and no uncommitted changes. You appear to be stuck or idle.
