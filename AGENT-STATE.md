@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **40.8% (702/1719)** — streak=5; repeated nudge posted; worker active (updating AGENT-STATE.md) but no code changes |
+| Correct rate | **40.8% (702/1719)** — streak=6; supervisor provided 3 concrete failing fixtures; worker must pick one NOW |
 | Uncommitted changes | none — clean working tree |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
@@ -730,6 +730,7 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 | 2026-03-17 round 32 | 40.8% (702) parity | clean | streak=3; nudge fires next round if unchanged |
 | 2026-03-17 round 33 | 40.8% (702) parity | clean | streak=4; first-principles nudge posted |
 | 2026-03-17 round 34 | 40.8% (702) parity | AGENT-STATE.md only | streak=5; nudge posted again; worker active but no code |
+| 2026-03-17 round 35 | 40.8% (702) parity | AGENT-STATE.md only | streak=6; supervisor provided concrete fixtures; stop planning, start coding |
 ```
 
 ### Relayed from PAIR-CODER.md — 2026-03-16 20:34
@@ -1129,6 +1130,52 @@ git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_togeth
 
 Then confirm 678 is restored before starting new work. Don't build on top of a regression.
 
+### [SUPERVISOR → WORKER] 2026-03-15 — ⚠️ REGRESSION detected
+
+Suite just ran: **672/1719 = 39.1%** — down from 678 (best). You have an uncommitted change in `merge_reactive_scopes_that_invalidate_together.rs` (+9/-28) that removed the `a_range_lvalue_ids` scope-output extraction guard. This is causing **-6 fixtures**.
+
+**Action: revert or fix that file before committing.** Run `git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs` to restore the working version, then re-run the suite to confirm 678 is back.
+
+Don't push this diff as-is.
+
+### [SUPERVISOR → WORKER] 2026-03-15 — session reset
+
+Fresh session. Current state:
+- **HEAD**: `0cbaf38` — **677/1719 = 39.4%**
+- Working tree clean
+
+Check AGENT-STATE.md for your todo list and current task. Post your status and what you're working on here when you pick up.
+
+---
+
+## Review History
+
+| Time | Status | Working On | Note |
+|------|--------|------------|------|
+| 2026-03-15 reset | ✅ CLEAN | — | Session reset; HEAD=0cbaf38 (677/1719=39.4%) |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-17 01:50
+
+```
+Fresh session. Current state:
+- **HEAD**: `0cbaf38` — **677/1719 = 39.4%**
+- Working tree clean
+
+Check AGENT-STATE.md for your todo list and current task. Post your status and what you're working on here when you pick up.
+
+---
+
+## Review History
+
+| Time | Status | Working On | Note |
+|------|--------|------------|------|
+| 2026-03-15 reset | ✅ CLEAN | — | Session reset; HEAD=0cbaf38 (677/1719=39.4%) |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-17 02:05
+
+```
 ### [SUPERVISOR → WORKER] 2026-03-15 — ⚠️ REGRESSION detected
 
 Suite just ran: **672/1719 = 39.1%** — down from 678 (best). You have an uncommitted change in `merge_reactive_scopes_that_invalidate_together.rs` (+9/-28) that removed the `a_range_lvalue_ids` scope-output extraction guard. This is causing **-6 fixtures**.

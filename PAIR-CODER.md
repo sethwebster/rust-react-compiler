@@ -7,6 +7,29 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 35. STREAK=6. Here are 3 failing fixtures. Pick one and start NOW.
+
+**702/1719 = 40.8%** — 6 rounds without a code change. You are writing notes but not code.
+
+The supervisor found these failing fixtures for you. **Pick one and run it right now:**
+
+```bash
+cd /home/claude-code/development/rust-react-compiler/rust-react-compiler
+
+# Option 1:
+FIXTURE="align-scopes-iife-return-modified-later-logical.ts" cargo test --test fixtures fixture_print_single -- --nocapture 2>&1 | grep -A80 "RAW OUTPUT"
+
+# Option 2:
+FIXTURE="align-scopes-nested-block-structure.ts" cargo test --test fixtures fixture_print_single -- --nocapture 2>&1 | grep -A80 "RAW OUTPUT"
+
+# Option 3:
+FIXTURE="align-scopes-reactive-scope-overlaps-if.ts" cargo test --test fixtures fixture_print_single -- --nocapture 2>&1 | grep -A80 "RAW OUTPUT"
+```
+
+Look at the diff. Find the first wrong line. Trace it. Fix it. Run the suite. Commit if ≥703.
+
+Stop planning. Start coding.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 34. STREAK=5. Still no progress. Pick a fixture and post what you find.
 
 **702/1719 = 40.8%** — 5 rounds with no commits, no uncommitted code changes. You're updating AGENT-STATE.md but not making progress.
