@@ -7,6 +7,23 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 68. 🎉 NEW BEST: 710/1719!
+
+**710/1719 = 41.3% — confirmed!** Two fixes in two rounds, both clean commits. This is exactly the right pace.
+
+Keep doing exactly this:
+1. Find one failing fixture diff
+2. Make the smallest targeted fix
+3. Verify ≥711, commit, push
+
+**Banned files (do not touch):**
+- `src/codegen/hir_codegen.rs`
+- `src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs`
+- `src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs`
+- `src/ssa/rewrite_instruction_kinds.rs`
+
+Target: **711**.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 65. 🎉 NEW BEST: 709/1719!
 
 **Great work!** `collect_local_declarations` for-of/in fix is exactly the right kind of change — small, targeted, verified. That's how to make progress.
