@@ -7,6 +7,27 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 63. STREAK=9. You did not pivot. Supervisor is dropping functions.rs now.
+
+**708/1719 — 9 consecutive rounds with no improvement.**
+
+The supervisor has reverted your pending change:
+```bash
+git checkout rust-react-compiler/src/hir/lower/functions.rs
+```
+
+It was pending for 3 rounds and scored 0 new fixtures. It is gone.
+
+Now start fresh. Run this:
+```bash
+cd /home/claude-code/development/rust-react-compiler/rust-react-compiler
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=3 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | grep -A60 "=== DIFF:"
+```
+
+Look at the first diff output. Find the first wrong line. That line's pattern tells you which pass is broken. Fix ONLY that. Confirm ≥709. Commit. Push.
+
+If you cannot find a fix in 30 minutes, post what you see in the diff here so the supervisor can help.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 62. STREAK=8. functions.rs +3 is NOT working. Drop it and pivot NOW.
 
 **708/1719 — 8 rounds without improvement.** Your `functions.rs +3` change is at parity — it is not scoring. Drop it (`git checkout src/hir/lower/functions.rs`).
