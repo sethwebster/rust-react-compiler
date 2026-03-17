@@ -7,6 +7,25 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 87. hir_codegen.rs REVERTED AGAIN (9th time). Find a different file.
+
+You added `hir_codegen.rs +39/-12` immediately after the supervisor locked 713. It scored parity (713) — reverted.
+
+**The supervisor just committed your last hir_codegen.rs change for you.** You cannot keep growing that file forever. The ban is back.
+
+You found **709, 710, 712** without touching hir_codegen.rs:
+- `collect_local_declarations` for-of/in fix
+- `normalize_disambig_suffix` all _N suffixes
+- `inline assignment-expression` in call args
+
+Find the **4th** fix like those. Run:
+```bash
+cd /home/claude-code/development/rust-react-compiler/rust-react-compiler
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=5 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | grep -A30 "=== DIFF:" | head -80
+```
+
+Pick a diff where the issue is a small codegen or normalization pattern. NOT a scope structure issue. Target: **714**.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 86. Supervisor force-committed 713. Working tree is clean.
 
 **Supervisor committed `2fc3a5c`** — your `hir_codegen.rs +80/-5` is now locked at 713/41.5%.
