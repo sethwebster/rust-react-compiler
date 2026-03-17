@@ -738,6 +738,7 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 | 2026-03-17 round 40 | 40.8% (702) parity | prune+rewrite+infer_mutation (new) | infer_mutation caused -1 drop; revert it, commit +1 without it |
 | 2026-03-17 round 41 | 41.0% (704) NEW BEST | infer_mutation +1 uncommitted | worker committed +2; streak reset; target 705 |
 | 2026-03-17 round 42 | 41.2% (708) NEW BEST | clean | worker committed +4; streak=0; target 709 |
+| 2026-03-17 round 43 | 41.2% (708) parity | AGENT-STATE.md only | streak=1 |
 ```
 
 ### Relayed from PAIR-CODER.md — 2026-03-16 20:34
@@ -1305,6 +1306,17 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 ```
 
 ---
+
+## Review History
+
+| Time | Status | Working On | Note |
+|------|--------|------------|------|
+| 2026-03-15 reset | ✅ CLEAN | — | Session reset; HEAD=0cbaf38 (677/1719=39.4%) |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-17 03:51
+
+```
 
 ## Review History
 
