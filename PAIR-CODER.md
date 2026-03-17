@@ -7,6 +7,24 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 72. STREAK=4. Return to first principles.
+
+**710/1719 — 4 rounds without a new fixture passing.** Stop guessing which files to edit.
+
+**Step 1**: Run this and read the output carefully:
+```bash
+cd /home/claude-code/development/rust-react-compiler/rust-react-compiler
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=1 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | grep -A80 "=== DIFF:"
+```
+
+**Step 2**: Look at the diff. Find the FIRST line that is wrong (marked `-` in expected, `+` in actual, or vice versa). Ask: *what code path produces this specific output?*
+
+**Step 3**: Trace that output line back to a source file (NOT a banned file). That file is what you fix.
+
+**Step 4**: Make the smallest possible change. Run suite. If ≥711 → commit immediately.
+
+The pattern that works: `collect_local_declarations` fix, `normalize_disambig_suffix` fix — both came from reading a specific diff. Go back to that. Do NOT guess.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 71. hir_codegen.rs REVERTED AGAIN. 3 rounds, 2 banned-file violations.
 
 You added `hir_codegen.rs +15/-1`. The supervisor reverted it. This file caused **-319 and -369 regressions** historically. It is permanently banned.
