@@ -6,6 +6,7 @@ use crate::hir::hir::{
     ObjectPatternProperty, Pattern, ScopeId, Terminal,
 };
 use crate::hir::visitors::each_instruction_value_operand;
+use crate::ssa::rewrite_instruction_kinds::find_reassigned_context_vars_from_source;
 
 /// Memoization levels mirror the TS compiler's MemoizationLevel enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -430,6 +431,12 @@ pub fn run_with_env(hir: &HIRFunction, env: &mut Environment) {
         }
     }
 
+    // Process inner function bodies to capture StoreContext reassignments.
+    // The TS compiler visits inner function bodies in PruneNonEscapingScopes and treats
+    // StoreContext as Memoized for the target (context) variable. This ensures that
+    // context variables reassigned inside closures are correctly marked as memoizable.
+    process_inner_fn_store_contexts(hir, &mut nodes, &id_to_decl, env);
+
     // Build scope nodes from scope_dep_decls.
     let mut scope_nodes: HashMap<ScopeId, ScopeNode> = scope_dep_decls
         .into_iter()
@@ -558,6 +565,68 @@ fn collect_pattern_decls(
         }
     }
     out
+}
+
+/// Recursively process inner function bodies to find StoreContext instructions.
+/// The TS compiler treats StoreContext as MemoLevel::Memoized for the target variable
+/// (matching `MemoizationLevel.Memoized` in PruneNonEscapingScopes.ts line ~663).
+/// This ensures context variables reassigned inside closures are correctly memoizable.
+fn process_inner_fn_store_contexts(
+    hir: &HIRFunction,
+    nodes: &mut HashMap<DeclarationId, Node>,
+    id_to_decl: &HashMap<IdentifierId, DeclarationId>,
+    env: &Environment,
+) {
+    let decl_for = |iid: IdentifierId| -> DeclarationId {
+        id_to_decl.get(&iid).copied().unwrap_or(DeclarationId(iid.0))
+    };
+    for (_, block) in &hir.body.blocks {
+        for instr in &block.instructions {
+            match &instr.value {
+                InstructionValue::StoreContext { lvalue, value, .. } => {
+                    let target_decl = decl_for(lvalue.place.identifier);
+                    let val_decl = decl_for(value.identifier);
+                    let target_node = nodes.entry(target_decl).or_insert_with(|| Node {
+                        level: MemoLevel::Memoized,
+                        deps: vec![],
+                        scopes: HashSet::new(),
+                        seen: false,
+                        memoized: false,
+                    });
+                    // StoreContext → Memoized (matches TS compiler behavior)
+                    target_node.level = join_levels(target_node.level, MemoLevel::Memoized);
+                    if !target_node.deps.contains(&val_decl) {
+                        target_node.deps.push(val_decl);
+                    }
+                }
+                InstructionValue::FunctionExpression { lowered_func, .. }
+                | InstructionValue::ObjectMethod { lowered_func, .. } => {
+                    // For stub function bodies (original_source passthrough), use source
+                    // analysis to detect which context variables are reassigned.
+                    if !lowered_func.func.original_source.is_empty() {
+                        let reassigned_ids = find_reassigned_context_vars_from_source(
+                            &lowered_func.func.context,
+                            &lowered_func.func.original_source,
+                            env,
+                        );
+                        for rid in reassigned_ids {
+                            let target_decl = decl_for(rid);
+                            let target_node = nodes.entry(target_decl).or_insert_with(|| Node {
+                                level: MemoLevel::Memoized,
+                                deps: vec![],
+                                scopes: HashSet::new(),
+                                seen: false,
+                                memoized: false,
+                            });
+                            target_node.level = join_levels(target_node.level, MemoLevel::Memoized);
+                        }
+                    }
+                    process_inner_fn_store_contexts(&lowered_func.func, nodes, id_to_decl, env);
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 fn visit(

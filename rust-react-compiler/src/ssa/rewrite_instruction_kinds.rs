@@ -98,7 +98,7 @@ pub fn rewrite_instruction_kinds_based_on_reassignment(hir: &mut HIRFunction, en
 /// Detect context variables that are directly reassigned in source text.
 /// Only checks for `name = ...` (not `==`/`===`), `name++`, `++name`,
 /// `name += ...` etc. Does NOT count property stores like `name.prop = ...`.
-fn find_reassigned_context_vars_from_source(
+pub fn find_reassigned_context_vars_from_source(
     context: &[Place],
     source: &str,
     env: &Environment,
