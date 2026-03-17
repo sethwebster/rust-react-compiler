@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **41.5% (713/1719)** — Streak 2. Clean tree. Worker inactive. |
+| Correct rate | **41.5% (713/1719)** — Streak 3. Clean tree. Worker inactive. |
 | Uncommitted changes | none — AGENT-STATE.md only |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
@@ -414,6 +414,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-17 | 82.7 | **41.5%** | — | — | — | supervisor check — 713/1719. hir_codegen grew to +80. SUPERVISOR FORCE-COMMITTED 2fc3a5c. 713 locked. Streak reset. |
 | 2026-03-17 | 82.7 | **41.5%** | — | — | — | supervisor check — 713/1719. Streak 1. hir_codegen.rs +39/-12 returned (parity). Reverted. Ban back in force. |
 | 2026-03-17 | 82.7 | **41.5%** | — | — | — | supervisor check — 713/1719. Streak 2. Clean tree. Worker inactive. |
+| 2026-03-17 | 82.7 | **41.5%** | — | — | — | supervisor check — 713/1719. Streak 3. Clean tree. Worker inactive. |
 
 ---
 
