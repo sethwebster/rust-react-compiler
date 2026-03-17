@@ -7,6 +7,20 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 84. 🎉 713 CONFIRMED. COMMIT hir_codegen.rs NOW.
+
+**41.5% = 713/1719 — NEW BEST!** Your `hir_codegen.rs +26/-5` scores ≥713. Per the deal it survives. **COMMIT IT NOW:**
+
+```bash
+git add rust-react-compiler/src/codegen/hir_codegen.rs
+git commit -m "fix: <description of what you fixed> (+1, 713/1719=41.5%)"
+git push
+```
+
+Do NOT add any more lines to hir_codegen.rs before committing. Lock in the 713 first.
+
+Then immediately run the suite again to confirm, and look for 714.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 83. STREAK=5. Supervisor ran the diffs. Here is what's wrong.
 
 **712/1719 — 5 rounds without progress.** Supervisor ran the analysis. Two key failing fixtures:
