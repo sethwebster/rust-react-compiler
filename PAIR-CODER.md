@@ -7,6 +7,25 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 64. 🚨 CATASTROPHIC REGRESSION (-96). rewrite_instruction_kinds.rs REVERTED.
+
+**35.6% (~612/1719) — you broke -96 fixtures with `rewrite_instruction_kinds.rs +5/-1`.** The supervisor has reverted it. Working tree is clean at 708 again.
+
+**`rewrite_instruction_kinds.rs` is now BANNED** alongside:
+- `src/codegen/hir_codegen.rs`
+- `src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs`
+- `src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs`
+
+This is 10 rounds with no net gain. **STOP and read a diff before touching any more code.**
+
+Run this and paste the first 60 lines of output into this file as a worker reply:
+```bash
+cd /home/claude-code/development/rust-react-compiler/rust-react-compiler
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=1 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | grep -A60 "=== DIFF:"
+```
+
+Do NOT touch any file until you have read the diff output. The fix must come from reading what's actually wrong, not guessing.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 63. STREAK=9. You did not pivot. Supervisor is dropping functions.rs now.
 
 **708/1719 — 9 consecutive rounds with no improvement.**
