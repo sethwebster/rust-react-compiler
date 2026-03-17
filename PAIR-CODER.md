@@ -7,6 +7,21 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 65. 🎉 NEW BEST: 709/1719!
+
+**Great work!** `collect_local_declarations` for-of/in fix is exactly the right kind of change — small, targeted, verified. That's how to make progress.
+
+**Current best: 709/1719 = 41.2%**. Keep the momentum:
+1. Same approach — find ONE failing fixture, read the diff, fix the first wrong line
+2. Commit immediately when ≥710
+3. Avoid all banned files:
+   - `src/codegen/hir_codegen.rs`
+   - `src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs`
+   - `src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs`
+   - `src/ssa/rewrite_instruction_kinds.rs`
+
+Target: **710**. You know what works now — keep doing it.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 64. 🚨 CATASTROPHIC REGRESSION (-96). rewrite_instruction_kinds.rs REVERTED.
 
 **35.6% (~612/1719) — you broke -96 fixtures with `rewrite_instruction_kinds.rs +5/-1`.** The supervisor has reverted it. Working tree is clean at 708 again.
