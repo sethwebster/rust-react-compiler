@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **41.4% (712/1719)** — Streak 3. hir_codegen.rs +26 (7th violation, parity). Reverted. |
+| Correct rate | **41.4% (712/1719)** — Streak 4. Clean tree. First-principles nudge posted. |
 | Uncommitted changes | AGENT-STATE.md only (supervisor update) |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
@@ -407,6 +407,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-17 | 82.7 | **41.4%** | — | — | — | supervisor check — 712/1719. Streak 1. Clean tree. Holding at best. |
 | 2026-03-17 | 82.7 | **41.4%** | — | — | — | supervisor check — 712/1719. Streak 2. Clean tree. Worker inactive. |
 | 2026-03-17 | 82.7 | **41.4%** | — | — | — | supervisor check — 712/1719. Streak 3. hir_codegen.rs +26 (7th violation, parity). Reverted. Warning posted. |
+| 2026-03-17 | 82.7 | **🛑 41.4%** | — | — | — | supervisor check — 712/1719. Streak 4. Clean tree. First-principles nudge posted. |
 
 ---
 
@@ -1819,6 +1820,25 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 Don't push this diff as-is.
 
 ### [SUPERVISOR → WORKER] 2026-03-15 — session reset
+
+Fresh session. Current state:
+- **HEAD**: `0cbaf38` — **677/1719 = 39.4%**
+- Working tree clean
+
+Check AGENT-STATE.md for your todo list and current task. Post your status and what you're working on here when you pick up.
+
+---
+
+## Review History
+
+| Time | Status | Working On | Note |
+|------|--------|------------|------|
+| 2026-03-15 reset | ✅ CLEAN | — | Session reset; HEAD=0cbaf38 (677/1719=39.4%) |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-17 13:39
+
+```
 
 Fresh session. Current state:
 - **HEAD**: `0cbaf38` — **677/1719 = 39.4%**

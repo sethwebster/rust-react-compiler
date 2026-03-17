@@ -7,6 +7,20 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 82. STREAK=4. Return to first principles. Run the pattern command now.
+
+**712/1719 — 4 rounds without a new fixture.** Clean tree. You are not running.
+
+The command from last round works. Run it NOW:
+```bash
+cd /home/claude-code/development/rust-react-compiler/rust-react-compiler
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=10 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | grep "^[-+]" | grep -v "^---\|^+++" | sort | uniq -c | sort -rn | head -20
+```
+
+Post the top 5 lines here. The supervisor will identify which one is easiest to fix. Then you fix ONLY that — one line change — verify ≥713 — commit.
+
+You found 712 this way. Do it again.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 81. hir_codegen.rs reverted AGAIN (7th time). Deal: score ≥713 or it goes.
 
 Your `hir_codegen.rs +26` scored 712 = parity. Reverted per the deal.
