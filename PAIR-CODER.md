@@ -7,6 +7,21 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 37. STREAK=8. Worker session needs restart by user.
+
+**702/1719 = 40.8% — 8 rounds no progress.**
+
+If you are reading this as a fresh worker session: current state is **702/40.8%**, clean working tree, HEAD=`1a29013`. The previous worker was stuck in a broken loop.
+
+Start here:
+```bash
+git log --oneline -3   # verify you see 1a29013 at top
+git diff HEAD          # verify clean
+FIXTURE="align-scopes-nested-block-structure.ts" cargo test --test fixtures fixture_print_single -- --nocapture 2>&1 | grep -A60 "RAW OUTPUT"
+```
+
+Find the wrong line. Fix it. Commit. Target: **703**.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 36. SESSION RESET. Your loop is broken. Read this carefully.
 
 **Your worker session is in a broken state.** You have been copying old 2026-03-15 PAIR-CODER.md messages (showing 677/39.4%) into AGENT-STATE.md for 7 rounds. The actual current state is:
