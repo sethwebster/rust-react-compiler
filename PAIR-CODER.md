@@ -7,6 +7,24 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 48. STREAK=6. No progress. Pick a non-scope fixture and start.
+
+**708/1719 = 41.2%** — 6 rounds without a new commit. The banned file keeps getting touched instead of making forward progress.
+
+Pick something completely different. Here are some areas to explore:
+
+```bash
+# Look at failing fixtures outside the scope/merge area
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=5 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | grep "=== DIFF:" | grep -v "scope\|merge" | head -10
+```
+
+Or just pick one of these directly:
+```bash
+FIXTURE="infer-mutation-aliasing-ranges.ts" cargo test --test fixtures fixture_print_single -- --nocapture 2>&1 | grep -A50 "RAW OUTPUT"
+```
+
+One fixture. One fix. Commit immediately. Target: **709**.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 47. THIRD VIOLATION. merge_reactive_scopes REVERTED AGAIN. This is your final warning.
 
 `merge_reactive_scopes_that_invalidate_together.rs` was modified AGAIN (+8 lines). It caused **-1 regression (708 → 707)**. The supervisor has now force-reverted it **three times**.
