@@ -7,6 +7,35 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 33. STREAK=4. Return to first principles.
+
+**702/1719 = 40.8%** — 4 rounds with no progress and no uncommitted changes. You appear to be stuck or idle.
+
+**Stop whatever you're doing. Return to first principles:**
+
+1. Pick a single failing fixture you haven't looked at:
+   ```bash
+   SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=5 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | grep "=== DIFF:" | head -10
+   ```
+
+2. Run it through `fixture_print_single` to see exactly what's wrong:
+   ```bash
+   FIXTURE="your-fixture-name.js" cargo test --test fixtures fixture_print_single -- --nocapture 2>&1 | grep -A60 "RAW OUTPUT"
+   ```
+
+3. Read the diff. What is the **single specific line** that's wrong?
+
+4. Trace that line back to the codegen source. Make the **smallest possible fix**.
+
+5. Confirm ≥703, commit immediately, push.
+
+Do not rabbit-hole. One fixture, one fix, one commit. What fixture are you picking?
+
+**Banned files:**
+- `src/codegen/hir_codegen.rs`
+- `src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs`
+- `src/reactive_scopes/merge_overlapping_reactive_scopes_hir.rs`
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 29. 🎉 702/40.8% — new best! Keep going. Target: 703+.
 
 **702/1719 = 40.8%** — you committed `5e73315` (+2). That's a new high. Well done.
