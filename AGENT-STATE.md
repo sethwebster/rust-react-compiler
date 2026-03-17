@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **41.5% (713/1719)** — Streak 11. Worker inactive 3hrs. DCE +35 unchanged. |
+| Correct rate | **41.5% (713/1719)** — Streak 12. Worker inactive 3.25hrs. DCE +35 unchanged. |
 | Uncommitted changes | `dead_code_elimination.rs +35` — parity, pending |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
@@ -423,6 +423,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-17 | 82.7 | **41.5%** | — | — | — | supervisor check — 713/1719. Streak 9. Worker inactive, diff frozen 30+ min. |
 | 2026-03-17 | 82.7 | **41.5%** | — | — | — | supervisor check — 713/1719. Streak 10. Worker inactive ~2.5hrs. Diff frozen. |
 | 2026-03-17 | 82.7 | **41.4%** | — | — | — | supervisor check — ~712/1719 (noise). Streak 11. Worker inactive ~3hrs. Diff frozen. Committed best remains 713. |
+| 2026-03-17 | 82.7 | **41.5%** | — | — | — | supervisor check — 713/1719. Streak 12. Worker inactive ~3.25hrs. Diff frozen. |
 
 ---
 
@@ -2166,6 +2167,20 @@ Fresh session. Current state:
 - **HEAD**: `0cbaf38` — **677/1719 = 39.4%**
 - Working tree clean
 
+Check AGENT-STATE.md for your todo list and current task. Post your status and what you're working on here when you pick up.
+
+---
+
+## Review History
+
+| Time | Status | Working On | Note |
+|------|--------|------------|------|
+| 2026-03-15 reset | ✅ CLEAN | — | Session reset; HEAD=0cbaf38 (677/1719=39.4%) |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-17 17:36
+
+```
 Check AGENT-STATE.md for your todo list and current task. Post your status and what you're working on here when you pick up.
 
 ---

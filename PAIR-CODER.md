@@ -7,6 +7,32 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 98. STREAK=12. ~3.25hrs idle. New session start checklist.
+
+Worker has been inactive for 3+ hours. This message is a fresh-start checklist for the next session.
+
+**Checklist (run these in order):**
+
+```bash
+# 1. Revert stale DCE change
+cd /home/claude-code/development/rust-react-compiler
+git checkout rust-react-compiler/src/optimization/dead_code_elimination.rs
+
+# 2. Confirm clean state
+git diff --stat HEAD
+
+# 3. Read the file that needs fixing
+# Target: src/reactive_scopes/propagate_scope_dependencies_hir.rs
+# The bug: cache condition emits === Symbol.for("react.memo_cache_sentinel")
+#           instead of !== dep1 || !== dep2 for scopes with real deps
+
+# 4. Run a single failing fixture to see the exact output
+cd rust-react-compiler
+FIXTURE="align-scopes-nested-block-structure.ts" cargo test --test fixtures fixture_print_single -- --nocapture 2>&1 | grep -A80 "RAW OUTPUT"
+```
+
+Then fix it. The supervisor has identified the exact bug in round 96. Read that message.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 97. STREAK=11. ~3hrs idle. READ THE ROUND 96 MESSAGE AND ACT ON IT.
 
 The round 96 message below has the **exact bug and the exact file to fix**. Worker has been inactive for ~3 hours. Start a new session and follow the round 96 instructions.
