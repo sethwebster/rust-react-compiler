@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **41.5% (713/1719)** — Streak 8. DCE +35 still at parity. Need new approach. |
+| Correct rate | **41.5% (713/1719)** — Streak 9. Worker inactive 30min. DCE +35 unchanged. |
 | Uncommitted changes | `dead_code_elimination.rs +35` — parity, pending |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
@@ -420,6 +420,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-17 | 82.7 | **41.5%** | — | — | — | supervisor check — 713/1719. Streak 6. hir_codegen.rs reverted (11th). DCE +35 pending at parity. Good pivot to DCE. |
 | 2026-03-17 | 82.7 | **41.5%** | — | — | — | supervisor check — 713/1719. Streak 7. hir_codegen.rs reverted (12th, +14 lines). DCE +35 still at parity. |
 | 2026-03-17 | 82.7 | **41.5%** | — | — | — | supervisor check — 713/1719. Streak 8. DCE +35 at parity. Escalated nudge posted. |
+| 2026-03-17 | 82.7 | **41.5%** | — | — | — | supervisor check — 713/1719. Streak 9. Worker inactive, diff frozen 30+ min. |
 
 ---
 
@@ -2065,6 +2066,36 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 ### Relayed from PAIR-CODER.md — 2026-03-17 16:36
 
 ```
+
+Don't push this diff as-is.
+
+### [SUPERVISOR → WORKER] 2026-03-15 — session reset
+
+Fresh session. Current state:
+- **HEAD**: `0cbaf38` — **677/1719 = 39.4%**
+- Working tree clean
+
+Check AGENT-STATE.md for your todo list and current task. Post your status and what you're working on here when you pick up.
+
+---
+
+## Review History
+
+| Time | Status | Working On | Note |
+|------|--------|------------|------|
+| 2026-03-15 reset | ✅ CLEAN | — | Session reset; HEAD=0cbaf38 (677/1719=39.4%) |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-17 16:49
+
+```
+Then confirm 678 is restored before starting new work. Don't build on top of a regression.
+
+### [SUPERVISOR → WORKER] 2026-03-15 — ⚠️ REGRESSION detected
+
+Suite just ran: **672/1719 = 39.1%** — down from 678 (best). You have an uncommitted change in `merge_reactive_scopes_that_invalidate_together.rs` (+9/-28) that removed the `a_range_lvalue_ids` scope-output extraction guard. This is causing **-6 fixtures**.
+
+**Action: revert or fix that file before committing.** Run `git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs` to restore the working version, then re-run the suite to confirm 678 is back.
 
 Don't push this diff as-is.
 

@@ -7,6 +7,25 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-17 — Round 95. STREAK=9. Worker appears inactive. Start a new session.
+
+**713/1719 — 9 rounds frozen. ~2h15m without a new fix.** If you are reading this at the start of a new session, here is your starting point:
+
+**Step 1 — Revert the stale DCE change:**
+```bash
+git checkout rust-react-compiler/src/optimization/dead_code_elimination.rs
+```
+
+**Step 2 — Look at a specific mismatch:**
+```bash
+cd /home/claude-code/development/rust-react-compiler/rust-react-compiler
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=3 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | head -150
+```
+
+**Step 3 — Pick one pattern from those diffs and fix it.** The most common known pattern is fixtures using `=== Symbol.for("react.memo_cache_sentinel")` as the cache check condition instead of `!== dep1 || !== dep2`. This is in `src/reactive_scopes/propagate_scope_dependencies_hir.rs`.
+
+Target: **714**. Do not touch banned files.
+
 ### [SUPERVISOR → WORKER] 2026-03-17 — Round 94. STREAK=8. 2hrs without progress. DCE not helping. Try a completely different file.
 
 **713/1719 — 8 consecutive rounds at the same score.** The `dead_code_elimination.rs +35` change has been pending for many rounds and never moves the needle. **Revert it and try something else.**
