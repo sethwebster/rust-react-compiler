@@ -414,6 +414,17 @@ struct Codegen<'a> {
     /// Set of BlockIds for label body blocks that were already emitted inside a scope body.
     /// When emit_cfg_region hits a Label terminal, it checks this set to avoid double-emission.
     scope_emitted_label_bodies: std::collections::HashSet<BlockId>,
+    /// Scopes that have been emitted inline (nested inside another scope's body). These
+    /// should NOT be re-emitted at the top level by the main flat emission loop.
+    nested_scopes_emitted: std::collections::HashSet<ScopeId>,
+    /// Nested scopes (scope_id, range_start, range_end) pending inline emission inside
+    /// the current scope body walk. Set before calling emit_scope_body_cfg_walk so that
+    /// the cfg_walk can detect and emit nested scopes at the right block positions.
+    pending_nested_scopes: Vec<(ScopeId, InstructionId, InstructionId)>,
+    /// Shared scope index counter for output temp naming (tN). Stored in self so that
+    /// emit_scope_body_cfg_walk can pass it to nested emit_scope_block_inner calls.
+    /// Synced with the local scope_index in emit_scope_block_inner around cfg_walk calls.
+    shared_scope_index: usize,
     /// Maps local variable names that are aliases for namespace imports to the namespace name.
     /// e.g. `const MyLocal = SharedRuntime` where SharedRuntime is `import * as SharedRuntime`
     /// → `"MyLocal" → "SharedRuntime"`. Used to resolve JSX member-expression tags.
@@ -1014,6 +1025,9 @@ impl<'a> Codegen<'a> {
             early_return_handled_blocks: std::collections::HashSet::new(),
             hoisted_declare_instr_ids: std::collections::HashSet::new(),
             scope_emitted_label_bodies: std::collections::HashSet::new(),
+            nested_scopes_emitted: std::collections::HashSet::new(),
+            pending_nested_scopes: Vec::new(),
+            shared_scope_index: 0,
             namespace_alias: HashMap::new(),
         }
     }
@@ -1533,28 +1547,34 @@ impl<'a> Codegen<'a> {
                         continue;
                     }
                     if !emitted_scopes.contains(&sid) {
-                        // Emit the whole scope block now.
-                        let scope_instrs_list = scope_instrs.get(&sid).cloned().unwrap_or_default();
-                        let scope_instr_refs: Vec<&Instruction> = scope_instrs_list.iter().collect();
-                        let decl_names_before = self.declared_names_before_scope.get(&sid).cloned().unwrap_or_default();
-                        self.emit_scope_block_inner(
-                            &sid,
-                            &scope_instr_refs,
-                            indent,
-                            scope_index,
-                            out,
-                            inlined_ids,
-                            &decl_names_before,
-                            None,
-                        );
-                        emitted_scopes.insert(sid);
-                        // Mark all instructions absorbed into this scope's body as handled,
-                        // so the CFG walker doesn't re-emit them later (e.g., outlined function
-                        // declarations that are absorbed into the scope body via group_by_scope
-                        // but have no instr_scope entry because they're early-excluded).
-                        for si in &scope_instrs_list {
-                            inlined_ids.insert(si.lvalue.identifier.0);
+                        if self.nested_scopes_emitted.contains(&sid) {
+                            // Already emitted inline as a nested scope inside its parent's body.
+                            // Don't re-emit at the top level — just mark instructions as inlined.
+                            let scope_instrs_list = scope_instrs.get(&sid).cloned().unwrap_or_default();
+                            for si in &scope_instrs_list {
+                                inlined_ids.insert(si.lvalue.identifier.0);
+                            }
+                        } else {
+                            // Emit the whole scope block now.
+                            let scope_instrs_list = scope_instrs.get(&sid).cloned().unwrap_or_default();
+                            let scope_instr_refs: Vec<&Instruction> = scope_instrs_list.iter().collect();
+                            let decl_names_before = self.declared_names_before_scope.get(&sid).cloned().unwrap_or_default();
+                            self.emit_scope_block_inner(
+                                &sid,
+                                &scope_instr_refs,
+                                indent,
+                                scope_index,
+                                out,
+                                inlined_ids,
+                                &decl_names_before,
+                                None,
+                            );
+                            // Mark all instructions absorbed into this scope's body as handled.
+                            for si in &scope_instrs_list {
+                                inlined_ids.insert(si.lvalue.identifier.0);
+                            }
                         }
+                        emitted_scopes.insert(sid);
                     }
                     continue;
                 }
@@ -2913,6 +2933,25 @@ impl<'a> Codegen<'a> {
             .filter_map(|i| self.instr_to_block.get(&i.id).copied())
             .collect();
 
+        // Detect nested scopes: scopes whose instruction range is fully contained within this
+        // scope's range. These will be emitted inline (as nested cache blocks) during body walk.
+        // Save/restore pending_nested_scopes to support recursive nested scope emission.
+        let outer_range = self.env.scopes.get(scope_id).map(|s| (s.range.start, s.range.end));
+        let saved_pending_nested = std::mem::take(&mut self.pending_nested_scopes);
+        if let Some((os, oe)) = outer_range {
+            let mut ns_list: Vec<(ScopeId, InstructionId, InstructionId)> = self.env.scopes.iter()
+                .filter(|(&sid, s)| {
+                    sid != *scope_id
+                        && s.range.start >= os && s.range.end <= oe
+                        && s.range.start < s.range.end
+                        && !self.nested_scopes_emitted.contains(&sid)
+                })
+                .map(|(&sid, s)| (sid, s.range.start, s.range.end))
+                .collect();
+            ns_list.sort_by_key(|&(_, start, _)| start);
+            self.pending_nested_scopes = ns_list;
+        }
+
         // Compute hoisted DeclareLocal declarations now that scope_block_set is available.
         // A DeclareLocal is hoisted if its variable is used in a block OUTSIDE the scope's blocks.
         {
@@ -2993,20 +3032,41 @@ impl<'a> Codegen<'a> {
             None
         };
 
-        // If we have multiple scope blocks (scope spans if/else), use CFG-based emission.
+        // If we have multiple scope blocks (scope spans if/else), or there are pending nested
+        // scopes to emit inline, or this is an early-return scope, use CFG-based emission.
         // Otherwise fall back to flat emission (single block, no control flow structure needed).
-        // For early-return scopes, always use cfg-walk so that If terminals (with early returns
-        // in their branches) are properly emitted even when the scope fits in a single block.
+        let has_pending_nested = !self.pending_nested_scopes.is_empty();
+        // For nested scope emission, extend scope_block_set with blocks from nested scopes
+        // so the cfg_walk visits those blocks and detects nested scope instructions.
+        let scope_block_set = if has_pending_nested {
+            let ns_ranges: Vec<(InstructionId, InstructionId)> = self.pending_nested_scopes
+                .iter().map(|&(_, s, e)| (s, e)).collect();
+            let mut extended = scope_block_set.clone();
+            for (&bid, blk) in &self.hir.body.blocks {
+                if blk.instructions.iter().any(|i| {
+                    ns_ranges.iter().any(|&(ns, ne)| i.id >= ns && i.id < ne)
+                }) {
+                    extended.insert(bid);
+                }
+            }
+            extended
+        } else {
+            scope_block_set
+        };
         let body_str_opt: Option<String> = tree_body_str.or_else(|| {
-            if scope_block_set.len() > 1 || early_return_label.is_some() {
+            if scope_block_set.len() > 1 || early_return_label.is_some() || has_pending_nested {
                 if let Some(start_bid) = start_block {
                     let mut body_str = String::new();
                     let mut vis = std::collections::HashSet::new();
+                    // Sync shared_scope_index so cfg_walk can pass it to nested emit_scope_block_inner.
+                    self.shared_scope_index = *scope_index;
                     self.emit_scope_body_cfg_walk(
                         start_bid, &scope_block_set, &scope_instr_set, &intra_instr_ids,
                         &skip_instr_set, inlined_ids, &all_out_names, scope_id,
                         indent + 1, None, &mut vis, &mut body_str,
                     );
+                    // Read back updated scope index from shared state.
+                    *scope_index = self.shared_scope_index;
                     Some(body_str)
                 } else {
                     None  // couldn't find start block, fall back to flat
@@ -3426,6 +3486,9 @@ impl<'a> Codegen<'a> {
                 }
             }
         }
+
+        // Restore pending_nested_scopes to the saved state (supports recursive nested scope calls).
+        self.pending_nested_scopes = saved_pending_nested;
     }
 
     // -----------------------------------------------------------------------
@@ -3465,6 +3528,42 @@ impl<'a> Codegen<'a> {
 
         // Emit scope instructions in this block.
         for instr in &block.instructions {
+            // Before processing this instruction, check if any pending nested scope should be
+            // emitted here (its range starts at or before this instruction's ID).
+            // We emit each nested scope exactly once, at the first instruction of its range.
+            {
+                // Clone pending list to avoid borrow conflicts during emit_scope_block_inner.
+                let pending: Vec<(ScopeId, InstructionId, InstructionId)> =
+                    self.pending_nested_scopes.clone();
+                for (nsid, ns_start, _ns_end) in pending {
+                    if self.nested_scopes_emitted.contains(&nsid) { continue; }
+                    if instr.id < ns_start { continue; }
+                    self.nested_scopes_emitted.insert(nsid);
+                    // Collect nested scope's instruction range.
+                    let ns_range_end = self.env.scopes.get(&nsid)
+                        .map(|s| s.range.end)
+                        .unwrap_or(ns_start);
+                    let ns_instrs: Vec<crate::hir::hir::Instruction> = {
+                        let mut v: Vec<_> = self.hir.body.blocks.values()
+                            .flat_map(|blk| blk.instructions.iter())
+                            .filter(|i| i.id >= ns_start && i.id < ns_range_end)
+                            .cloned()
+                            .collect();
+                        v.sort_by_key(|i| i.id);
+                        v
+                    };
+                    let decl_names = self.declared_names_before_scope
+                        .get(&nsid).cloned().unwrap_or_default();
+                    let mut si = self.shared_scope_index;
+                    let ns_instr_refs: Vec<&crate::hir::hir::Instruction> =
+                        ns_instrs.iter().collect();
+                    self.emit_scope_block_inner(
+                        &nsid, &ns_instr_refs, indent, &mut si,
+                        out, inlined_ids, &decl_names, None,
+                    );
+                    self.shared_scope_index = si;
+                }
+            }
             if !scope_instr_set.contains(&instr.id) { continue; }
             if skip_instr_set.contains(&instr.id) { continue; }
             // Skip DeclareLocal instructions that were hoisted to before the scope block.

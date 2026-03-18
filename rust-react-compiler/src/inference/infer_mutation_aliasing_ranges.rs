@@ -404,6 +404,18 @@ pub fn infer_mutation_aliasing_ranges(
     let mut pure_read_lvalues: HashSet<IdentifierId> = HashSet::new();
     let mut phase3_extended: HashSet<IdentifierId> = HashSet::new();
 
+    // Tracks DeclareLocal instruction ids for variables that are ONLY assigned via
+    // StoreContext inside closures (never via StoreLocal in the outer function).
+    // For these variables, named_defs is not populated during Phase 1 (because we
+    // intentionally skip DeclareLocal). When Phase 2 detects that such a variable
+    // is mutated via a closure call (via closure_var_contexts), we retroactively add
+    // it to named_defs using the DeclareLocal instruction id as the range start.
+    //
+    // Without this fix, `let x; const fn = () => { x = {}; }; fn();` would produce
+    // x.mutable_range = [0, 1] (default), and infer_reactive_scope_variables would
+    // not create a reactive scope for x (since is_mutable_at would return false).
+    let mut declare_local_iids: HashMap<IdentifierId, InstructionId> = HashMap::new();
+
     // Params are defined at instruction 0.
     for param in &hir.params {
         match param {
@@ -432,11 +444,22 @@ pub fn infer_mutation_aliasing_ranges(
             defs.entry(lv).or_insert(iid);
 
             match &instr.value {
-                InstructionValue::DeclareLocal { .. } => {
+                InstructionValue::DeclareLocal { lvalue, .. } => {
                     // Do NOT set named_defs for DeclareLocal: `let z;` just declares
                     // an uninitialized variable. The mutable_range should start at the
                     // first actual write (StoreLocal), not the declaration. This matches
                     // TS behavior where scope ranges cover the write, not the declaration.
+                    //
+                    // BUT: record the DeclareLocal iid+1 so Phase 2 can retroactively add
+                    // this variable to named_defs if it's mutated via a closure call.
+                    // (This handles `let x; const fn = () => { x = {}; }; fn();`)
+                    //
+                    // We use iid.0+1 (not iid.0) so that the resulting mutable_range.start
+                    // is > 0. The condition `cap_range.start.0 > 0` in
+                    // infer_reactive_scope_variables excludes params (defined at id=0); we
+                    // must not accidentally include DeclareLocal-only vars in that exclusion.
+                    let after_decl = InstructionId(iid.0 + 1);
+                    declare_local_iids.insert(lvalue.place.identifier, after_decl);
                 }
                 InstructionValue::DeclareContext { lvalue, .. } => {
                     let var_id = lvalue.place.identifier;
@@ -766,6 +789,13 @@ pub fn infer_mutation_aliasing_ranges(
                             if let Some(ctx_ids) = closure_var_contexts.get(&arg_source) {
                                 let ctx_ids_clone: Vec<_> = ctx_ids.clone();
                                 for ctx_id in ctx_ids_clone {
+                                    // Retroactively add DeclareLocal-only vars to named_defs
+                                    // so the writeback sets their mutable_range.
+                                    if !named_defs.contains_key(&ctx_id) {
+                                        if let Some(&decl_iid) = declare_local_iids.get(&ctx_id) {
+                                            named_defs.insert(ctx_id, decl_iid);
+                                        }
+                                    }
                                     use_at(&mut named_mut_uses, ctx_id, iid);
                                     use_at(&mut named_real_muts, ctx_id, iid);
                                     use_at(&mut last_uses, ctx_id, iid);
@@ -785,6 +815,15 @@ pub fn infer_mutation_aliasing_ranges(
                             }
                             if let Some(ctx_ids) = closure_var_contexts.get(&callee_source) {
                                 for &ctx_id in ctx_ids {
+                                    // Retroactively add DeclareLocal-only vars to named_defs
+                                    // so the writeback sets their mutable_range.
+                                    // This handles `let x; const fn = () => { x = {}; }; fn();`
+                                    // where x is only mutated inside the closure, never via StoreLocal.
+                                    if !named_defs.contains_key(&ctx_id) {
+                                        if let Some(&decl_iid) = declare_local_iids.get(&ctx_id) {
+                                            named_defs.insert(ctx_id, decl_iid);
+                                        }
+                                    }
                                     // ctx_id may be either a named var id or an SSA temp id.
                                     // If it's a named var, extend named_mut_uses.
                                     // If it's an SSA temp, extend last_uses.
@@ -794,6 +833,14 @@ pub fn infer_mutation_aliasing_ranges(
                                     use_at(&mut named_real_muts, ctx_id, iid);
                                     use_at(&mut last_uses, ctx_id, iid);
                                 }
+                                // Also extend the callee variable's mutable_range to the call site.
+                                // This is needed so that infer_reactive_scope_variables can link
+                                // the callee (foo=2) with the FunctionExpression (fn_temp) and its
+                                // context vars (x=1) into a single co-located scope group.
+                                // Without this, foo's range ends at StoreLocal and the LoadLocal
+                                // of foo at the call site falls outside the range, breaking the chain:
+                                //   fn_temp=14 ←→ foo=2 ←→ t_foo ←→ t0
+                                use_at(&mut named_mut_uses, callee_source, iid);
                             }
                         }
                     }
