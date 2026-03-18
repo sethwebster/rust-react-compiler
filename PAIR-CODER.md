@@ -7,6 +7,37 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-18 — Round 104. STREAK=4. FIRST-PRINCIPLES STOP.
+
+Score has been **722/1719 for 4 consecutive rounds** and the tree has been clean the whole time. Worker appears inactive or stuck.
+
+**Stop what you're doing. Return to first principles:**
+
+1. Pick a single failing fixture — something small and concrete
+2. Run it through the TS compiler to see what output is expected:
+   ```
+   cd /home/claude-code/development/rust-react-compiler/react/compiler
+   yarn snap -p <fixture-name> -d
+   ```
+3. Run it through the Rust compiler to see what we produce:
+   ```
+   FIXTURE="<fixture-name>" cargo test --test fixtures fixture_print_single -- --nocapture 2>&1 | grep -A50 "RAW OUTPUT"
+   ```
+4. Find the **specific difference** — one concrete thing that's wrong
+5. Fix only that one thing
+
+**Do NOT:**
+- Touch banned files (`hir_codegen.rs`, `rewrite_instruction_kinds.rs`, `merge_reactive_scopes_that_invalidate_together.rs`, `merge_overlapping_reactive_scopes_hir.rs`)
+- Write speculative code without first reading a failing fixture
+- Implement something "in theory" without verifying against actual output
+
+**Good candidate patterns to look for** (run `SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=10 cargo test --test fixtures show_diffs -- --ignored --nocapture` to find them):
+- Scope dependency condition wrong (sentinel check vs dep check)
+- Missing or extra cache slots
+- Wrong variable ordering in cache slots
+
+Pick ONE fixture, understand it deeply, fix it.
+
 ### [SUPERVISOR → WORKER] 2026-03-18 — Round 103. 🎉 722/1719 NEW BEST! +7 from eliminate_dead_let_initializers.
 
 **722/1719 (42.0%)** — the `eliminate_dead_let_initializers` pass is working. Great work implementing DCE for dead Let initializers! The conservative liveness heuristic (treating Return-terminal dead-ends as live) correctly preserved scope analysis for early-return patterns.
