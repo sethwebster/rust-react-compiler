@@ -41,6 +41,7 @@ pub fn dead_code_elimination_with_env(hir: &mut HIRFunction, env: Option<&Enviro
         let before_phis: usize = hir.body.blocks.values().map(|b| b.phis.len()).sum();
         remove_dead_phis(hir);
         eliminate_shadowed_stores(hir);
+        eliminate_dead_let_initializers(hir);
         remove_dead_instructions(hir, env);
         let after_instrs: usize = hir.body.blocks.values().map(|b| b.instructions.len()).sum();
         let after_phis: usize = hir.body.blocks.values().map(|b| b.phis.len()).sum();
@@ -506,6 +507,86 @@ fn remove_dead_instructions(hir: &mut HIRFunction, env: Option<&Environment>) {
             }
             used.contains(&instr.lvalue.identifier) || has_side_effects(&instr.value)
         });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pass: eliminate dead Let-initializers
+// ---------------------------------------------------------------------------
+
+/// Convert `let x = <pure>;` to `let x;` when the initial SSA value is never
+/// used (not a phi operand, not loaded by any instruction).
+///
+/// This handles patterns like:
+///   `let x = 0; const y = a ? (x = 1) : (x = 2); return x + y;`
+/// where x is always overwritten before it's read, making the `= 0` dead.
+fn eliminate_dead_let_initializers(hir: &mut HIRFunction) {
+    // Build the set of all used SSA identifiers (phi operands, instruction operands, terminals).
+    let mut used: HashSet<IdentifierId> = HashSet::new();
+    for param in &hir.params {
+        match param {
+            Param::Place(p) => { used.insert(p.identifier); }
+            Param::Spread(s) => { used.insert(s.place.identifier); }
+        }
+    }
+    for ctx in &hir.context {
+        used.insert(ctx.identifier);
+    }
+    for block in hir.body.blocks.values() {
+        collect_terminal_uses(&block.terminal, &mut used);
+        for instr in &block.instructions {
+            collect_instruction_uses(&instr.value, &mut used);
+            // FunctionExpression context captures: the context places hold the SSA ids
+            // of captured variables. These are uses of the initial StoreLocal result.
+            if let InstructionValue::FunctionExpression { lowered_func, .. }
+            | InstructionValue::ObjectMethod { lowered_func, .. } = &instr.value {
+                for ctx_place in &lowered_func.func.context {
+                    used.insert(ctx_place.identifier);
+                }
+            }
+        }
+        for phi in &block.phis {
+            for (_, operand) in &phi.operands {
+                used.insert(operand.identifier);
+            }
+        }
+    }
+
+    // Build a set of identifiers produced by pure (no-side-effect) instructions.
+    let mut pure_result_ids: HashSet<IdentifierId> = HashSet::new();
+    for block in hir.body.blocks.values() {
+        for instr in &block.instructions {
+            if !has_side_effects(&instr.value) {
+                pure_result_ids.insert(instr.lvalue.identifier);
+            }
+        }
+    }
+
+    // Convert dead Let-kind StoreLocals to DeclareLocals.
+    for block in hir.body.blocks.values_mut() {
+        for instr in block.instructions.iter_mut() {
+            let (place, loc) = if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
+                if !matches!(lvalue.kind, InstructionKind::Let | InstructionKind::HoistedLet) {
+                    continue;
+                }
+                // If the SSA result is used as a phi operand or instruction operand, keep it.
+                if used.contains(&instr.lvalue.identifier) {
+                    continue;
+                }
+                // Only convert if the stored value is a pure constant (no side effects).
+                if !pure_result_ids.contains(&value.identifier) {
+                    continue;
+                }
+                (lvalue.place.clone(), lvalue.place.loc.clone())
+            } else {
+                continue;
+            };
+            instr.value = InstructionValue::DeclareLocal {
+                lvalue: LValue { place, kind: InstructionKind::Let },
+                type_annotation: None,
+                loc,
+            };
+        }
     }
 }
 

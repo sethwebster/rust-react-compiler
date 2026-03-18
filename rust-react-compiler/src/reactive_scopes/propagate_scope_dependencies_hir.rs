@@ -43,7 +43,17 @@ fn is_hook_name(name: &str) -> bool {
 /// - `() => { mutator.user.hide(); }` → `["user"]` (method receiver)
 /// - `() => (sharedVal.value = x)` → `[]` (assignment, no narrowing)
 /// - `() => { if (c) { obj.prop } }` → `[]` (depth 2, conditional, no narrowing)
+/// When `allow_method_calls` is true, `name.prop()` contributes `prop` to the path.
+/// When false, method calls stop narrowing without adding the method name.
+fn narrow_dep_path_inner(source: &str, name: &str, allow_method_calls: bool) -> Vec<String> {
+    narrow_dep_path_impl(source, name, allow_method_calls)
+}
+
 fn narrow_dep_path(source: &str, name: &str) -> Vec<String> {
+    narrow_dep_path_impl(source, name, false)
+}
+
+fn narrow_dep_path_impl(source: &str, name: &str, allow_method_calls: bool) -> Vec<String> {
     if name.is_empty() { return vec![]; }
     let is_id_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
     let name_bytes = name.as_bytes();
@@ -109,7 +119,9 @@ fn narrow_dep_path(source: &str, name: &str) -> Vec<String> {
                     let prop = std::str::from_utf8(&bytes[prop_start..j]).unwrap_or("").to_string();
                     while j < slen && bytes[j] == b' ' { j += 1; }
                     if j < slen && bytes[j] == b'(' {
-                        // Method call — stop, don't add this segment.
+                        // Method call: when allowed (direct param), include the method name.
+                        // e.g. `props.x()` → dep is `props.x` (only for direct params).
+                        if allow_method_calls { path.push(prop); }
                         break;
                     } else if j < slen && bytes[j] == b'='
                         && (j + 1 >= slen || (bytes[j + 1] != b'=' && bytes[j + 1] != b'>'))
@@ -143,6 +155,74 @@ fn narrow_dep_path(source: &str, name: &str) -> Vec<String> {
         if path != first { return vec![]; }
     }
     first.clone()
+}
+
+/// Narrow the dep path for a captured variable using the compiled function's HIR.
+/// Returns a single property path (e.g., ["x"]) if ALL uses of ctx_outer_id in
+/// the function body are via that same property (PropertyLoad or MethodCall).
+/// Returns empty if the variable is used directly or via inconsistent properties.
+fn narrow_dep_from_compiled_hir(func: &HIRFunction, ctx_outer_id: IdentifierId) -> Vec<String> {
+    // Find all IDs that represent the captured variable inside the function.
+    let mut ctx_ids: HashSet<IdentifierId> = HashSet::new();
+    ctx_ids.insert(ctx_outer_id);
+    for (_, block) in &func.body.blocks {
+        for instr in &block.instructions {
+            if let InstructionValue::LoadContext { place, .. } = &instr.value {
+                if place.identifier == ctx_outer_id {
+                    ctx_ids.insert(instr.lvalue.identifier);
+                }
+            }
+        }
+    }
+
+    // Collect property names from PropertyLoad(ctx, prop) instructions.
+    let mut prop_load_results: HashSet<IdentifierId> = HashSet::new();
+    let mut prop_names: Vec<String> = Vec::new();
+    for (_, block) in &func.body.blocks {
+        for instr in &block.instructions {
+            if let InstructionValue::PropertyLoad { object, property, .. } = &instr.value {
+                if ctx_ids.contains(&object.identifier) {
+                    prop_load_results.insert(instr.lvalue.identifier);
+                    prop_names.push(property.clone());
+                }
+            }
+        }
+    }
+
+    // Check that all uses of ctx_ids are either:
+    //   - PropertyLoad(ctx, *) → counted above
+    //   - MethodCall { receiver: ctx, property: prop_load_result } → ok (method call via PropertyLoad)
+    // Any other use of a ctx_id means we can't narrow.
+    for (_, block) in &func.body.blocks {
+        for instr in &block.instructions {
+            let is_ok_use = match &instr.value {
+                InstructionValue::PropertyLoad { object, .. } => ctx_ids.contains(&object.identifier),
+                InstructionValue::MethodCall { receiver, property, .. } => {
+                    !ctx_ids.contains(&receiver.identifier)
+                        || prop_load_results.contains(&property.identifier)
+                }
+                InstructionValue::LoadContext { place, .. } => {
+                    !ctx_ids.contains(&place.identifier) || ctx_ids.contains(&instr.lvalue.identifier)
+                }
+                _ => {
+                    use crate::hir::visitors::each_instruction_value_operand;
+                    !each_instruction_value_operand(&instr.value)
+                        .iter()
+                        .any(|p| ctx_ids.contains(&p.identifier))
+                }
+            };
+            if !is_ok_use {
+                return vec![];
+            }
+        }
+    }
+
+    if prop_names.is_empty() { return vec![]; }
+    let first = prop_names[0].clone();
+    for name in &prop_names[1..] {
+        if name != &first { return vec![]; }
+    }
+    vec![first]
 }
 
 fn binding_name(binding: &NonLocalBinding) -> &str {
@@ -938,9 +1018,13 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
                             .map(|n| n.value().to_string())
                             .unwrap_or_default();
                         // Try to narrow the dep to a more specific member path.
-                        // Applies to both arrow functions and regular function expressions.
+                        // Allow method-call narrowing (name.prop() → path includes "prop")
+                        // only when the base dep is a DIRECT function param.
+                        // e.g. `props.x()` where props is a param → dep `props.x` (method included).
+                        // e.g. `mutator.poke()` where mutator is a local var → dep `mutator` (no narrowing).
+                        let allow_method = base_path.is_empty() && param_ids.contains(&base_id);
                         let narrowed = if !cap_name.is_empty() {
-                            narrow_dep_path(fn_source, &cap_name)
+                            narrow_dep_path_inner(fn_source, &cap_name, allow_method)
                         } else {
                             vec![]
                         };
