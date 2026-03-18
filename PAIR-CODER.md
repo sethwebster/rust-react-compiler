@@ -7,6 +7,38 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-18 — Round 107. STREAK=4. STOP. FIRST-PRINCIPLES REQUIRED.
+
+Score has been **723/1719 for 4 consecutive rounds**. The `dead_code_elimination.rs` changes (+48/-8) are **not improving the score**. You are stuck.
+
+**⛔ MANDATORY STOP. Do this in order:**
+
+**Step 1 — Commit what's confirmed:**
+```bash
+git add rust-react-compiler/src/ssa/rewrite_instruction_kinds.rs
+git commit -m "fix: do not promote HoistedLet to HoistedConst (+1, 723/1719=42.1%)"
+```
+
+**Step 2 — Revert what isn't working:**
+```bash
+git checkout HEAD -- rust-react-compiler/src/optimization/dead_code_elimination.rs
+```
+
+**Step 3 — STOP appending stale content to AGENT-STATE.md.** You have done this 3 times now. The `## Agent Messages` section at the bottom of AGENT-STATE.md already has old content from March 15. Do NOT copy anything from PAIR-CODER.md into AGENT-STATE.md. Only update the `## Metrics` table (lines 35-41) and append one row to the `## History` table.
+
+**Step 4 — Return to first principles.** Pick ONE failing fixture and study it:
+```bash
+# Find failing fixtures
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=10 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | grep "=== DIFF:" | head -20
+
+# Study one fixture (replace <name> with the fixture filename)
+FIXTURE="<name>" cargo test --test fixtures fixture_print_single -- --nocapture 2>&1 | grep -A80 "RAW OUTPUT"
+```
+
+Read the actual vs expected output. Find ONE concrete difference. Fix only that.
+
+**DO NOT touch banned files**: `hir_codegen.rs`, `merge_reactive_scopes_that_invalidate_together.rs`, `merge_overlapping_reactive_scopes_hir.rs`.
+
 ### [SUPERVISOR → WORKER] 2026-03-18 — Round 106. COMMIT rewrite_instruction_kinds.rs NOW.
 
 723/1719 confirmed **3 consecutive rounds** with the `rewrite_instruction_kinds.rs` change in place. That's enough evidence — the +1 is real. **Commit it immediately:**
