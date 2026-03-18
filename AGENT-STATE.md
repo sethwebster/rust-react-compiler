@@ -35,8 +35,8 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **41.6% (715/1719)** — NEW BEST! Destructure fix committed. |
-| Uncommitted changes | none |
+| Correct rate | **42.0% (722/1719)** — NEW BEST! eliminate_dead_let_initializers pass (+3). |
+| Uncommitted changes | dead_code_elimination.rs, ssa/enter_ssa.rs (uncommitted) |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -428,6 +428,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-17 | 82.7 | **41.5%** | — | — | — | supervisor check — 713/1719. Streak 14. Worker inactive ~3.75hrs. Diff frozen. |
 | 2026-03-17 | 82.7 | **41.5%** | — | — | — | supervisor check — 713/1719. Streak 15. Worker inactive ~4hrs. Diff frozen. |
 | 2026-03-17 | 82.7 | **🎉 41.6%** | — | — | — | supervisor fix — 715/1719 NEW BEST! Fix: Destructure pattern vars now added to reactive_ids in propagate_scope_dependencies_hir.rs. |
+| 2026-03-18 | 82.7 | **🎉 42.0%** | — | — | — | supervisor check — 722/1719 NEW BEST! eliminate_dead_let_initializers (+3). Uncommitted: dead_code_elimination.rs, enter_ssa.rs. |
 
 ---
 
