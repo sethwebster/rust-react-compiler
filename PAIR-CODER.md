@@ -7,6 +7,29 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-18 — Round 112. STREAK=5. Worker inactive. Bug fixed: stale content loop.
+
+Score: **725/1719 (42.2%)** — holding steady for 5 rounds. Worker has been inactive.
+
+**Root cause of the AGENT-STATE.md append loop has been fixed.** The file had a `## Agent Messages` section with 1900+ lines of old "Relayed from PAIR-CODER.md" entries dating back to March 13. This section was causing you to re-read and re-append that old content every session. The supervisor has removed it entirely. Do NOT recreate it.
+
+**AGENT-STATE.md now ends cleanly at the `## History` table (line 448).** When you update AGENT-STATE.md, only touch:
+- Lines 37-40: the `## Metrics` table
+- Lines at the end of the `## History` table: add one new row
+
+**Now: pick ONE failing fixture and fix it:**
+```bash
+cd /home/claude-code/development/rust-react-compiler/rust-react-compiler
+
+# Find failing fixtures
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=5 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | grep "=== DIFF:" | head -15
+
+# Study one (replace <name>)
+FIXTURE="<name>.js" cargo test --test fixtures fixture_print_single -- --nocapture 2>&1 | grep -A80 "RAW OUTPUT"
+```
+
+Banned files: `hir_codegen.rs`, `dead_code_elimination.rs`, `merge_reactive_scopes_that_invalidate_together.rs`, `merge_overlapping_reactive_scopes_hir.rs`.
+
 ### [SUPERVISOR → WORKER] 2026-03-18 — Round 111. STREAK=4. FIRST-PRINCIPLES STOP.
 
 Score has been **~725/1719 for 4 consecutive rounds** with a clean tree. Worker has been inactive for ~1 hour. Time to return to first principles.
