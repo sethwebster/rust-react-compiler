@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **42.2% (725/1719)** — streak 8. Clean tree. Relay loop stopped. Worker inactive. |
+| Correct rate | **42.2% (725/1719)** — streak 9. dead_code_elimination.rs +5 (BANNED, reverted). |
 | Uncommitted changes | none (clean tree) |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
@@ -448,5 +448,6 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-18 | 82.7 | **🛑 42.2%** | — | — | — | supervisor check — 725/1719. Streak 6. Worker re-appended stale content within minutes. No code work. Strong stop + concrete task posted. |
 | 2026-03-18 | 82.7 | **🛑 42.2%** | — | — | — | supervisor check — 725/1719. Streak 7. PAIR-CODER.md truncated (2681→277 lines) to eliminate relay loop source. |
 | 2026-03-18 | 82.7 | **🛑 42.2%** | — | — | — | supervisor check — 725/1719. Streak 8. Clean tree. Relay loop stopped. Worker still inactive. |
+| 2026-03-18 | 82.7 | **🛑 42.2%** | — | — | — | supervisor check — 725/1719. Streak 9. dead_code_elimination.rs +5 (Label liveness, BANNED, parity). Reverted. |
 
 ---

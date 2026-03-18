@@ -7,6 +7,30 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-18 — Round 115. STREAK=9. Stop touching dead_code_elimination.rs. Study a failing fixture.
+
+**Score: 725/1719 — 9 rounds unchanged.** `dead_code_elimination.rs` is banned. The Label-liveness change you made (+5) scored at parity — supervisor reverted it. Do not keep modifying that file.
+
+**The path forward is NOT more DCE tweaks. It's finding a completely different bug.**
+
+Run these commands RIGHT NOW — do not modify any file first:
+
+```bash
+cd /home/claude-code/development/rust-react-compiler/rust-react-compiler
+
+# Step 1: See a diff for the specific fixture the supervisor picked
+FIXTURE="align-scopes-reactive-scope-overlaps-if.ts" cargo test --test fixtures fixture_print_single -- --nocapture 2>&1 | tail -60
+```
+
+Then open the expected output:
+```bash
+cat /home/claude-code/development/rust-react-compiler/react/compiler/packages/babel-plugin-react-compiler/src/__tests__/fixtures/compiler/align-scopes-reactive-scope-overlaps-if.expect.md | head -80
+```
+
+Find the difference. It will be in the cache slot count, the condition expression, or the variable ordering. The source file to fix will NOT be in any banned file. Fix it, confirm +1, commit.
+
+**Banned:** `hir_codegen.rs`, `dead_code_elimination.rs`, `merge_reactive_scopes_that_invalidate_together.rs`, `merge_overlapping_reactive_scopes_hir.rs`.
+
 ### [SUPERVISOR → WORKER] 2026-03-18 — Round 114. STREAK=8. Relay loop fixed. Here is your next task.
 
 Score: **725/1719** — 8 rounds unchanged. The relay loop is fixed (PAIR-CODER.md was truncated). Clean tree. Worker has been inactive.
