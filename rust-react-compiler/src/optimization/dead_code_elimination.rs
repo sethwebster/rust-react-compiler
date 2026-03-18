@@ -41,7 +41,7 @@ pub fn dead_code_elimination_with_env(hir: &mut HIRFunction, env: Option<&Enviro
         let before_phis: usize = hir.body.blocks.values().map(|b| b.phis.len()).sum();
         remove_dead_phis(hir);
         eliminate_shadowed_stores(hir);
-        eliminate_dead_let_initializers(hir);
+        // eliminate_dead_let_initializers(hir); // disabled — causes regressions
         remove_dead_instructions(hir, env);
         let after_instrs: usize = hir.body.blocks.values().map(|b| b.instructions.len()).sum();
         let after_phis: usize = hir.body.blocks.values().map(|b| b.phis.len()).sum();
@@ -373,6 +373,33 @@ fn remove_dead_instructions(hir: &mut HIRFunction, env: Option<&Environment>) {
         }
     }
 
+    // Build set of outlined FunctionExpression lvalue IDs (name_hint is set).
+    // A StoreLocal `const bar = <outlined_fn>` may be removed by DCE if `bar` is
+    // only referenced by name in a sibling FunctionExpression's original_source
+    // (not via LoadLocal/LoadContext). Collect those names so we can preserve them.
+    let outlined_fn_ids: HashSet<IdentifierId> = hir.body.blocks.values()
+        .flat_map(|b| b.instructions.iter())
+        .filter_map(|i| {
+            if let InstructionValue::FunctionExpression { name_hint: Some(_), .. } = &i.value {
+                Some(i.lvalue.identifier)
+            } else { None }
+        })
+        .collect();
+    // Combined source text of all FunctionExpression stubs — for name scanning.
+    let combined_fn_source: String = hir.body.blocks.values()
+        .flat_map(|b| b.instructions.iter())
+        .filter_map(|i| {
+            if let InstructionValue::FunctionExpression { lowered_func, .. }
+            | InstructionValue::ObjectMethod { lowered_func, .. } = &i.value
+            {
+                if !lowered_func.func.original_source.is_empty() {
+                    Some(lowered_func.func.original_source.as_str())
+                } else { None }
+            } else { None }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+
     // Build a set of declaration IDs that are loaded by any SSA version.
     // After SSA, Destructure pattern places create new SSA identifiers for named variables,
     // so DeclareLocal/StoreLocal (which keep the original pre-SSA identifier) may not
@@ -424,6 +451,21 @@ fn remove_dead_instructions(hir: &mut HIRFunction, env: Option<&Environment>) {
                     }
                     if used.contains(&instr.lvalue.identifier) {
                         return true;
+                    }
+                    // Outlined function binding check: `const bar = _temp` where `bar` is
+                    // referenced by name in a sibling FunctionExpression's original_source.
+                    // DCE can't see this reference because it's opaque source text.
+                    if outlined_fn_ids.contains(&value.identifier) && !combined_fn_source.is_empty() {
+                        if let Some(env) = env {
+                            if let Some(name) = env.get_identifier(lvalue.place.identifier)
+                                .and_then(|i| i.name.as_ref())
+                                .map(|n| n.value().to_string())
+                            {
+                                if contains_as_word(&combined_fn_source, &name) {
+                                    return true;
+                                }
+                            }
+                        }
                     }
                     // SSA alias check: after a Destructure renames a variable (id→new_id),
                     // LoadLocals use new_id, not the original id in StoreLocal.lvalue.place.
@@ -520,10 +562,7 @@ fn remove_dead_instructions(hir: &mut HIRFunction, env: Option<&Environment>) {
 /// This handles patterns like:
 ///   `let x = 0; const y = a ? (x = 1) : (x = 2); return x + y;`
 /// where x is always overwritten before it's read, making the `= 0` dead.
-fn eliminate_dead_let_initializers(_hir: &mut HIRFunction) {
-    return; // disabled — causes regressions, needs more investigation
-    #[allow(unreachable_code)]
-    let hir = _hir;
+fn eliminate_dead_let_initializers(hir: &mut HIRFunction) {
     // Build the set of all used SSA identifiers (phi operands, instruction operands, terminals).
     let mut used: HashSet<IdentifierId> = HashSet::new();
     // Also track pre-SSA variable ids (lvalue.place.identifier) captured by closures.
