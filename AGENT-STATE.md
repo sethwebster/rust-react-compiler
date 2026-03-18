@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **42.2% (725/1719)** — streak 7. PAIR-CODER.md truncated to 277 lines to kill relay loop. |
+| Correct rate | **42.2% (725/1719)** — streak 8. Clean tree. Relay loop stopped. Worker inactive. |
 | Uncommitted changes | none (clean tree) |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
@@ -447,5 +447,6 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-18 | 82.7 | **🛑 42.2%** | — | — | — | supervisor check — 725/1719. Streak 5. Supervisor removed stale Agent Messages section (was 1900+ lines, causing worker append loop). |
 | 2026-03-18 | 82.7 | **🛑 42.2%** | — | — | — | supervisor check — 725/1719. Streak 6. Worker re-appended stale content within minutes. No code work. Strong stop + concrete task posted. |
 | 2026-03-18 | 82.7 | **🛑 42.2%** | — | — | — | supervisor check — 725/1719. Streak 7. PAIR-CODER.md truncated (2681→277 lines) to eliminate relay loop source. |
+| 2026-03-18 | 82.7 | **🛑 42.2%** | — | — | — | supervisor check — 725/1719. Streak 8. Clean tree. Relay loop stopped. Worker still inactive. |
 
 ---
