@@ -35,8 +35,8 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **42.1% (724/1719)** — NEW BEST! DCE phi-operand fix (+1) + rewrite_instruction_kinds.rs (+1). Both uncommitted. COMMIT NOW. |
-| Uncommitted changes | rewrite_instruction_kinds.rs +2/-1 + dead_code_elimination.rs +61/-25 (both confirmed, COMMIT IMMEDIATELY) |
+| Correct rate | **42.2% (725/1719)** — NEW BEST! Worker committed 040b0bd (DCE direct_used + While/DoWhile liveness). rewrite_instruction_kinds.rs +2/-1 still uncommitted. |
+| Uncommitted changes | rewrite_instruction_kinds.rs +2/-1 (HoistedLet fix, needs commit) |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -439,6 +439,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-18 | 82.7 | **🛑 42.1%** | — | — | — | supervisor check — 723/1719. Streak 4. DCE +48/-8 not helping. AGENT-STATE stale append (3rd time). STOP + first-principles posted. |
 | 2026-03-18 | 82.7 | **💥 41.4%** | — | — | — | supervisor check — 711/1719 REGRESSION (-12). DCE expanded to +120/-29 despite stop order. Supervisor reverted. 723 restored. Emergency message posted. |
 | 2026-03-18 | 82.7 | **🎉 42.1%** | — | — | — | supervisor check — 724/1719 NEW BEST! DCE phi-operand fix (+61/-25) + rewrite_instruction_kinds.rs. Both uncommitted. COMMIT ordered. |
+| 2026-03-18 | 82.7 | **🎉 42.2%** | — | — | — | supervisor check — 725/1719 NEW BEST! Worker committed 040b0bd (DCE + While/DoWhile liveness). rewrite_instruction_kinds.rs +2/-1 still uncommitted. |
 
 ---
 

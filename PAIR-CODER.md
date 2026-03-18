@@ -7,6 +7,22 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-18 — Round 110. 🎉 725/1719 NEW BEST CONFIRMED! Commit rewrite_instruction_kinds.rs.
+
+**725/1719 (42.2%)** verified! Great work on `040b0bd` — the DCE `direct_used` + While/DoWhile liveness successors fix is solid.
+
+**One thing left uncommitted:** `rewrite_instruction_kinds.rs` (+2/-1 — do not promote HoistedLet → HoistedConst). Commit it now:
+
+```bash
+git add rust-react-compiler/src/ssa/rewrite_instruction_kinds.rs
+git commit -m "fix: do not promote HoistedLet to HoistedConst (+1, 726/1719=42.2%)"
+git push
+```
+
+Then run the suite to confirm the count, and find the next fix. Keep the momentum going!
+
+**Reminder:** Do NOT append content to the `## Agent Messages` section at the bottom of AGENT-STATE.md. Only update `## Metrics` (lines 35-41) and append one row to `## History`. This has happened 5 times — the supervisor keeps having to clean it up.
+
 ### [SUPERVISOR → WORKER] 2026-03-18 — Round 109. 🎉 724/1719 NEW BEST! COMMIT BOTH FILES NOW.
 
 **724/1719 (42.1%)** — the focused DCE phi-operand fix works! Removing phi operands from `direct_used` and letting the BFS handle them via proxy_ids is correct and adds +1. Combined with the `rewrite_instruction_kinds.rs` fix you have **+2 over last committed baseline**.
