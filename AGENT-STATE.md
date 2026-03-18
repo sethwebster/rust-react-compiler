@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **42.2% (725/1719)** — streak 2. Supervisor force-committed rewrite_instruction_kinds.rs (ccb8ef8). Clean tree. |
+| Correct rate | **42.2% (725/1719)** — streak 3. Clean tree. Worker inactive. |
 | Uncommitted changes | none (clean tree) |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
@@ -442,6 +442,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-18 | 82.7 | **🎉 42.2%** | — | — | — | supervisor check — 725/1719 NEW BEST! Worker committed 040b0bd (DCE + While/DoWhile liveness). rewrite_instruction_kinds.rs +2/-1 still uncommitted. |
 | 2026-03-18 | 82.7 | **42.2%** | — | — | — | supervisor check — 725/1719. Streak 1. rewrite_instruction_kinds.rs still pending (6th round). Stale content cleaned (6th time). |
 | 2026-03-18 | 82.7 | **42.2%** | — | — | — | supervisor check — 725/1719. Streak 2. Supervisor force-committed rewrite_instruction_kinds.rs (ccb8ef8). Clean tree now. |
+| 2026-03-18 | 82.7 | **42.2%** | — | — | — | supervisor check — 725/1719. Streak 3. Clean tree. Worker inactive. |
 
 ---
 
