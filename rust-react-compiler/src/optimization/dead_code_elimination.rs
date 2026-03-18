@@ -520,9 +520,15 @@ fn remove_dead_instructions(hir: &mut HIRFunction, env: Option<&Environment>) {
 /// This handles patterns like:
 ///   `let x = 0; const y = a ? (x = 1) : (x = 2); return x + y;`
 /// where x is always overwritten before it's read, making the `= 0` dead.
-fn eliminate_dead_let_initializers(hir: &mut HIRFunction) {
+fn eliminate_dead_let_initializers(_hir: &mut HIRFunction) {
+    return; // disabled — causes regressions, needs more investigation
+    #[allow(unreachable_code)]
+    let hir = _hir;
     // Build the set of all used SSA identifiers (phi operands, instruction operands, terminals).
     let mut used: HashSet<IdentifierId> = HashSet::new();
+    // Also track pre-SSA variable ids (lvalue.place.identifier) captured by closures.
+    // Context captures use pre-SSA ids, not SSA result ids.
+    let mut captured_place_ids: HashSet<IdentifierId> = HashSet::new();
     for param in &hir.params {
         match param {
             Param::Place(p) => { used.insert(p.identifier); }
@@ -532,15 +538,21 @@ fn eliminate_dead_let_initializers(hir: &mut HIRFunction) {
     for ctx in &hir.context {
         used.insert(ctx.identifier);
     }
+    // Also track lvalue.place.identifier values used in phi operands (pre-SSA variable ids).
+    // In some cases, phi operands may reference the pre-SSA identifier rather than the
+    // SSA instruction result, so we track both.
+    let mut pre_ssa_phi_ids: HashSet<IdentifierId> = HashSet::new();
+
     for block in hir.body.blocks.values() {
         collect_terminal_uses(&block.terminal, &mut used);
         for instr in &block.instructions {
             collect_instruction_uses(&instr.value, &mut used);
-            // FunctionExpression context captures: the context places hold the SSA ids
-            // of captured variables. These are uses of the initial StoreLocal result.
+            // FunctionExpression context captures use pre-SSA variable ids.
+            // Track them so we don't eliminate the initial value of closure-captured vars.
             if let InstructionValue::FunctionExpression { lowered_func, .. }
             | InstructionValue::ObjectMethod { lowered_func, .. } = &instr.value {
                 for ctx_place in &lowered_func.func.context {
+                    captured_place_ids.insert(ctx_place.identifier);
                     used.insert(ctx_place.identifier);
                 }
             }
@@ -548,6 +560,7 @@ fn eliminate_dead_let_initializers(hir: &mut HIRFunction) {
         for phi in &block.phis {
             for (_, operand) in &phi.operands {
                 used.insert(operand.identifier);
+                pre_ssa_phi_ids.insert(operand.identifier);
             }
         }
     }
@@ -571,6 +584,16 @@ fn eliminate_dead_let_initializers(hir: &mut HIRFunction) {
                 }
                 // If the SSA result is used as a phi operand or instruction operand, keep it.
                 if used.contains(&instr.lvalue.identifier) {
+                    continue;
+                }
+                // Also check if the pre-SSA place id appears as a phi operand — in some
+                // representations, phi operands may use the pre-SSA variable id.
+                if pre_ssa_phi_ids.contains(&lvalue.place.identifier) {
+                    continue;
+                }
+                // If the pre-SSA variable is captured by a closure, keep the initial value —
+                // the closure may read the initial value via the pre-SSA id.
+                if captured_place_ids.contains(&lvalue.place.identifier) {
                     continue;
                 }
                 // Only convert if the stored value is a pure constant (no side effects).
