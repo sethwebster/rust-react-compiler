@@ -41,7 +41,7 @@ pub fn dead_code_elimination_with_env(hir: &mut HIRFunction, env: Option<&Enviro
         let before_phis: usize = hir.body.blocks.values().map(|b| b.phis.len()).sum();
         remove_dead_phis(hir);
         eliminate_shadowed_stores(hir);
-        // eliminate_dead_let_initializers(hir); // disabled — causes regressions
+        eliminate_dead_let_initializers(hir);
         remove_dead_instructions(hir, env);
         let after_instrs: usize = hir.body.blocks.values().map(|b| b.instructions.len()).sum();
         let after_phis: usize = hir.body.blocks.values().map(|b| b.phis.len()).sum();
@@ -556,8 +556,8 @@ fn remove_dead_instructions(hir: &mut HIRFunction, env: Option<&Environment>) {
 // Pass: eliminate dead Let-initializers
 // ---------------------------------------------------------------------------
 
-/// Convert `let x = <pure>;` to `let x;` when the initial SSA value is never
-/// used (not a phi operand, not loaded by any instruction).
+/// Convert `let x = <pure>;` to `let x;` when the initial value is never read
+/// before being overwritten on all control flow paths.
 ///
 /// This handles patterns like:
 ///   `let x = 0; const y = a ? (x = 1) : (x = 2); return x + y;`
@@ -566,7 +566,6 @@ fn eliminate_dead_let_initializers(hir: &mut HIRFunction) {
     // Build the set of all used SSA identifiers (phi operands, instruction operands, terminals).
     let mut used: HashSet<IdentifierId> = HashSet::new();
     // Also track pre-SSA variable ids (lvalue.place.identifier) captured by closures.
-    // Context captures use pre-SSA ids, not SSA result ids.
     let mut captured_place_ids: HashSet<IdentifierId> = HashSet::new();
     for param in &hir.params {
         match param {
@@ -577,29 +576,20 @@ fn eliminate_dead_let_initializers(hir: &mut HIRFunction) {
     for ctx in &hir.context {
         used.insert(ctx.identifier);
     }
-    // Also track lvalue.place.identifier values used in phi operands (pre-SSA variable ids).
-    // In some cases, phi operands may reference the pre-SSA identifier rather than the
-    // SSA instruction result, so we track both.
-    let mut pre_ssa_phi_ids: HashSet<IdentifierId> = HashSet::new();
-
     for block in hir.body.blocks.values() {
         collect_terminal_uses(&block.terminal, &mut used);
         for instr in &block.instructions {
             collect_instruction_uses(&instr.value, &mut used);
-            // FunctionExpression context captures use pre-SSA variable ids.
-            // Track them so we don't eliminate the initial value of closure-captured vars.
             if let InstructionValue::FunctionExpression { lowered_func, .. }
             | InstructionValue::ObjectMethod { lowered_func, .. } = &instr.value {
                 for ctx_place in &lowered_func.func.context {
                     captured_place_ids.insert(ctx_place.identifier);
-                    used.insert(ctx_place.identifier);
                 }
             }
         }
         for phi in &block.phis {
             for (_, operand) in &phi.operands {
                 used.insert(operand.identifier);
-                pre_ssa_phi_ids.insert(operand.identifier);
             }
         }
     }
@@ -614,41 +604,197 @@ fn eliminate_dead_let_initializers(hir: &mut HIRFunction) {
         }
     }
 
-    // Convert dead Let-kind StoreLocals to DeclareLocals.
-    for block in hir.body.blocks.values_mut() {
-        for instr in block.instructions.iter_mut() {
-            let (place, loc) = if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
+    // Collect candidate Let StoreLocals: block_id, instr_idx, pre_ssa_id, ssa_result_id.
+    // A candidate is a Let StoreLocal whose SSA result is not directly used (not a phi
+    // operand or instruction operand) and whose stored value is pure.
+    let mut candidates: Vec<(BlockId, usize, IdentifierId, IdentifierId)> = Vec::new();
+    for (block_id, block) in &hir.body.blocks {
+        for (idx, instr) in block.instructions.iter().enumerate() {
+            if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
                 if !matches!(lvalue.kind, InstructionKind::Let | InstructionKind::HoistedLet) {
                     continue;
                 }
-                // If the SSA result is used as a phi operand or instruction operand, keep it.
+                // If the SSA result is directly consumed, the initial value may be live.
                 if used.contains(&instr.lvalue.identifier) {
                     continue;
                 }
-                // Also check if the pre-SSA place id appears as a phi operand — in some
-                // representations, phi operands may use the pre-SSA variable id.
-                if pre_ssa_phi_ids.contains(&lvalue.place.identifier) {
-                    continue;
-                }
-                // If the pre-SSA variable is captured by a closure, keep the initial value —
-                // the closure may read the initial value via the pre-SSA id.
+                // If captured by a closure, the closure may read the initial value.
                 if captured_place_ids.contains(&lvalue.place.identifier) {
                     continue;
                 }
-                // Only convert if the stored value is a pure constant (no side effects).
+                // Only convert pure initializers (no side effects from the value expression).
                 if !pure_result_ids.contains(&value.identifier) {
                     continue;
                 }
-                (lvalue.place.clone(), lvalue.place.loc.clone())
-            } else {
-                continue;
-            };
-            instr.value = InstructionValue::DeclareLocal {
-                lvalue: LValue { place, kind: InstructionKind::Let },
-                type_annotation: None,
-                loc,
-            };
+                candidates.push((*block_id, idx, lvalue.place.identifier, instr.lvalue.identifier));
+            }
         }
+    }
+
+    // Build phi index once: operand_id → list of phi result ids that have this operand.
+    // This is used by initial_value_is_live to compute proxy_ids cheaply.
+    let mut operand_to_phi_results: HashMap<IdentifierId, Vec<IdentifierId>> = HashMap::new();
+    for block in hir.body.blocks.values() {
+        for phi in &block.phis {
+            for (_, op) in &phi.operands {
+                operand_to_phi_results
+                    .entry(op.identifier)
+                    .or_default()
+                    .push(phi.place.identifier);
+            }
+        }
+    }
+
+    // For each candidate, use forward reachability to check if the initial value
+    // can be read before being overwritten on some control flow path.
+    // Only convert if the initial value is provably dead on all paths.
+    let mut convert_ssa_ids: HashSet<IdentifierId> = HashSet::new();
+    for (block_id, instr_idx, pre_ssa_id, ssa_result_id) in candidates {
+        if !initial_value_is_live(hir, block_id, instr_idx, pre_ssa_id, &operand_to_phi_results) {
+            convert_ssa_ids.insert(ssa_result_id);
+        }
+    }
+
+    // Apply conversions: StoreLocal(Let, x, pure_val) → DeclareLocal(x).
+    for block in hir.body.blocks.values_mut() {
+        for instr in block.instructions.iter_mut() {
+            if convert_ssa_ids.contains(&instr.lvalue.identifier) {
+                if let InstructionValue::StoreLocal { lvalue, .. } = &instr.value {
+                    let place = lvalue.place.clone();
+                    let loc = lvalue.place.loc.clone();
+                    instr.value = InstructionValue::DeclareLocal {
+                        lvalue: LValue { place, kind: InstructionKind::Let },
+                        type_annotation: None,
+                        loc,
+                    };
+                }
+            }
+        }
+    }
+}
+
+/// Forward reachability analysis: returns true if the initial value of `var_id`
+/// (written by the Let StoreLocal at `let_block_id[let_instr_idx]`) can be read
+/// on some control flow path before being overwritten.
+///
+/// Performs a BFS over successor blocks. For each block, scans instructions in
+/// order: a read of `var_id` before any write means the initial value is live.
+/// A write (StoreLocal to `var_id`) kills the variable on that path.
+///
+/// After SSA, LoadLocals at join blocks may use phi-result ids instead of the
+/// pre-SSA id. We compute `proxy_ids`: the transitive closure of var_id through
+/// phi nodes whose operands include var_id (or another proxy). This ensures we
+/// detect reads via SSA-renamed phi ids.
+fn initial_value_is_live(
+    hir: &HIRFunction,
+    let_block_id: BlockId,
+    let_instr_idx: usize,
+    var_id: IdentifierId,
+    operand_to_phi_results: &HashMap<IdentifierId, Vec<IdentifierId>>,
+) -> bool {
+    // Build proxy_ids: all SSA ids that could carry the initial value of var_id.
+    // Start with {var_id} and add any phi result whose operands include an existing proxy.
+    // Use a worklist (BFS) approach with the pre-built phi index.
+    let mut proxy_ids: HashSet<IdentifierId> = HashSet::new();
+    let mut worklist: Vec<IdentifierId> = vec![var_id];
+    while let Some(id) = worklist.pop() {
+        if proxy_ids.insert(id) {
+            // id is newly added to proxy_ids: propagate to phi results that use id.
+            if let Some(phi_results) = operand_to_phi_results.get(&id) {
+                for &phi_result in phi_results {
+                    if !proxy_ids.contains(&phi_result) {
+                        worklist.push(phi_result);
+                    }
+                }
+            }
+        }
+    }
+
+    use std::collections::VecDeque;
+    let mut visited: HashSet<BlockId> = HashSet::new();
+    let mut queue: VecDeque<(BlockId, usize)> = VecDeque::new();
+
+    // Start scanning after the Let instruction.
+    queue.push_back((let_block_id, let_instr_idx + 1));
+    visited.insert(let_block_id);
+
+    while let Some((block_id, start_idx)) = queue.pop_front() {
+        let block = match hir.body.blocks.get(&block_id) {
+            Some(b) => b,
+            None => continue,
+        };
+
+        let mut killed = false;
+        for instr in block.instructions.iter().skip(start_idx) {
+            if let_instr_reads_var(&instr.value, &proxy_ids) {
+                // Found a read before any kill on this path — initial value is live.
+                return true;
+            }
+            if let_instr_writes_var(&instr.value, var_id) {
+                // Variable is overwritten before any read on this path — path is safe.
+                killed = true;
+                break;
+            }
+        }
+
+        if !killed {
+            // Not killed in this block: propagate to successors.
+            // Use liveness_successors (not terminal.successors) to avoid visiting
+            // the Branch/If fallthrough (join block) directly — control can only
+            // reach the join block via the consequent or alternate, not directly.
+            let succs = liveness_successors(&block.terminal);
+            if succs.is_empty() {
+                // Conservative: a path exits (e.g. early return) without killing
+                // the variable. Treat the initial value as potentially live so we
+                // don't eliminate the declaration point. This preserves the scope
+                // start instruction needed by scope alignment for early-return scopes.
+                return true;
+            }
+            for succ in succs {
+                if visited.insert(succ) {
+                    queue.push_back((succ, 0));
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Returns the direct control-flow successors for forward liveness analysis.
+///
+/// Unlike `terminal.successors()`, this excludes the `fallthrough` block for
+/// `Branch`/`If` terminals. The `fallthrough` (join block) is NOT a direct
+/// successor of the branch — control flows to it via `consequent` or `alternate`.
+/// Including it directly would make the join block reachable without going through
+/// either branch, producing false "live" results when both branches kill the variable.
+fn liveness_successors(terminal: &Terminal) -> Vec<BlockId> {
+    match terminal {
+        Terminal::Branch { consequent, alternate, .. }
+        | Terminal::If { consequent, alternate, .. } => {
+            vec![*consequent, *alternate]
+        }
+        other => other.successors(),
+    }
+}
+
+/// Returns true if `instr` reads any id in `proxy_ids` (which represents the
+/// pre-SSA variable and all its phi-derived SSA versions).
+/// This covers LoadLocal and PostfixUpdate/PrefixUpdate.
+fn let_instr_reads_var(val: &InstructionValue, proxy_ids: &HashSet<IdentifierId>) -> bool {
+    match val {
+        InstructionValue::LoadLocal { place, .. } => proxy_ids.contains(&place.identifier),
+        InstructionValue::PostfixUpdate { value, .. }
+        | InstructionValue::PrefixUpdate { value, .. } => proxy_ids.contains(&value.identifier),
+        _ => false,
+    }
+}
+
+/// Returns true if `instr` kills `var_id` by overwriting it (StoreLocal to var_id).
+fn let_instr_writes_var(val: &InstructionValue, var_id: IdentifierId) -> bool {
+    match val {
+        InstructionValue::StoreLocal { lvalue, .. } => lvalue.place.identifier == var_id,
+        _ => false,
     }
 }
 

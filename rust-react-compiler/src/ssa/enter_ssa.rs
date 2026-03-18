@@ -312,6 +312,8 @@ struct SsaBuilder {
     ident_snapshot: HashMap<IdentifierId, Identifier>,
     /// New identifiers registered during SSA to be written back to env.
     new_identifiers: Vec<Identifier>,
+    /// Fast lookup for new_identifiers by id.
+    new_identifiers_map: HashMap<IdentifierId, usize>,
 }
 
 impl SsaBuilder {
@@ -325,6 +327,7 @@ impl SsaBuilder {
             next_id: max_existing_id + 1,
             ident_snapshot,
             new_identifiers: Vec::new(),
+            new_identifiers_map: HashMap::new(),
         }
     }
 
@@ -339,7 +342,15 @@ impl SsaBuilder {
     /// registered in new_identifiers so codegen can find their names.
     fn alloc_phi_id(&mut self, old_id: IdentifierId) -> IdentifierId {
         let new_id = self.alloc_id();
-        let new_ident = if let Some(orig) = self.ident_snapshot.get(&old_id) {
+        // Look up original identifier: first in ident_snapshot (pre-SSA ids),
+        // then in new_identifiers_map (SSA ids created earlier in this pass).
+        let orig_opt = self.ident_snapshot.get(&old_id).cloned()
+            .or_else(|| {
+                self.new_identifiers_map.get(&old_id)
+                    .and_then(|&idx| self.new_identifiers.get(idx))
+                    .cloned()
+            });
+        let new_ident = if let Some(orig) = orig_opt {
             let mut copy = orig.clone();
             copy.id = new_id;
             copy.declaration_id = orig.declaration_id;
@@ -355,6 +366,8 @@ impl SsaBuilder {
                 loc: SourceLocation::Generated,
             }
         };
+        let idx = self.new_identifiers.len();
+        self.new_identifiers_map.insert(new_id, idx);
         self.new_identifiers.push(new_ident);
         new_id
     }
@@ -514,6 +527,8 @@ impl SsaBuilder {
                 loc: place.loc.clone(),
             }
         };
+        let idx = self.new_identifiers.len();
+        self.new_identifiers_map.insert(new_id, idx);
         self.new_identifiers.push(new_ident);
         Place { identifier: new_id, ..place }
     }
