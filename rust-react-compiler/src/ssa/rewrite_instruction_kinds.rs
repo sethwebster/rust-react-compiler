@@ -217,7 +217,8 @@ fn tighten_instruction_kind(
     }
     lvalue.kind = match lvalue.kind {
         InstructionKind::Let => InstructionKind::Const,
-        InstructionKind::HoistedLet => InstructionKind::HoistedConst,
+        // Do NOT promote HoistedLet → HoistedConst: the TS compiler preserves
+        // hoisted variables as `let` since they're hoisted to function scope.
         other => other,
     };
 }
