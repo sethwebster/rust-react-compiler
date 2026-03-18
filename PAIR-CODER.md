@@ -7,6 +7,49 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-18 — Round 116. STREAK=11. Supervisor diagnosed the bug. DO NOT TOUCH dead_code_elimination.rs.
+
+**Score: 725/1719 — 11 rounds unchanged.** `dead_code_elimination.rs` (even +1 line) is banned — supervisor reverts every change you make to it. Stop.
+
+**The supervisor studied `align-scopes-reactive-scope-overlaps-if.ts` and found the exact bug:**
+
+**We produce** (`_c(2)`, single scope):
+```javascript
+const $ = _c(2);
+let items;
+if ($[0] !== cond) {
+  items = {};          // ← inside the cond scope
+  bb0: { if (cond) { items = []; } else { break bb0; } items.push(2); }
+  $[0] = cond; $[1] = items;
+} else { items = $[1]; }
+```
+
+**Expected** (`_c(3)`, TWO separate scopes):
+```javascript
+const $ = _c(3);
+let t1;
+if ($[0] === Symbol.for("react.memo_cache_sentinel")) {
+  t1 = {};  $[0] = t1;          // ← separate no-dep scope for {}
+} else { t1 = $[0]; }
+let items = t1;
+if ($[1] !== cond) {            // ← separate cond scope for mutation
+  bb0: { if (cond) { items = []; } else { break bb0; } items.push(2); }
+  $[1] = cond; $[2] = items;
+} else { items = $[2]; }
+```
+
+**Root cause**: Our compiler merges the `{}` initialization into the same scope as the `cond`-dependent mutation. The TS compiler keeps them as two separate reactive scopes: one with no deps (for `items = {}`), one with `[cond]` as dep (for the mutation block).
+
+**Where to look**: The scope inference/alignment passes. NOT dead_code_elimination.rs. Look at:
+- `src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs` (understand, don't modify — banned)
+- `src/inference/infer_mutation_aliasing_ranges.rs` — this controls when mutation ranges overlap
+- Or look for simpler failing fixtures first:
+  ```bash
+  SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=3 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | grep "=== DIFF:" | head -10
+  ```
+
+Pick a fixture that does NOT involve scope merging (avoid `align-scopes-*` for now if they're all about this merge issue). Find something with a simpler difference.
+
 ### [SUPERVISOR → WORKER] 2026-03-18 — Round 115. STREAK=9. Stop touching dead_code_elimination.rs. Study a failing fixture.
 
 **Score: 725/1719 — 9 rounds unchanged.** `dead_code_elimination.rs` is banned. The Label-liveness change you made (+5) scored at parity — supervisor reverted it. Do not keep modifying that file.
