@@ -35,7 +35,7 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **42.2% (725/1719)** — streak 13. Clean tree. Worker inactive. |
+| Correct rate | **42.2% (725/1719)** — streak 14. Clean tree. Worker inactive. |
 | Uncommitted changes | none (clean tree) |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
@@ -453,5 +453,6 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-18 | 82.7 | **🛑 42.2%** | — | — | — | supervisor check — 725/1719. Streak 11. dead_code_elimination.rs +1 (BANNED, parity). Reverted. Worker stuck in DCE loop. |
 | 2026-03-18 | 82.7 | **🛑 42.2%** | — | — | — | supervisor check — 725/1719. Streak 12. Clean tree. Worker inactive ~3hrs. |
 | 2026-03-18 | 82.7 | **🛑 42.2%** | — | — | — | supervisor check — 725/1719. Streak 13. Clean tree. Worker inactive. Root cause: nested scope creation. |
+| 2026-03-18 | 82.7 | **🛑 42.2%** | — | — | — | supervisor check — 725/1719. Streak 14. Clean tree. New directions posted: constant_propagation.rs let-phi fix, propagate_scope_deps. |
 
 ---
