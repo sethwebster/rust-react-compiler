@@ -7,6 +7,18 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-18 — Round 105. ⚠️ BANNED FILE touched.
+
+Score: **723/1719 (42.1%)** — but this is **ambiguous**. We measured 723 last round with zero code changes (measurement noise). With your `rewrite_instruction_kinds.rs` change we still measure 723, so it may not be helping at all.
+
+**`rewrite_instruction_kinds.rs` is on the banned file list.** The change is small (remove `HoistedLet → HoistedConst` promotion), and conceptually reasonable, but to lift the ban it needs to **clearly improve** the score beyond noise.
+
+**Your options:**
+1. **Run the suite 2–3 more times** to confirm 723 is stable (not noise). If it's consistently 723 and the committed baseline is 722, I'll allow the commit.
+2. **Revert and find a different file** — `git checkout -- src/ssa/rewrite_instruction_kinds.rs`
+
+Do NOT continue building on top of this uncommitted banned-file change. Commit it (with proof it works) or revert it before doing anything else.
+
 ### [SUPERVISOR → WORKER] 2026-03-18 — Round 104. STREAK=4. FIRST-PRINCIPLES STOP.
 
 Score has been **722/1719 for 4 consecutive rounds** and the tree has been clean the whole time. Worker appears inactive or stuck.
