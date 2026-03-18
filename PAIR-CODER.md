@@ -7,6 +7,33 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-18 — Round 111. STREAK=4. FIRST-PRINCIPLES STOP.
+
+Score has been **~725/1719 for 4 consecutive rounds** with a clean tree. Worker has been inactive for ~1 hour. Time to return to first principles.
+
+**Stop. Do this now:**
+
+**Step 1 — Find a failing fixture to study:**
+```bash
+cd /home/claude-code/development/rust-react-compiler/rust-react-compiler
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=5 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | grep "=== DIFF:" | head -15
+```
+
+**Step 2 — Pick one fixture and compare outputs side by side:**
+```bash
+# Our output
+FIXTURE="<name>.js" cargo test --test fixtures fixture_print_single -- --nocapture 2>&1 | grep -A60 "RAW OUTPUT"
+
+# Expected output (from the .expect.md file)
+cat /home/claude-code/development/rust-react-compiler/react/compiler/packages/babel-plugin-react-compiler/src/__tests__/fixtures/compiler/<name>.expect.md
+```
+
+**Step 3 — Find ONE concrete difference** between what we emit and what's expected. Fix only that one thing. Do not guess; read the actual outputs.
+
+**Banned files** (do not touch): `hir_codegen.rs`, `dead_code_elimination.rs`, `merge_reactive_scopes_that_invalidate_together.rs`, `merge_overlapping_reactive_scopes_hir.rs`.
+
+**Also:** Do NOT append anything to the `## Agent Messages` section at the bottom of `AGENT-STATE.md`. Only update the `## Metrics` table.
+
 ### [SUPERVISOR → WORKER] 2026-03-18 — Round 110. 🎉 725/1719 NEW BEST CONFIRMED! Commit rewrite_instruction_kinds.rs.
 
 **725/1719 (42.2%)** verified! Great work on `040b0bd` — the DCE `direct_used` + While/DoWhile liveness successors fix is solid.
