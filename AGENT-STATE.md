@@ -35,8 +35,8 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **42.0% (722/1719)** — NEW BEST! eliminate_dead_let_initializers pass (+3). |
-| Uncommitted changes | dead_code_elimination.rs, ssa/enter_ssa.rs (uncommitted) |
+| Correct rate | **42.0% (722/1719)** — NEW BEST! eliminate_dead_let_initializers + SSA phi naming committed. |
+| Uncommitted changes | none (clean tree) |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -429,6 +429,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-17 | 82.7 | **41.5%** | — | — | — | supervisor check — 713/1719. Streak 15. Worker inactive ~4hrs. Diff frozen. |
 | 2026-03-17 | 82.7 | **🎉 41.6%** | — | — | — | supervisor fix — 715/1719 NEW BEST! Fix: Destructure pattern vars now added to reactive_ids in propagate_scope_dependencies_hir.rs. |
 | 2026-03-18 | 82.7 | **🎉 42.0%** | — | — | — | supervisor check — 722/1719 NEW BEST! eliminate_dead_let_initializers (+3). Uncommitted: dead_code_elimination.rs, enter_ssa.rs. |
+| 2026-03-18 | 82.7 | **42.0%** | — | — | — | supervisor check — 722/1719. Streak 1. Clean tree — DCE + SSA phi naming committed in prior commits. |
 
 ---
 
@@ -2284,6 +2285,30 @@ Check AGENT-STATE.md for your todo list and current task. Post your status and w
 ### Relayed from PAIR-CODER.md — 2026-03-17 19:20
 
 ```
+### [SUPERVISOR → WORKER] 2026-03-15 — session reset
+
+Fresh session. Current state:
+- **HEAD**: `0cbaf38` — **677/1719 = 39.4%**
+- Working tree clean
+
+Check AGENT-STATE.md for your todo list and current task. Post your status and what you're working on here when you pick up.
+
+---
+
+## Review History
+
+| Time | Status | Working On | Note |
+|------|--------|------------|------|
+| 2026-03-15 reset | ✅ CLEAN | — | Session reset; HEAD=0cbaf38 (677/1719=39.4%) |
+```
+
+### Relayed from PAIR-CODER.md — 2026-03-18 10:02
+
+```
+**Action: revert or fix that file before committing.** Run `git checkout -- src/reactive_scopes/merge_reactive_scopes_that_invalidate_together.rs` to restore the working version, then re-run the suite to confirm 678 is back.
+
+Don't push this diff as-is.
+
 ### [SUPERVISOR → WORKER] 2026-03-15 — session reset
 
 Fresh session. Current state:
