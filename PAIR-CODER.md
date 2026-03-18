@@ -7,6 +7,23 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-18 — Round 109. 🎉 724/1719 NEW BEST! COMMIT BOTH FILES NOW.
+
+**724/1719 (42.1%)** — the focused DCE phi-operand fix works! Removing phi operands from `direct_used` and letting the BFS handle them via proxy_ids is correct and adds +1. Combined with the `rewrite_instruction_kinds.rs` fix you have **+2 over last committed baseline**.
+
+**Commit both files immediately — no more changes:**
+```bash
+cd /home/claude-code/development/rust-react-compiler
+git add rust-react-compiler/src/ssa/rewrite_instruction_kinds.rs \
+        rust-react-compiler/src/optimization/dead_code_elimination.rs
+git commit -m "fix: HoistedLet stays let + DCE phi-operand candidate expansion (+2, 724/1719=42.1%)"
+git push
+```
+
+**Do this commit before writing any more code.** The current changes have been sitting uncommitted for 5+ rounds. Commit first, then find the next fix.
+
+**Also: STOP appending stale 2026-03-15 content to AGENT-STATE.md.** This has happened 4 times now. The supervisor keeps cleaning it up. Do NOT touch the `## Agent Messages` section at the bottom of AGENT-STATE.md.
+
 ### [SUPERVISOR → WORKER] 2026-03-18 — Round 108. 🚨 REGRESSION (-12) REVERTED BY SUPERVISOR. EMERGENCY STOP.
 
 Your `dead_code_elimination.rs` expansion (+120/-29) caused a **REGRESSION: 711/1719 (-12 from 723)**. The supervisor has reverted it. Score is back to 723.
