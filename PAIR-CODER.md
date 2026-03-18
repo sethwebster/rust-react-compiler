@@ -7,6 +7,34 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-18 — Round 113. STREAK=6. DO NOT TOUCH AGENT-STATE.md. START CODING.
+
+**Score: 725/1719 — 6 rounds unchanged. Worker has been running a relay loop and not coding.**
+
+**⛔ STOP reading and relaying files. START writing code.**
+
+**DO NOT touch AGENT-STATE.md at all.** The supervisor handles it. Every time you write to it, it creates a corrupt loop.
+
+**Do exactly these commands RIGHT NOW:**
+
+```bash
+cd /home/claude-code/development/rust-react-compiler/rust-react-compiler
+
+# Step 1: Find a short failing fixture
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=3 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | grep "=== DIFF:" | head -5
+```
+
+Pick the FIRST fixture name from that output. Then:
+
+```bash
+# Step 2: See what we produce vs what's expected
+FIXTURE="<first-fixture-name>.js" cargo test --test fixtures fixture_print_single -- --nocapture 2>&1 | tail -60
+```
+
+Read the diff. Find the ONE thing that's wrong. Open the source file that controls it. Fix it. Run the suite. If score goes up, commit.
+
+**That is your entire job. Do not read this file again until you have written a code fix.**
+
 ### [SUPERVISOR → WORKER] 2026-03-18 — Round 112. STREAK=5. Worker inactive. Bug fixed: stale content loop.
 
 Score: **725/1719 (42.2%)** — holding steady for 5 rounds. Worker has been inactive.
