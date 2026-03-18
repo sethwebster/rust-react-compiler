@@ -563,23 +563,28 @@ fn remove_dead_instructions(hir: &mut HIRFunction, env: Option<&Environment>) {
 ///   `let x = 0; const y = a ? (x = 1) : (x = 2); return x + y;`
 /// where x is always overwritten before it's read, making the `= 0` dead.
 fn eliminate_dead_let_initializers(hir: &mut HIRFunction) {
-    // Build the set of all used SSA identifiers (phi operands, instruction operands, terminals).
-    let mut used: HashSet<IdentifierId> = HashSet::new();
+    // Build two sets:
+    // - direct_used: SSA ids consumed by instructions/terminals (NOT phi operands).
+    //   Used to filter candidates: if the SSA result is directly read (not just
+    //   threaded through a phi), the initial value is certainly live.
+    // - phi-only operands are NOT added to direct_used; the BFS handles those by
+    //   tracking reads via SSA proxy ids through the phi chain.
+    let mut direct_used: HashSet<IdentifierId> = HashSet::new();
     // Also track pre-SSA variable ids (lvalue.place.identifier) captured by closures.
     let mut captured_place_ids: HashSet<IdentifierId> = HashSet::new();
     for param in &hir.params {
         match param {
-            Param::Place(p) => { used.insert(p.identifier); }
-            Param::Spread(s) => { used.insert(s.place.identifier); }
+            Param::Place(p) => { direct_used.insert(p.identifier); }
+            Param::Spread(s) => { direct_used.insert(s.place.identifier); }
         }
     }
     for ctx in &hir.context {
-        used.insert(ctx.identifier);
+        direct_used.insert(ctx.identifier);
     }
     for block in hir.body.blocks.values() {
-        collect_terminal_uses(&block.terminal, &mut used);
+        collect_terminal_uses(&block.terminal, &mut direct_used);
         for instr in &block.instructions {
-            collect_instruction_uses(&instr.value, &mut used);
+            collect_instruction_uses(&instr.value, &mut direct_used);
             if let InstructionValue::FunctionExpression { lowered_func, .. }
             | InstructionValue::ObjectMethod { lowered_func, .. } = &instr.value {
                 for ctx_place in &lowered_func.func.context {
@@ -587,11 +592,8 @@ fn eliminate_dead_let_initializers(hir: &mut HIRFunction) {
                 }
             }
         }
-        for phi in &block.phis {
-            for (_, operand) in &phi.operands {
-                used.insert(operand.identifier);
-            }
-        }
+        // Note: phi operands are NOT added to direct_used — they're handled by the BFS
+        // via SSA proxy ids, allowing the BFS to detect reads through phi chains.
     }
 
     // Build a set of identifiers produced by pure (no-side-effect) instructions.
@@ -605,8 +607,8 @@ fn eliminate_dead_let_initializers(hir: &mut HIRFunction) {
     }
 
     // Collect candidate Let StoreLocals: block_id, instr_idx, pre_ssa_id, ssa_result_id.
-    // A candidate is a Let StoreLocal whose SSA result is not directly used (not a phi
-    // operand or instruction operand) and whose stored value is pure.
+    // A candidate is a Let StoreLocal whose SSA result is not directly consumed by
+    // instructions/terminals (phi-only uses are OK) and whose stored value is pure.
     let mut candidates: Vec<(BlockId, usize, IdentifierId, IdentifierId)> = Vec::new();
     for (block_id, block) in &hir.body.blocks {
         for (idx, instr) in block.instructions.iter().enumerate() {
@@ -614,8 +616,9 @@ fn eliminate_dead_let_initializers(hir: &mut HIRFunction) {
                 if !matches!(lvalue.kind, InstructionKind::Let | InstructionKind::HoistedLet) {
                     continue;
                 }
-                // If the SSA result is directly consumed, the initial value may be live.
-                if used.contains(&instr.lvalue.identifier) {
+                // If the SSA result is directly consumed by instructions/terminals,
+                // the initial value is live.
+                if direct_used.contains(&instr.lvalue.identifier) {
                     continue;
                 }
                 // If captured by a closure, the closure may read the initial value.
@@ -632,7 +635,7 @@ fn eliminate_dead_let_initializers(hir: &mut HIRFunction) {
     }
 
     // Build phi index once: operand_id → list of phi result ids that have this operand.
-    // This is used by initial_value_is_live to compute proxy_ids cheaply.
+    // Used by initial_value_is_live to expand proxy_ids through phi chains.
     let mut operand_to_phi_results: HashMap<IdentifierId, Vec<IdentifierId>> = HashMap::new();
     for block in hir.body.blocks.values() {
         for phi in &block.phis {
@@ -650,7 +653,7 @@ fn eliminate_dead_let_initializers(hir: &mut HIRFunction) {
     // Only convert if the initial value is provably dead on all paths.
     let mut convert_ssa_ids: HashSet<IdentifierId> = HashSet::new();
     for (block_id, instr_idx, pre_ssa_id, ssa_result_id) in candidates {
-        if !initial_value_is_live(hir, block_id, instr_idx, pre_ssa_id, &operand_to_phi_results) {
+        if !initial_value_is_live(hir, block_id, instr_idx, pre_ssa_id, ssa_result_id, &operand_to_phi_results) {
             convert_ssa_ids.insert(ssa_result_id);
         }
     }
@@ -689,14 +692,19 @@ fn initial_value_is_live(
     hir: &HIRFunction,
     let_block_id: BlockId,
     let_instr_idx: usize,
-    var_id: IdentifierId,
+    pre_ssa_id: IdentifierId,  // lvalue.place.identifier — used for kill detection
+    ssa_result_id: IdentifierId,  // instr.lvalue.identifier — used for read detection via phi chain
     operand_to_phi_results: &HashMap<IdentifierId, Vec<IdentifierId>>,
 ) -> bool {
-    // Build proxy_ids: all SSA ids that could carry the initial value of var_id.
-    // Start with {var_id} and add any phi result whose operands include an existing proxy.
-    // Use a worklist (BFS) approach with the pre-built phi index.
+    // Build proxy_ids: all SSA ids that could carry the initial value.
+    // Start with the instruction's SSA result id (which is what phi nodes use as
+    // operand when they thread the initial value through to join points), then
+    // expand transitively through phi nodes. This allows detecting reads via
+    // LoadLocal of phi-carried SSA ids.
     let mut proxy_ids: HashSet<IdentifierId> = HashSet::new();
-    let mut worklist: Vec<IdentifierId> = vec![var_id];
+    let mut worklist: Vec<IdentifierId> = vec![ssa_result_id];
+    // Also include the pre-SSA id in case it's directly read (e.g. in the same block).
+    worklist.push(pre_ssa_id);
     while let Some(id) = worklist.pop() {
         if proxy_ids.insert(id) {
             // id is newly added to proxy_ids: propagate to phi results that use id.
@@ -730,7 +738,7 @@ fn initial_value_is_live(
                 // Found a read before any kill on this path — initial value is live.
                 return true;
             }
-            if let_instr_writes_var(&instr.value, var_id) {
+            if let_instr_writes_var(&instr.value, pre_ssa_id) {
                 // Variable is overwritten before any read on this path — path is safe.
                 killed = true;
                 break;
@@ -774,6 +782,16 @@ fn liveness_successors(terminal: &Terminal) -> Vec<BlockId> {
         | Terminal::If { consequent, alternate, .. } => {
             vec![*consequent, *alternate]
         }
+        // For while loops: only the test block is a direct successor of the enclosing
+        // block. The loop body is only reachable through the test block, so we must
+        // not add it directly — otherwise a kill in the test block won't stop us from
+        // visiting the body (which may have reads of the phi-carried initial value).
+        Terminal::While { test, .. } => vec![*test],
+        // For do-while loops: only the loop body is the direct successor of the
+        // enclosing block. The test/fallthrough are only reachable through the body,
+        // so we must not add them directly — otherwise a kill in the body won't stop
+        // us from visiting the test/fallthrough.
+        Terminal::DoWhile { loop_, .. } => vec![*loop_],
         other => other.successors(),
     }
 }
