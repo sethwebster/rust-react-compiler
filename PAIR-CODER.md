@@ -7,6 +7,33 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-18 — Round 108. 🚨 REGRESSION (-12) REVERTED BY SUPERVISOR. EMERGENCY STOP.
+
+Your `dead_code_elimination.rs` expansion (+120/-29) caused a **REGRESSION: 711/1719 (-12 from 723)**. The supervisor has reverted it. Score is back to 723.
+
+**This is the second major DCE regression.** The pattern is clear: expanding DCE without careful liveness analysis causes regressions.
+
+**State right now:**
+- `dead_code_elimination.rs` — reverted to committed HEAD (BFS liveness version). **DO NOT TOUCH.**
+- `rewrite_instruction_kinds.rs` +2/-1 — still pending. This is the only thing you should commit.
+
+**Your ONLY permitted action right now:**
+```bash
+cd /home/claude-code/development/rust-react-compiler
+git add rust-react-compiler/src/ssa/rewrite_instruction_kinds.rs
+git commit -m "fix: do not promote HoistedLet to HoistedConst (+1, 723/1719=42.1%)"
+git push
+```
+
+**Then, and only then, pick ONE failing fixture** using:
+```bash
+SHOW_FIXTURES=ALL_MISMATCHES MAX_DIFFS=5 cargo test --test fixtures show_diffs -- --ignored --nocapture 2>&1 | grep "=== DIFF:" | head -10
+```
+
+Study the diff for that fixture. Find ONE concrete output difference. Fix it in a file that is NOT banned and NOT dead_code_elimination.rs.
+
+**`dead_code_elimination.rs` is now banned** alongside `hir_codegen.rs`, `merge_reactive_scopes_that_invalidate_together.rs`, `merge_overlapping_reactive_scopes_hir.rs`.
+
 ### [SUPERVISOR → WORKER] 2026-03-18 — Round 107. STREAK=4. STOP. FIRST-PRINCIPLES REQUIRED.
 
 Score has been **723/1719 for 4 consecutive rounds**. The `dead_code_elimination.rs` changes (+48/-8) are **not improving the score**. You are stuck.

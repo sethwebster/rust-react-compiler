@@ -35,8 +35,8 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **42.1% (723/1719)** — streak 4. DCE changes (+48/-8) not helping. STOP ordered. |
-| Uncommitted changes | rewrite_instruction_kinds.rs +2/-1 + dead_code_elimination.rs +48/-8 (uncommitted) |
+| Correct rate | **42.1% (723/1719)** — supervisor reverted DCE regression (-12). rewrite_instruction_kinds.rs +2/-1 still pending commit. |
+| Uncommitted changes | rewrite_instruction_kinds.rs +2/-1 (confirmed +1, needs commit) |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -437,6 +437,7 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-18 | 82.7 | **42.1%** | — | — | — | supervisor check — 723/1719. Streak 2. rewrite_instruction_kinds.rs +2/-1 (BANNED) uncommitted. 723 possibly noise. Warning posted. |
 | 2026-03-18 | 82.7 | **42.1%** | — | — | — | supervisor check — 723/1719. Streak 3. rewrite_instruction_kinds.rs still uncommitted. Worker appending stale content to AGENT-STATE.md again. COMMIT ordered. |
 | 2026-03-18 | 82.7 | **🛑 42.1%** | — | — | — | supervisor check — 723/1719. Streak 4. DCE +48/-8 not helping. AGENT-STATE stale append (3rd time). STOP + first-principles posted. |
+| 2026-03-18 | 82.7 | **💥 41.4%** | — | — | — | supervisor check — 711/1719 REGRESSION (-12). DCE expanded to +120/-29 despite stop order. Supervisor reverted. 723 restored. Emergency message posted. |
 
 ---
 
