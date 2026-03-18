@@ -102,7 +102,9 @@ pub fn codegen_hir_function_parts(hir: &HIRFunction, env: &Environment) -> (Stri
     let mut gen = Codegen::new(hir, env);
     let out = gen.emit();
     // Collect outlined function bodies separately.
-    let outlines: Vec<String> = env.outlined_functions.iter().map(|(_name, decl)| {
+    // The TS compiler emits outlined helpers in reverse source order (last outlined first),
+    // so we reverse here to match expected output.
+    let outlines: Vec<String> = env.outlined_functions.iter().rev().map(|(_name, decl)| {
         let normalized = normalize_fn_body_text(decl);
         let normalized = normalize_jsx_self_closing(&normalized);
         let normalized = normalize_arrow_expr_body(&normalized);
