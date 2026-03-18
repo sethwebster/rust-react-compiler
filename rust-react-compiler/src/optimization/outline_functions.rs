@@ -346,6 +346,14 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
                 // and `(arg: Type)` → `(arg)`.
                 renamed_body = strip_type_annotations(&renamed_body);
 
+                // Pre-normalize inner arrow bodies: convert `=> { return EXPR; }` to `=> EXPR`
+                // for all inner arrows in the body. This prevents a bug in codegen's
+                // normalize_arrow_expr_body which finds the first `=>` in the outlined function
+                // text (which may be an inner arrow) and incorrectly truncates the function body.
+                if !info.is_expr_body {
+                    renamed_body = normalize_single_return_arrows(&renamed_body);
+                }
+
                 // TS-style normalization: convert single destructured params to t0 + explicit
                 // destructuring at top of body. e.g. `({id, name}) => <C />` becomes
                 // `function _temp(t0) { const {id, name} = t0; return <C />; }`
@@ -1100,6 +1108,87 @@ fn outline_inner_arrows_in_source(
         if end <= result.len() && start < end {
             result = format!("{}{}{}", &result[..start], name, &result[end..]);
         }
+    }
+    result
+}
+
+/// Pre-normalize inner arrow functions in a block body: convert each `=> { return EXPR; }`
+/// (single-statement block body with only a return) to `=> EXPR` (expression body).
+/// This prevents a bug in codegen's normalize_arrow_expr_body which incorrectly truncates
+/// outlined function bodies by finding the first `=>` (an inner arrow) instead of the outer one.
+fn normalize_single_return_arrows(text: &str) -> String {
+    let mut result = text.to_string();
+    let mut search_start: usize = 0;
+    loop {
+        let Some(rel_pos) = result[search_start..].find("=>") else { break };
+        let arrow_pos = search_start + rel_pos;
+        let after_arrow_start = arrow_pos + 2;
+        if after_arrow_start >= result.len() { break; }
+
+        // Skip whitespace after `=>` to find what follows
+        let after_arrow = &result[after_arrow_start..];
+        let ws_len = after_arrow.len() - after_arrow.trim_start().len();
+        let brace_pos = after_arrow_start + ws_len;
+
+        if result.as_bytes().get(brace_pos) != Some(&b'{') {
+            search_start = arrow_pos + 2;
+            continue;
+        }
+
+        // Look inside the block: skip past `{` and whitespace
+        let after_brace = &result[brace_pos + 1..];
+        let inner_ws = after_brace.len() - after_brace.trim_start().len();
+        let inner_start = brace_pos + 1 + inner_ws;
+        if !result[inner_start..].starts_with("return ") {
+            search_start = arrow_pos + 2;
+            continue;
+        }
+
+        // Scan from after "return " to find `EXPR;` followed by `}`
+        let ret_expr_start = inner_start + 7; // skip "return "
+        let rest = &result[ret_expr_start..];
+        let chars: Vec<char> = rest.chars().collect();
+        let mut depth = 1i32;
+        let mut semi_idx: Option<usize> = None;
+        let mut close_idx: Option<usize> = None;
+        for (i, &ch) in chars.iter().enumerate() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 { close_idx = Some(i); break; }
+                }
+                ';' if depth == 1 => {
+                    if semi_idx.is_none() { semi_idx = Some(i); }
+                }
+                _ => {}
+            }
+        }
+        let (semi, close) = match (semi_idx, close_idx) {
+            (Some(s), Some(c)) => (s, c),
+            _ => { search_start = arrow_pos + 2; continue; }
+        };
+
+        // Verify only whitespace between `;` and `}`
+        let between: String = chars[semi + 1..close].iter().collect();
+        if !between.trim().is_empty() {
+            search_start = arrow_pos + 2;
+            continue;
+        }
+
+        let expr: String = chars[..semi].iter().collect();
+        let expr = expr.trim().to_string();
+
+        // Compute byte offset of `}` (close) in `result`
+        let close_byte_offset: usize = chars[..=close].iter().map(|c| c.len_utf8()).sum();
+        let replace_end = ret_expr_start + close_byte_offset;
+
+        // Replace `{ return EXPR; }` (from brace_pos to replace_end) with ` EXPR`
+        let replacement = format!(" {}", expr);
+        result.replace_range(brace_pos..replace_end, &replacement);
+
+        // Continue searching from after `=>`
+        search_start = arrow_pos + 2;
     }
     result
 }
