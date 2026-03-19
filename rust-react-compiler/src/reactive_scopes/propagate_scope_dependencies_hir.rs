@@ -802,8 +802,15 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
                         crate::hir::hir::Pattern::Array(ap) => {
                             for elem in &ap.items {
                                 match elem {
-                                    crate::hir::hir::ArrayElement::Place(p) => { reactive_ids.insert(p.identifier); }
-                                    crate::hir::hir::ArrayElement::Spread(s) => { reactive_ids.insert(s.place.identifier); }
+                                    // Only propagate reactivity to elements that infer_reactive_places
+                                    // already marked reactive. This correctly excludes stable
+                                    // dispatchers (useState setters, useReducer dispatchers).
+                                    crate::hir::hir::ArrayElement::Place(p) => {
+                                        if p.reactive { reactive_ids.insert(p.identifier); }
+                                    }
+                                    crate::hir::hir::ArrayElement::Spread(s) => {
+                                        if s.place.reactive { reactive_ids.insert(s.place.identifier); }
+                                    }
                                     crate::hir::hir::ArrayElement::Hole => {}
                                 }
                             }
@@ -811,8 +818,12 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
                         crate::hir::hir::Pattern::Object(op) => {
                             for prop in &op.properties {
                                 match prop {
-                                    crate::hir::hir::ObjectPatternProperty::Property(p) => { reactive_ids.insert(p.place.identifier); }
-                                    crate::hir::hir::ObjectPatternProperty::Spread(s) => { reactive_ids.insert(s.place.identifier); }
+                                    crate::hir::hir::ObjectPatternProperty::Property(p) => {
+                                        if p.place.reactive { reactive_ids.insert(p.place.identifier); }
+                                    }
+                                    crate::hir::hir::ObjectPatternProperty::Spread(s) => {
+                                        if s.place.reactive { reactive_ids.insert(s.place.identifier); }
+                                    }
                                 }
                             }
                         }
