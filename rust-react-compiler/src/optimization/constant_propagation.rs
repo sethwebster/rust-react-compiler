@@ -46,7 +46,16 @@ fn is_truthy(val: &PrimitiveValue) -> bool {
 ///   3. Remove unreachable blocks, prune dead phi operands, re-run phi elimination
 ///   4. Loop until no more branches can be folded
 pub fn constant_propagation(hir: &mut HIRFunction) {
+    // Safety limit: bound the number of outer rounds to the number of blocks + 1.
+    // In theory, each round removes at least one reachable If terminal, so N+1 rounds
+    // suffice for N blocks. The limit guards against any unforeseen infinite-loop bug.
+    let max_rounds = hir.body.blocks.len() + 1;
+    let mut round = 0;
     loop {
+        if round >= max_rounds {
+            break;
+        }
+        round += 1;
         let branches_folded = constant_propagation_round(hir);
         if !branches_folded {
             break;
@@ -61,6 +70,64 @@ pub fn constant_propagation(hir: &mut HIRFunction) {
 /// One round of constant propagation + branch folding.
 /// Returns true if any branches were folded.
 fn constant_propagation_round(hir: &mut HIRFunction) -> bool {
+    // Per-block set of "mutable variable" place identifiers: lvalue.place.identifier of
+    // Let/HoistedLet/Reassign StoreLocals within each block.
+    //
+    // In this SSA representation, StoreLocal.lvalue.place retains the pre-SSA "x_orig"
+    // identifier (never renamed by SSA). If a block has both `let x = y` and `x = 2`,
+    // both StoreLocals share x_orig. A pre-assignment LoadLocal x_orig in the same block
+    // must NOT fold using the lattice value — we use this set to block such LoadLocals.
+    //
+    // PERFORMANCE NOTE: We only track variables in the main lattice when they are assigned
+    // in 2+ distinct blocks (cross_block_mutable_ids). Same-block assignments are handled
+    // by the per-block blocking + local_constants in the rewrite pass. This avoids the
+    // O(N_vars × N_iters) slowdown that would occur if ALL mutable variables were tracked.
+    let mut block_mutable_ids: HashMap<BlockId, HashSet<IdentifierId>> = HashMap::new();
+    // Count blocks per mutable variable to find cross-block assignments.
+    let mut var_block_count: HashMap<IdentifierId, usize> = HashMap::new();
+    let mut var_seen_blocks: HashMap<IdentifierId, BlockId> = HashMap::new();
+    for block in hir.body.blocks.values() {
+        let mut mutable_in_block: HashSet<IdentifierId> = HashSet::new();
+        for instr in &block.instructions {
+            if let InstructionValue::StoreLocal { lvalue, .. } = &instr.value {
+                if matches!(lvalue.kind, InstructionKind::Let | InstructionKind::HoistedLet | InstructionKind::Reassign) {
+                    let id = lvalue.place.identifier;
+                    mutable_in_block.insert(id);
+                    // Track whether this variable appears in multiple blocks.
+                    let first = var_seen_blocks.entry(id).or_insert(block.id);
+                    if *first != block.id {
+                        *var_block_count.entry(id).or_insert(1) += 1;
+                    }
+                }
+            }
+        }
+        if !mutable_in_block.is_empty() {
+            block_mutable_ids.insert(block.id, mutable_in_block);
+        }
+    }
+    // Variables assigned in 2+ distinct blocks — safe to track in the lattice.
+    let cross_block_mutable_ids: HashSet<IdentifierId> = var_block_count
+        .into_iter()
+        .filter(|(_, count)| *count >= 1) // ≥1 additional block beyond the first
+        .map(|(id, _)| id)
+        .collect();
+
+    // Instruction lvalues of all StoreLocals for cross-block mutable variables.
+    // In the React compiler's SSA, some LoadLocals in loop bodies/conditions use the
+    // INIT definition's SSA id (e.g., i_init_ssa) as their place.identifier, bypassing
+    // the phi node. If i_init_ssa = Const(0) in ssa_constants, those LoadLocals would
+    // be incorrectly replaced. Treat these ids like block-mutable vars in the rewrite pass.
+    let mut cross_block_store_lvalues: HashSet<IdentifierId> = HashSet::new();
+    for block in hir.body.blocks.values() {
+        for instr in &block.instructions {
+            if let InstructionValue::StoreLocal { lvalue, .. } = &instr.value {
+                if cross_block_mutable_ids.contains(&lvalue.place.identifier) {
+                    cross_block_store_lvalues.insert(instr.lvalue.identifier);
+                }
+            }
+        }
+    }
+
     let mut lattice: HashMap<IdentifierId, LatticeValue> = HashMap::new();
 
     // Initialize: all Primitive instruction results are constants.
@@ -74,7 +141,15 @@ fn constant_propagation_round(hir: &mut HIRFunction) -> bool {
 
     // Iterate until convergence using lattice-based analysis.
     // This handles cyclic phis from loops correctly.
+    // Safety limit: each variable can transition at most twice (Top→Const→Bottom),
+    // so 2 * num_identifiers + 1 iterations suffice.
+    let max_inner_iters = 2 * (hir.body.blocks.values().map(|b| b.instructions.len() + b.phis.len()).sum::<usize>() + 1);
+    let mut inner_iter = 0;
     loop {
+        if inner_iter >= max_inner_iters {
+            break;
+        }
+        inner_iter += 1;
         let mut changed = false;
 
         // Process phi nodes first.
@@ -82,10 +157,9 @@ fn constant_propagation_round(hir: &mut HIRFunction) -> bool {
             for phi in &block.phis {
                 let mut result = LatticeValue::Top;
                 for (_, operand) in &phi.operands {
-                    let op_val = lattice.get(&operand.identifier)
-                        .cloned()
-                        .unwrap_or(LatticeValue::Top);
-                    result = result.meet(&op_val);
+                    if let Some(v) = lattice.get(&operand.identifier) {
+                        result = result.meet(v);
+                    }
                 }
                 let prev = lattice.get(&phi.place.identifier).cloned().unwrap_or(LatticeValue::Top);
                 if result != prev {
@@ -97,25 +171,54 @@ fn constant_propagation_round(hir: &mut HIRFunction) -> bool {
 
         // Process instructions.
         for block in hir.body.blocks.values() {
+            let block_muts = block_mutable_ids.get(&block.id);
             for instr in &block.instructions {
                 let new_val = match &instr.value {
                     InstructionValue::Primitive { value, .. } => {
                         Some(LatticeValue::Constant(value.clone()))
                     }
                     InstructionValue::LoadLocal { place, .. } => {
-                        lattice.get(&place.identifier).cloned()
+                        // Block folding if x_orig is mutated IN THIS BLOCK, or if
+                        // the place is a cross-block StoreLocal lvalue. In the React
+                        // compiler's SSA, loop-body LoadLocals may use the init def
+                        // SSA id (e.g., i_init_ssa from `let i=0`) as their place
+                        // rather than the phi result. Returning its lattice value would
+                        // propagate Const(0) into dependent instructions (BinaryExpr, etc.)
+                        // and cause incorrect folding of loop variables in all iterations.
+                        let mutable_in_this_block = block_muts
+                            .map(|m| m.contains(&place.identifier))
+                            .unwrap_or(false);
+                        if mutable_in_this_block || cross_block_store_lvalues.contains(&place.identifier) {
+                            None
+                        } else {
+                            lattice.get(&place.identifier).cloned()
+                        }
                     }
                     InstructionValue::StoreLocal { lvalue, value, .. } => {
                         let is_const = lvalue.kind == InstructionKind::Const
                             || lvalue.kind == InstructionKind::HoistedConst;
+                        // Track in lattice: Const declarations (baseline) PLUS mutable
+                        // variables assigned in 2+ blocks (cross-block constant propagation).
+                        // Cross-block tracking enables phi.js-style folding: when
+                        // eliminate_redundant_phi removes a trivial phi (both branches assign
+                        // x_orig to the same constant), LoadLocals in the join block use x_orig
+                        // directly. Without cross-block tracking, lattice[x_orig] is never set
+                        // and the LoadLocal can't fold.
+                        let is_cross_block = cross_block_mutable_ids.contains(&lvalue.place.identifier);
                         let val = lattice.get(&value.identifier).cloned();
-                        // For const declarations, also track the named variable
-                        // (lvalue.place.identifier) in the lattice for cross-block
-                        // propagation. Let/Reassign variables share the same pre-SSA
-                        // identifier across multiple definitions, so tracking them
-                        // would cause collisions.
-                        if is_const {
-                            if let Some(v) = &val {
+                        if is_const || is_cross_block {
+                            // For cross-block mutable vars: if the source is unknown (val=None),
+                            // treat it as Bottom — any non-constant assignment forces the variable
+                            // to Bottom. Otherwise x_orig stays Const from an earlier assignment
+                            // even when later assigned a non-constant value.
+                            // For const declarations: only update when source is known (they are
+                            // assigned once, so Top stays Top until the source resolves).
+                            let effective = if is_cross_block {
+                                Some(val.clone().unwrap_or(LatticeValue::Bottom))
+                            } else {
+                                val.clone()
+                            };
+                            if let Some(v) = &effective {
                                 let prev = lattice.get(&lvalue.place.identifier)
                                     .cloned().unwrap_or(LatticeValue::Top);
                                 let new = prev.meet(v);
@@ -124,16 +227,29 @@ fn constant_propagation_round(hir: &mut HIRFunction) -> bool {
                                     changed = true;
                                 }
                             }
+                            // For cross-block mutable vars, also return Bottom when source
+                            // is unknown. This ensures the instruction's SSA lvalue is set
+                            // to Bottom in the lattice (not Top), so phi nodes that reference
+                            // this lvalue correctly resolve to Bottom rather than Const.
+                            if is_cross_block { effective } else { val }
+                        } else {
+                            None
                         }
-                        // For const declarations, also return the value for the
-                        // instruction's own lvalue (the SSA temp). This allows
-                        // phi nodes that reference the StoreLocal's lvalue to
-                        // resolve to the constant value.
-                        // Non-const StoreLocals are not tracked because their SSA
-                        // temps feed into loop phis and cause premature folding
-                        // (the lattice resolves phi(Const, Top) = Const before
-                        // the back-edge value is computed).
-                        if is_const { val } else { None }
+                    }
+                    // PostfixUpdate/PrefixUpdate (`i++`, `++i`, etc.) produce a
+                    // new value that depends on the current variable value. Mark the
+                    // updated variable (lvalue.identifier) as Bottom so that any phi
+                    // node in the loop header (which has the update as a back-edge
+                    // operand) correctly resolves to Bottom rather than the init constant.
+                    InstructionValue::PostfixUpdate { lvalue, .. }
+                    | InstructionValue::PrefixUpdate { lvalue, .. } => {
+                        let prev = lattice.get(&lvalue.identifier)
+                            .cloned().unwrap_or(LatticeValue::Top);
+                        if prev != LatticeValue::Bottom {
+                            lattice.insert(lvalue.identifier, LatticeValue::Bottom);
+                            changed = true;
+                        }
+                        Some(LatticeValue::Bottom)
                     }
                     InstructionValue::UnaryExpression { value, operator, .. } => {
                         match lattice.get(&value.identifier) {
@@ -193,6 +309,12 @@ fn constant_propagation_round(hir: &mut HIRFunction) -> bool {
         })
         .collect();
 
+    // Note: we do NOT globally remove mutable variable ids from ssa_constants here.
+    // The rewrite pass handles per-block blocking: for blocks where x_orig is also mutated,
+    // the LoadLocal only uses local_constants (not ssa_constants), preserving sequential order.
+    // For blocks where x_orig is only read (e.g. join block after if/else), ssa_constants IS
+    // used so the cross-block constant value propagates correctly.
+
     // Collect identifiers captured by closures.
     let mut closure_captured_ids: std::collections::HashSet<IdentifierId> = std::collections::HashSet::new();
     for block in hir.body.blocks.values() {
@@ -209,17 +331,32 @@ fn constant_propagation_round(hir: &mut HIRFunction) -> bool {
 
     // Rewrite pass: substitute constants into instructions.
     // Uses ssa_constants (cross-block) + local_constants (per-block, for let vars).
-    // Must update ssa_constants as we replace instructions, so that downstream
-    // instructions in the same block can see the newly produced constants.
+    // For blocks where x_orig is also mutated (StoreLocal Reassign/Let), we skip ssa_constants
+    // for that identifier and rely on local_constants (which respects sequential ordering).
+    // For blocks where x_orig is only read, ssa_constants provides the cross-block value.
+    let empty_muts: HashSet<IdentifierId> = HashSet::new();
     for block in hir.body.blocks.values_mut() {
+        let block_muts = block_mutable_ids.get(&block.id).unwrap_or(&empty_muts);
         let mut local_constants: HashMap<IdentifierId, PrimitiveValue> = HashMap::new();
 
         for instr in &mut block.instructions {
             // Replace LoadLocal with Primitive if the source is a known constant.
             if let InstructionValue::LoadLocal { place, loc } = &instr.value {
-                let val = ssa_constants.get(&place.identifier)
-                    .or_else(|| local_constants.get(&place.identifier))
-                    .cloned();
+                // For mutable vars in this block, skip ssa_constants to preserve ordering.
+                // Also skip ssa_constants for cross-block StoreLocal lvalues: in the React
+                // compiler's SSA, loop-body LoadLocals may use the init def's SSA id
+                // (e.g., i_init_ssa) as their place instead of the phi result. Allowing
+                // ssa_constants to replace those would fold loop variables to their init
+                // constant value in all iterations, not just the first.
+                let val = if block_muts.contains(&place.identifier)
+                    || cross_block_store_lvalues.contains(&place.identifier)
+                {
+                    local_constants.get(&place.identifier).cloned()
+                } else {
+                    ssa_constants.get(&place.identifier)
+                        .or_else(|| local_constants.get(&place.identifier))
+                        .cloned()
+                };
                 if let Some(val) = val {
                     let loc = loc.clone();
                     instr.value = InstructionValue::Primitive { value: val.clone(), loc };
