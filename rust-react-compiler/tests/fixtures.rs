@@ -3574,9 +3574,12 @@ fn show_diffs_impl() {
 #[test]
 #[ignore]
 fn run_subset_fixtures() {
+    let limit = std::env::var("SUBSET_LIMIT").ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(300);
     let result = std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
-        .spawn(|| run_all_fixtures_impl_subset(300))
+        .spawn(move || run_all_fixtures_impl_subset(limit))
         .expect("spawn")
         .join()
         .expect("join");
@@ -3609,9 +3612,13 @@ fn run_all_fixtures_impl_subset(limit: usize) {
 
     let paths = collect_fixture_paths(&dir);
 
+    let verbose = std::env::var("SUBSET_VERBOSE").is_ok();
     for path in paths.iter().take(limit) {
         total += 1;
         let expect_error = is_error_fixture(path);
+        if verbose {
+            eprintln!("[FIXTURE {}] {}", total, path.display());
+        }
         if let Ok(src) = std::fs::read_to_string(path) {
             let first = src.lines().next().unwrap_or("");
             if first.contains("@flow") {

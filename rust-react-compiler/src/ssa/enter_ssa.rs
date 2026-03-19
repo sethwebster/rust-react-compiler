@@ -706,10 +706,30 @@ pub fn enter_ssa_with_env(hir: &mut HIRFunction, env: Option<&mut Environment>) 
 // ---------------------------------------------------------------------------
 
 fn fix_predecessors(hir: &mut HIR) {
+    // First, find all blocks reachable from the entry using real control-flow edges.
+    // This prevents dead/unreachable blocks (e.g. the continuation after a return inside
+    // a for-loop body) from contributing phantom predecessor edges to live blocks —
+    // which would otherwise cause SSA to create non-trivial phis for loop variables
+    // even when the loop body always returns.
+    let mut reachable: HashSet<BlockId> = HashSet::new();
+    let mut queue = vec![hir.entry];
+    while let Some(id) = queue.pop() {
+        if reachable.insert(id) {
+            if let Some(block) = hir.blocks.get(&id) {
+                for succ in block.terminal.real_successors() {
+                    queue.push(succ);
+                }
+            }
+        }
+    }
+
     let mut preds: HashMap<BlockId, HashSet<BlockId>> = HashMap::new();
 
     for (&id, block) in &hir.blocks {
-        for succ in block.terminal.successors() {
+        if !reachable.contains(&id) {
+            continue; // skip unreachable blocks — their edges are not real control flow
+        }
+        for succ in block.terminal.real_successors() {
             preds.entry(succ).or_default().insert(id);
         }
     }

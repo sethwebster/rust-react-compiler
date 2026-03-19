@@ -1,7 +1,7 @@
 #![allow(unused_imports, unused_variables, dead_code)]
 
 use std::collections::HashSet;
-use crate::hir::hir::{DeclarationId, HIRFunction, IdentifierId, InstructionKind, InstructionValue};
+use crate::hir::hir::{BlockId, DeclarationId, HIRFunction, IdentifierId, InstructionKind, InstructionValue};
 use crate::hir::environment::Environment;
 use crate::hir::hir::Place;
 
@@ -37,7 +37,25 @@ pub fn rewrite_instruction_kinds_based_on_reassignment(hir: &mut HIRFunction, en
                 .map(|i| i.declaration_id)
                 .unwrap_or_else(|| DeclarationId(id.0))
         };
+        // Only visit reachable blocks: dead blocks (e.g. the continuation after a
+        // return inside a for-loop body) should not contribute reassignment markers.
+        // This allows loop-init variables like `let i = 0` to be promoted to `const`
+        // when the loop update (e.g. `i++`) is unreachable.
+        let mut reachable: HashSet<BlockId> = HashSet::new();
+        let mut queue = vec![func.body.entry];
+        while let Some(id) = queue.pop() {
+            if reachable.insert(id) {
+                if let Some(block) = func.body.blocks.get(&id) {
+                    for succ in block.terminal.real_successors() {
+                        queue.push(succ);
+                    }
+                }
+            }
+        }
         for block in func.body.blocks.values() {
+            if !reachable.contains(&block.id) {
+                continue;
+            }
             for instr in &block.instructions {
                 match &instr.value {
                     InstructionValue::StoreLocal { lvalue, .. } => {

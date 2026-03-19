@@ -750,6 +750,11 @@ impl Terminal {
             }
             Terminal::For { test, update, loop_, fallthrough, .. } => {
                 // `init` == the block containing this terminal; omit to avoid self-predecessor loop.
+                // Note: loop_ and update are NOT direct control-flow successors of init —
+                // loop_ is reachable via test block's Branch, and update via the loop body's
+                // continuation Goto. We include them here for passes (like codegen) that need
+                // to know the full set of blocks "owned" by this terminal. For SSA/reachability
+                // use real_successors() instead.
                 let mut succs = vec![*test, *loop_, *fallthrough];
                 if let Some(u) = update { succs.push(*u); }
                 succs
@@ -782,6 +787,17 @@ impl Terminal {
             | Terminal::PrunedScope { block, fallthrough, .. } => {
                 vec![*block, *fallthrough]
             }
+        }
+    }
+
+    /// Returns the actual control-flow successor block IDs for reachability/SSA purposes.
+    /// Unlike `successors()`, this excludes blocks that are owned by a terminal but not
+    /// directly jumped to — specifically, `Terminal::For` only directly jumps to `test`
+    /// and `fallthrough`; `loop_` and `update` are reachable via internal edges.
+    pub fn real_successors(&self) -> Vec<BlockId> {
+        match self {
+            Terminal::For { test, fallthrough, .. } => vec![*test, *fallthrough],
+            other => other.successors(),
         }
     }
 }

@@ -282,6 +282,11 @@ fn remove_dead_instructions(hir: &mut HIRFunction, env: Option<&Environment>) {
     // Collect uses from terminals and instructions in all reachable blocks.
     // Also collect for-loop update block identifiers separately (below).
     let mut for_update_blocks: Vec<BlockId> = Vec::new();
+    // For-loop init blocks: blocks whose terminal is Terminal::For.
+    // StoreLocals in init blocks (e.g. `const i = 0`) must be preserved even
+    // when the loop variable is substituted away by CP — codegen needs them to
+    // emit `for (const i = 0; ...)` correctly.
+    let mut for_init_block_ids: HashSet<BlockId> = HashSet::new();
     for block in hir.body.blocks.values() {
         collect_terminal_uses(&block.terminal, &mut used);
         // For-loop update blocks must survive DCE — the update expression
@@ -289,6 +294,9 @@ fn remove_dead_instructions(hir: &mut HIRFunction, env: Option<&Environment>) {
         // variable doesn't escape.
         if let Terminal::For { update: Some(ubid), .. } = &block.terminal {
             for_update_blocks.push(*ubid);
+        }
+        if matches!(&block.terminal, Terminal::For { .. }) {
+            for_init_block_ids.insert(block.id);
         }
         for instr in &block.instructions {
             collect_instruction_uses(&instr.value, &mut used);
@@ -431,8 +439,14 @@ fn remove_dead_instructions(hir: &mut HIRFunction, env: Option<&Environment>) {
     // captured by a closure, AND never consumed as a phi operand is dead
     // (the write is truly unobservable).
     for block in hir.body.blocks.values_mut() {
+        let is_for_init_block = for_init_block_ids.contains(&block.id);
         block.instructions.retain(|instr| {
             if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
+                // Preserve for-loop init declarations even when CP has substituted the variable:
+                // codegen needs `const i = 0` in `for (const i = 0; ...)` even if `i` is unused.
+                if is_for_init_block && lvalue.kind != InstructionKind::Reassign {
+                    return true;
+                }
                 if !loaded_vars.contains(&lvalue.place.identifier)
                     && !captured_vars.contains(&lvalue.place.identifier)
                     && !used.contains(&lvalue.place.identifier)
