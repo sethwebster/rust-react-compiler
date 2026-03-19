@@ -330,6 +330,13 @@ fn resolve_dep_path_inner(
                         return None;
                     }
                 }
+                // Primitive literals are constants — they never change between renders.
+                // They should never appear as scope dependencies. Without this case,
+                // primitives external to a scope fall through to the "return Some(place_id)"
+                // catch-all and incorrectly become deps (e.g., literal `1` in `[1, 2, source]`).
+                InstructionValue::Primitive { .. }
+                | InstructionValue::JsxText { .. }
+                | InstructionValue::RegExpLiteral { .. } => return None,
                 // Allocations (Object, Array) create new values every render.
                 // Trace through to their first resolvable operand so the dep is
                 // the reactive INPUT, not the allocation itself.
