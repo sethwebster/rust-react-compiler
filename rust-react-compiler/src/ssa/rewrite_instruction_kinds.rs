@@ -1,6 +1,6 @@
 #![allow(unused_imports, unused_variables, dead_code)]
 
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use crate::hir::hir::{BlockId, DeclarationId, HIRFunction, IdentifierId, InstructionKind, InstructionValue};
 use crate::hir::environment::Environment;
 use crate::hir::hir::Place;
@@ -17,7 +17,7 @@ use crate::hir::hir::Place;
 ///
 /// For nested function expressions whose bodies are stubs (original_source
 /// passthrough), we use source-text analysis to detect reassignments.
-pub fn rewrite_instruction_kinds_based_on_reassignment(hir: &mut HIRFunction, env: &Environment) {
+pub fn rewrite_instruction_kinds_based_on_reassignment(hir: &mut HIRFunction, env: &mut Environment) {
     let mut reassigned_decls: HashSet<DeclarationId> = HashSet::new();
 
     let decl_id = |id: IdentifierId| -> DeclarationId {
@@ -99,15 +99,225 @@ pub fn rewrite_instruction_kinds_based_on_reassignment(hir: &mut HIRFunction, en
 
     collect_reassigned_decls(hir, env, &mut reassigned_decls);
 
+    // --- Detect forward-captured Let declarations ---
+    // A variable is "forward-captured" if a FunctionExpression/ObjectMethod at
+    // instruction index i captures a context var whose Let declaration is at
+    // index j > i in the same block. These must stay `let` (not `const`) because
+    // the TS compiler preserves them as `let` for TDZ correctness.
+    let mut forward_captured_decls: HashSet<DeclarationId> = HashSet::new();
+    for block in hir.body.blocks.values() {
+        // Map declaration_id → instruction index in this block for Let-kind decls.
+        let mut let_decl_pos: HashMap<DeclarationId, usize> = HashMap::new();
+        for (idx, instr) in block.instructions.iter().enumerate() {
+            match &instr.value {
+                InstructionValue::StoreLocal { lvalue, .. }
+                | InstructionValue::DeclareLocal { lvalue, .. } => {
+                    if lvalue.kind == InstructionKind::Let {
+                        let d = env.get_identifier(lvalue.place.identifier)
+                            .map(|i| i.declaration_id)
+                            .unwrap_or_else(|| DeclarationId(lvalue.place.identifier.0));
+                        let_decl_pos.insert(d, idx);
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Check each FunctionExpression/ObjectMethod: context vars declared
+        // later in the same block are forward-captured.
+        for (idx, instr) in block.instructions.iter().enumerate() {
+            let lowered_func = match &instr.value {
+                InstructionValue::FunctionExpression { lowered_func, .. }
+                | InstructionValue::ObjectMethod { lowered_func, .. } => Some(lowered_func),
+                _ => None,
+            };
+            if let Some(lf) = lowered_func {
+                for ctx_place in &lf.func.context {
+                    let d = env.get_identifier(ctx_place.identifier)
+                        .map(|i| i.declaration_id)
+                        .unwrap_or_else(|| DeclarationId(ctx_place.identifier.0));
+                    if let Some(&decl_idx) = let_decl_pos.get(&d) {
+                        if decl_idx > idx {
+                            forward_captured_decls.insert(d);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Second sub-pass: any `let` variable declared in this block AFTER a
+        // `let`-assigned FunctionExpression (i.e. `let foo = () => {...}`) stays `let`.
+        // This catches same-scope forward refs: when foo is declared with `let` and later
+        // bar is declared with `let`, foo's body may reference bar even if bar is not in
+        // foo's context (stub body). Only track FEs whose own StoreLocal has kind=Let,
+        // because `const fn` declarations cannot cause forward-capture issues.
+        //
+        // Pattern: FE(foo)→T1, StoreLocal(let,foo,T1), FE(bar)→T2, StoreLocal(let,bar,T2)
+        // For bar's StoreLocal at 3: there's a prior let-FE at 0 (foo), and 0 < 3-1=2
+        // → bar is forward-captured and stays `let`.
+        let mut last_let_fe_pos: Option<usize> = None;
+        for (idx, instr) in block.instructions.iter().enumerate() {
+            match &instr.value {
+                InstructionValue::FunctionExpression { .. }
+                | InstructionValue::ObjectMethod { .. } => {
+                    // Track this FE only if its immediately-following StoreLocal has kind=Let.
+                    let fe_lvalue_id = instr.lvalue.identifier;
+                    let next_is_let_own = block.instructions.get(idx + 1).map_or(false, |next| {
+                        if let InstructionValue::StoreLocal { value, lvalue, .. } = &next.value {
+                            value.identifier == fe_lvalue_id && lvalue.kind == InstructionKind::Let
+                        } else {
+                            false
+                        }
+                    });
+                    if next_is_let_own && last_let_fe_pos.is_none() {
+                        // This is the first `let`-FE in this block.
+                        last_let_fe_pos = Some(idx);
+                    }
+                }
+                InstructionValue::StoreLocal { lvalue, value: sv, .. } => {
+                    if lvalue.kind == InstructionKind::Let {
+                        if let Some(fe_pos) = last_let_fe_pos {
+                            // Check if this StoreLocal directly follows its own FE (at idx-1).
+                            let own_fe_at_prev = idx > 0 && block.instructions.get(idx - 1).map_or(false, |prev| {
+                                matches!(&prev.value,
+                                    InstructionValue::FunctionExpression { .. }
+                                    | InstructionValue::ObjectMethod { .. }
+                                ) && prev.lvalue.identifier == sv.identifier
+                            });
+                            // If there's a let-FE from before idx-1 (not this var's own FE),
+                            // this let var may be forward-captured by that earlier let-FE.
+                            if !own_fe_at_prev || fe_pos < idx.saturating_sub(1) {
+                                let d = env.get_identifier(lvalue.place.identifier)
+                                    .map(|i| i.declaration_id)
+                                    .unwrap_or_else(|| DeclarationId(lvalue.place.identifier.0));
+                                forward_captured_decls.insert(d);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    // Persist newly detected forward-captured decls across pipeline calls.
+    for d in &forward_captured_decls {
+        env.forward_captured_let_decls.insert(*d);
+    }
+    // Also include previously persisted ones from earlier pipeline calls.
+    for d in &env.forward_captured_let_decls {
+        forward_captured_decls.insert(*d);
+    }
+
+    if std::env::var("RC_DEBUG_REWRITE").is_ok() {
+        eprintln!("[rewrite_kinds] reassigned_decls count={}", reassigned_decls.len());
+        eprintln!("[rewrite_kinds] forward_captured_decls count={}", forward_captured_decls.len());
+        for (id, ident) in &env.identifiers {
+            if ident.name.is_some() && forward_captured_decls.contains(&ident.declaration_id) {
+                eprintln!("[rewrite_kinds] forward_captured: {:?} (id={})",
+                    ident.name.as_ref().map(|n| n.value()), id.0);
+            }
+        }
+        // Print named identifiers in reassigned_decls
+        for (id, ident) in &env.identifiers {
+            if ident.name.is_some() && reassigned_decls.contains(&ident.declaration_id) {
+                eprintln!("[rewrite_kinds] reassigned: {:?} (id={})",
+                    ident.name.as_ref().map(|n| n.value()), id.0);
+            }
+        }
+    }
+
     // --- Pass 2: tighten declaration kinds for non-reassigned variables ---
     for block in hir.body.blocks.values_mut() {
         for instr in &mut block.instructions {
             match &mut instr.value {
                 InstructionValue::StoreLocal { lvalue, .. }
                 | InstructionValue::DeclareLocal { lvalue, .. } => {
-                    tighten_instruction_kind(lvalue, &reassigned_decls, env);
+                    let was_let = lvalue.kind == InstructionKind::Let;
+                    tighten_instruction_kind(lvalue, &reassigned_decls, &forward_captured_decls, env);
+                    // Record if we promoted Let→Const (used later by rewrite_scope_decls_as_let).
+                    if was_let && lvalue.kind == InstructionKind::Const {
+                        let decl = env.get_identifier(lvalue.place.identifier)
+                            .map(|i| i.declaration_id)
+                            .unwrap_or_else(|| DeclarationId(lvalue.place.identifier.0));
+                        env.originally_let_decls.insert(decl);
+                    }
                 }
                 _ => {}
+            }
+        }
+    }
+}
+
+/// After reactive scope inference and merging, revert `Const` → `Let` for
+/// variables that need the named-var pattern in codegen. Two cases:
+/// 1. Scope declarations that were originally `let` in the source — these emit
+///    as `let x = expr` inside the scope body (preserving the original keyword).
+/// 2. Named aliases of FunctionExpression scope outputs that were originally `let`
+///    (`const y = tN` → `let y = tN`) — these need `is_let_kind=true` in
+///    analyze_scope so skip_set is empty and intra-scope stores stay in body_lines.
+pub fn rewrite_scope_decls_as_let(hir: &mut HIRFunction, env: &Environment) {
+    if std::env::var("RC_DEBUG_REWRITE").is_ok() {
+        eprintln!("[rewrite_scope_decls_as_let] scopes={} originally_let_decls={}",
+            env.scopes.len(), env.originally_let_decls.len());
+    }
+    if env.scopes.is_empty() || env.originally_let_decls.is_empty() {
+        return;
+    }
+
+    // Build a set of IdentifierIds produced by FunctionExpression/ObjectMethod instructions.
+    let mut fn_expr_output_ids: HashSet<u32> = HashSet::new();
+    for block in hir.body.blocks.values() {
+        for instr in &block.instructions {
+            if matches!(&instr.value,
+                InstructionValue::FunctionExpression { .. } | InstructionValue::ObjectMethod { .. }
+            ) {
+                fn_expr_output_ids.insert(instr.lvalue.identifier.0);
+            }
+        }
+    }
+
+    for block in hir.body.blocks.values_mut() {
+        for instr in &mut block.instructions {
+            if let InstructionValue::StoreLocal { lvalue, value, .. } = &mut instr.value {
+                if lvalue.kind != InstructionKind::Const {
+                    continue;
+                }
+                let lvalue_decl = env.get_identifier(lvalue.place.identifier)
+                    .map(|i| i.declaration_id)
+                    .unwrap_or_else(|| DeclarationId(lvalue.place.identifier.0));
+                let was_originally_let = env.originally_let_decls.contains(&lvalue_decl);
+                if !was_originally_let {
+                    continue; // Never change variables that were originally const.
+                }
+
+                // Revert `const y = tN` alias where tN is a FunctionExpression scope
+                // output. Revert to Let so analyze_scope treats y as a named var
+                // (skip_set empty → no intra-scope stores spill to post_scope_lines).
+                let lvalue_is_named = env.get_identifier(lvalue.place.identifier)
+                    .and_then(|i| i.name.as_ref())
+                    .is_some();
+                // Only revert `const y = fn_temp` → `let y` when y is also in
+                // scope.reassignments for the same scope. This ensures we only
+                // apply the named-var fix for variables the TS compiler also
+                // treats as reassigned (e.g. `let y; y = fn` pattern), not for
+                // simple single-assignment fn aliases like `const x = function(){}`.
+                let value_is_fn_scope_output = lvalue_is_named
+                    && fn_expr_output_ids.contains(&value.identifier.0)
+                    && env.scopes.values().any(|s|
+                        s.declarations.contains_key(&value.identifier)
+                        && s.reassignments.contains(&lvalue.place.identifier)
+                    );
+
+                if value_is_fn_scope_output {
+                    if std::env::var("RC_DEBUG_REWRITE").is_ok() {
+                        let name = env.get_identifier(lvalue.place.identifier)
+                            .and_then(|i| i.name.as_ref())
+                            .map(|n| n.value().to_string())
+                            .unwrap_or_else(|| format!("id={}", lvalue.place.identifier.0));
+                        eprintln!("[rewrite_scope_decls_as_let] reverting const→let for {:?} (id={})",
+                            name, lvalue.place.identifier.0);
+                    }
+                    lvalue.kind = InstructionKind::Let;
+                }
             }
         }
     }
@@ -220,17 +430,19 @@ pub fn find_reassigned_context_vars_from_source(
     reassigned
 }
 
+
 /// Upgrade a `Let` → `Const` or `HoistedLet` → `HoistedConst` when the
 /// identifier is never reassigned (matched by declaration_id).
 fn tighten_instruction_kind(
     lvalue: &mut crate::hir::hir::LValue,
     reassigned_decls: &HashSet<DeclarationId>,
+    forward_captured_decls: &HashSet<DeclarationId>,
     env: &Environment,
 ) {
     let decl = env.get_identifier(lvalue.place.identifier)
         .map(|i| i.declaration_id)
         .unwrap_or_else(|| DeclarationId(lvalue.place.identifier.0));
-    if reassigned_decls.contains(&decl) {
+    if reassigned_decls.contains(&decl) || forward_captured_decls.contains(&decl) {
         return;
     }
     lvalue.kind = match lvalue.kind {

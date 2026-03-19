@@ -23,7 +23,7 @@ use crate::optimization::{
 use crate::ssa::{
     enter_ssa::{enter_ssa_with_env},
     eliminate_redundant_phi::eliminate_redundant_phi,
-    rewrite_instruction_kinds::rewrite_instruction_kinds_based_on_reassignment,
+    rewrite_instruction_kinds::{rewrite_instruction_kinds_based_on_reassignment, rewrite_scope_decls_as_let},
 };
 use crate::inference::{
     analyse_functions::analyse_functions,
@@ -873,6 +873,11 @@ pub fn run_with_environment(
     prune_unused_scopes(hir, env);
     prune_unused_labels(hir);
 
+    // Revert Const→Let for reactive scope output variables. These must be `let`
+    // so that codegen's `is_let_kind` path correctly treats them as named vars
+    // (prevents intra-scope stores from being emitted outside the scope body).
+    rewrite_scope_decls_as_let(hir, env);
+
     // --- Phase: Reactive function construction ---
     build_reactive_function(hir, env);
 
@@ -887,6 +892,24 @@ pub fn run_with_environment(
 
     if env.has_errors() {
         return Err(env.aggregate_errors());
+    }
+
+    // Debug: print final scope assignments before codegen
+    if std::env::var("RC_DEBUG_FINAL").is_ok() {
+        for (id, ident) in &env.identifiers {
+            if let Some(ref name) = ident.name {
+                eprintln!("[final_ident] id={} name={:?} scope={:?} range={:?}",
+                    id.0, name.value(), ident.scope, ident.mutable_range);
+            } else {
+                eprintln!("[final_ident] id={} (unnamed) scope={:?} range={:?}",
+                    id.0, ident.scope, ident.mutable_range);
+            }
+        }
+        for (sid, scope) in &env.scopes {
+            eprintln!("[final_scope] id={:?} range={:?} decls={:?}",
+                sid, scope.range,
+                scope.declarations.keys().map(|k| k.0).collect::<Vec<_>>());
+        }
     }
 
     let js = crate::codegen::hir_codegen::codegen_hir_function(hir, env);

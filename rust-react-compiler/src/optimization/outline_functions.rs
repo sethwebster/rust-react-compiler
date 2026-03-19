@@ -150,6 +150,10 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
 
     let mut temp_counter = 0usize;
 
+    // Deduplication map: canonical signature → assigned temp name.
+    // If two outlined functions have identical params + body, they share a name.
+    let mut outlined_dedup: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
     // If @enableNameAnonymousFunctions is set, build a map from FunctionExpression
     // lvalue identifier id → the named variable it flows into (via StoreLocal).
     // This lets us generate meaningful names like `_ComponentOnClick` instead of `_temp`.
@@ -371,6 +375,14 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
 
                 // Build the function declaration.
                 let params_str = final_params_for_decl.join(", ");
+
+                // Deduplication: if an identical function was already outlined, reuse its name.
+                let sig = format!("{}|{}|{}", params_str, destructuring_prefix, renamed_body);
+                if let Some(existing_name) = outlined_dedup.get(&sig) {
+                    *name_hint = Some(existing_name.clone());
+                    lowered_func.func.context.clear();
+                    continue;
+                }
                 // For arrow functions with expression bodies, strip outer parens from the
                 // body text before wrapping in `return ...`. An arrow like `(x) => ({...x})`
                 // has body text `({...x})` — the parens are syntactically required in arrow
@@ -419,6 +431,7 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
                 // captures any component-local variables.
                 lowered_func.func.context.clear();
 
+                outlined_dedup.insert(sig, temp_name.clone());
                 env.outlined_functions.push((temp_name, decl));
             }
         }

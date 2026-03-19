@@ -116,6 +116,17 @@ pub struct Environment {
     // Used by codegen to resolve local namespace aliases in JSX:
     // e.g. `const localVar = NS; <localVar.Text>` → `<NS.Text>`.
     pub namespace_import_names: HashSet<String>,
+
+    // DeclarationIds whose StoreLocal was originally `Let` before
+    // rewrite_instruction_kinds_based_on_reassignment changed it to `Const`.
+    // Used by rewrite_scope_decls_as_let to correctly revert scope output aliases.
+    pub originally_let_decls: HashSet<DeclarationId>,
+
+    // DeclarationIds that are forward-captured by closures (i.e., a FunctionExpression
+    // at position i captures a let variable declared at position j > i in the same block).
+    // Persisted so that the second call to rewrite_instruction_kinds after outlining
+    // also suppresses Let→Const promotion for these variables.
+    pub forward_captured_let_decls: HashSet<DeclarationId>,
 }
 
 impl Environment {
@@ -140,6 +151,8 @@ impl Environment {
             module_level_names: HashSet::new(),
             pruned_scope_ranges: Vec::new(),
             namespace_import_names: HashSet::new(),
+            originally_let_decls: HashSet::new(),
+            forward_captured_let_decls: HashSet::new(),
         }
     }
 
