@@ -111,8 +111,17 @@ fn print_instruction_value(val: &InstructionValue, env: &Environment) -> String 
             format!("LoadGlobal {}", print_binding(binding))
         }
         InstructionValue::StoreLocal { lvalue, value, .. } => {
+            let kind_str = match lvalue.kind {
+                InstructionKind::Const => "const ",
+                InstructionKind::Let => "let ",
+                InstructionKind::HoistedConst => "hconst ",
+                InstructionKind::HoistedLet => "hlet ",
+                InstructionKind::Reassign => "",
+                _ => "? ",
+            };
             format!(
-                "StoreLocal {} = {}",
+                "StoreLocal {}{} = {}",
+                kind_str,
                 print_place(&lvalue.place, env),
                 print_place(value, env)
             )

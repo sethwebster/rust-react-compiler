@@ -159,6 +159,11 @@ fn find_disjoint_mutable_values(
     // Used to limit "propagated allocates join" in StoreLocal to only ternary-carried arrays.
     let mut ident_is_ternary: HashSet<IdentifierId> = HashSet::new();
     let mut ident_reactive: HashSet<IdentifierId> = HashSet::new();
+    // Track FunctionExpression temps that are used as callees vs. as non-callee operands.
+    // A true IIFE lambda is ONLY used as a callee (never as an arg, never stored, never returned).
+    // Non-IIFE functions (callbacks, stored fns, etc.) appear as non-callee operands too.
+    let mut fn_used_as_callee: HashSet<IdentifierId> = HashSet::new();
+    let mut fn_used_as_non_callee: HashSet<IdentifierId> = HashSet::new();
     for (_, block) in &hir.body.blocks {
         for instr in &block.instructions {
             if let InstructionValue::CallExpression { callee, .. } = &instr.value {
@@ -181,6 +186,29 @@ fn find_disjoint_mutable_values(
                 if outlined_fn_ids.contains(&value.identifier) {
                     outlined_fn_holder_vars.insert(lvalue.place.identifier);
                 }
+                // StoreLocal value is a non-callee use.
+                fn_used_as_non_callee.insert(value.identifier);
+            }
+            if let InstructionValue::StoreContext { value, .. } = &instr.value {
+                fn_used_as_non_callee.insert(value.identifier);
+            }
+            // Track callee vs. non-callee uses across all instructions.
+            // For CallExpression: callee is a "callee-only" use; args are non-callee uses.
+            // For all other instructions: ALL operands are non-callee uses.
+            if let InstructionValue::CallExpression { callee, args, .. } = &instr.value {
+                fn_used_as_callee.insert(callee.identifier);
+                for arg in args {
+                    let id = match arg {
+                        crate::hir::hir::CallArg::Place(p) => p.identifier,
+                        crate::hir::hir::CallArg::Spread(s) => s.place.identifier,
+                    };
+                    fn_used_as_non_callee.insert(id);
+                }
+            } else {
+                // All other instruction types: all operands are non-callee uses.
+                for op in crate::hir::visitors::each_instruction_value_operand(&instr.value) {
+                    fn_used_as_non_callee.insert(op.identifier);
+                }
             }
             if may_allocate(&instr.value, &global_names) {
                 ident_allocates.insert(instr.lvalue.identifier);
@@ -192,6 +220,10 @@ fn find_disjoint_mutable_values(
             if instr.lvalue.reactive {
                 ident_reactive.insert(instr.lvalue.identifier);
             }
+        }
+        // Terminal operands are also non-callee uses (return value, branch test, etc.).
+        for op in crate::hir::visitors::each_terminal_operand(&block.terminal) {
+            fn_used_as_non_callee.insert(op.identifier);
         }
     }
 
@@ -372,7 +404,19 @@ fn find_disjoint_mutable_values(
                 } else {
                     true
                 };
-            if !is_hook_call && !is_dead_result_call && (may_alloc || (lvalue_mutable && lvalue_reactive && !is_transparent_read)) {
+            // IIFE lambda guard: a FunctionExpression that is used ONLY as a callee in a
+            // CallExpression (never as an argument, never stored, never returned) should NOT
+            // get its own reactive scope. In the TS compiler, such temps have
+            // mutableRange.end == instrId+1, so the condition `mutableRange.end > instrId+1`
+            // is false and they are excluded. We replicate this by skipping FunctionExpression
+            // temps that are not reactive, not mutable, appear only as callees and never as
+            // non-callee operands (args, stored values, return values, etc.).
+            let is_iife_lambda = matches!(&instr.value, InstructionValue::FunctionExpression { .. })
+                && !lvalue_mutable
+                && !lvalue_reactive
+                && fn_used_as_callee.contains(&lvalue_id)
+                && !fn_used_as_non_callee.contains(&lvalue_id);
+            if !is_hook_call && !is_dead_result_call && !is_iife_lambda && (may_alloc || (lvalue_mutable && lvalue_reactive && !is_transparent_read)) {
                 operands.push(lvalue_id);
             }
 
