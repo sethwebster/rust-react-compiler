@@ -1249,13 +1249,16 @@ fn outline_inner_arrows_in_source(
 
     if to_outline.is_empty() { return src.to_string(); }
 
-    to_outline.sort_by(|a, b| b.0.cmp(&a.0));
+    // Sort ascending by start position to assign names in source-forward order
+    // (matching TS compiler behavior: first arrow in source gets lowest _temp index).
+    to_outline.sort_by(|a, b| a.0.cmp(&b.0));
     let mut seen: HashSet<usize> = HashSet::new();
-    let mut result = src.to_string();
 
-    for (start, end, arrow_src) in to_outline {
-        if !seen.insert(start) { continue; }
-        let Some(info) = parse_arrow_info(&arrow_src) else { continue };
+    // Pass 1: assign names in forward order, emit outlined_functions.
+    let mut named: Vec<(usize, usize, String)> = Vec::new();
+    for (start, end, arrow_src) in &to_outline {
+        if !seen.insert(*start) { continue; }
+        let Some(info) = parse_arrow_info(arrow_src) else { continue };
         let final_params: Vec<String> = info.param_names.iter().map(|p| {
             if outer_param_names.contains(p) || outer_local_names.contains(p.as_str()) { format!("{}_0", p) } else { p.clone() }
         }).collect();
@@ -1270,20 +1273,27 @@ fn outline_inner_arrows_in_source(
         for (orig, ren) in info.param_names.iter().zip(final_params.iter()) {
             if orig != ren { body = rename_word(&body, orig, ren); }
         }
-        // Babel's generateUidIdentifier skips "_temp1" → sequence is _temp, _temp2, _temp3, ...
-        let name = if *temp_counter == 0 { "_temp".to_string() } else { format!("_temp{}", *temp_counter + 1) };
-        *temp_counter += 1;
         let ps = final_params.join(", ");
         let rb = if info.is_expr_body && body.starts_with('(') && body.ends_with(')') {
             let inner = &body[1..body.len()-1];
             if inner.chars().fold(0i32, |d,c| match c { '(' => d+1, ')' => d-1, _ => d }) == 0 { inner.to_string() } else { body.clone() }
         } else { body.clone() };
+        // Babel's generateUidIdentifier skips "_temp1" → sequence is _temp, _temp2, _temp3, ...
+        let name = if *temp_counter == 0 { "_temp".to_string() } else { format!("_temp{}", *temp_counter + 1) };
+        *temp_counter += 1;
         let decl = if info.is_expr_body {
             format!("function {}({}) {{\n  return {};\n}}", name, ps, rb)
         } else {
             format!("function {}({}) {}", name, ps, body)
         };
         env.outlined_functions.push((name.clone(), decl));
+        named.push((*start, *end, name));
+    }
+
+    // Pass 2: apply text substitutions in reverse order (to preserve offsets).
+    named.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut result = src.to_string();
+    for (start, end, name) in named {
         if end <= result.len() && start < end {
             result = format!("{}{}{}", &result[..start], name, &result[end..]);
         }
