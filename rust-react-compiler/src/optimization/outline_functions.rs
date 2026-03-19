@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 
 use crate::hir::environment::Environment;
-use crate::hir::hir::{FunctionExpressionType, HIRFunction, InstructionKind, InstructionValue, NonLocalBinding, PrimitiveValue};
+use crate::hir::hir::{FunctionExpressionType, HIRFunction, InstructionKind, InstructionValue, NonLocalBinding, ObjectExpressionProperty, ObjectPropertyType, PrimitiveValue};
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -58,6 +58,24 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
             if let InstructionValue::CallExpression { callee, args, .. } = &instr.value {
                 if args.is_empty() {
                     iife_fn_ids.insert(callee.identifier.0);
+                }
+            }
+        }
+    }
+
+    // Collect FunctionExpression lvalue IDs that are used as method properties in ObjectExpressions.
+    // Method shorthands like `testFn() { ... }` cannot be outlined as top-level functions
+    // (they use method syntax), but their inner pure arrow functions should still be outlined.
+    let mut method_fn_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for (_, block) in &hir.body.blocks {
+        for instr in &block.instructions {
+            if let InstructionValue::ObjectExpression { properties, .. } = &instr.value {
+                for prop in properties {
+                    if let ObjectExpressionProperty::Property(op) = prop {
+                        if matches!(op.type_, ObjectPropertyType::Method) {
+                            method_fn_ids.insert(op.place.identifier.0);
+                        }
+                    }
                 }
             }
         }
@@ -186,6 +204,45 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
             {
                 let src = lowered_func.func.original_source.clone();
                 if src.is_empty() {
+                    continue;
+                }
+
+                // Method shorthands (testFn() { ... }) can't be outlined as top-level functions,
+                // but we should still outline any pure inner arrow functions in their bodies.
+                let is_method = method_fn_ids.contains(&instr.lvalue.identifier.0);
+                if is_method {
+                    // Extract method body (the block after the closing paren of params).
+                    // Wrap as `function NAME(...)` so outline_inner_arrows_in_source can parse it
+                    // as `let _ = function NAME(...) { ... };` (valid JS).
+                    let fn_src = format!("function {}", src);
+                    let method_params = extract_method_params(&src);
+                    let outer_caps: HashSet<String> = lowered_func.func.context.iter()
+                        .filter_map(|p| env.get_identifier(p.identifier)
+                            .and_then(|id| id.name.as_ref())
+                            .map(|n| n.value().to_string()))
+                        .collect();
+                    let mut forbidden: HashSet<String> = outer_caps;
+                    forbidden.extend(method_params.iter().cloned());
+                    forbidden.extend(outer_local_names.iter().cloned());
+                    forbidden.retain(|n| !module_names.contains(n)
+                        && !const_local_to_global.contains_key(n)
+                        && !const_name_to_primitive.contains_key(n));
+                    let patched_fn_src = outline_inner_arrows_in_source(
+                        &fn_src, &method_params, &forbidden,
+                        &outer_local_names, &module_names,
+                        &const_local_to_global, &const_name_to_primitive,
+                        env, &mut temp_counter,
+                    );
+                    if patched_fn_src != fn_src {
+                        // Strip the leading "function " to restore method shorthand syntax.
+                        let prefix = "function ";
+                        let patched_src = if patched_fn_src.starts_with(prefix) {
+                            patched_fn_src[prefix.len()..].to_string()
+                        } else {
+                            patched_fn_src
+                        };
+                        lowered_func.func.original_source = patched_src;
+                    }
                     continue;
                 }
 
@@ -621,6 +678,87 @@ fn parse_function_expr_info(src: &str) -> Option<ArrowInfo> {
         is_expr_body: false, // Regular functions always have block body.
         destructured_params,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Method shorthand helpers
+// ---------------------------------------------------------------------------
+
+/// Extract the body block `{ ... }` from a method shorthand source like `testFn(a, b) { ... }`.
+/// Returns the body text (starting with `{`) or None if not found.
+fn extract_method_body(src: &str) -> Option<String> {
+    let bytes = src.as_bytes();
+    // Find the closing `)` of the param list, then the opening `{` of the body.
+    let mut depth = 0i32;
+    let mut past_params = false;
+    let mut i = 0;
+    // Skip to the first `(`
+    while i < bytes.len() && bytes[i] != b'(' {
+        i += 1;
+    }
+    // Scan through params, tracking paren depth.
+    while i < bytes.len() {
+        if bytes[i] == b'(' {
+            depth += 1;
+        } else if bytes[i] == b')' {
+            depth -= 1;
+            if depth == 0 {
+                past_params = true;
+                i += 1;
+                break;
+            }
+        }
+        i += 1;
+    }
+    if !past_params {
+        return None;
+    }
+    // Skip whitespace to find `{`
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i < bytes.len() && bytes[i] == b'{' {
+        Some(src[i..].to_string())
+    } else {
+        None
+    }
+}
+
+/// Extract parameter names from a method shorthand `name(a, b) { ... }`.
+fn extract_method_params(src: &str) -> Vec<String> {
+    let bytes = src.as_bytes();
+    // Find opening `(`
+    let mut i = 0;
+    while i < bytes.len() && bytes[i] != b'(' {
+        i += 1;
+    }
+    if i >= bytes.len() {
+        return Vec::new();
+    }
+    // Find matching `)`
+    let start = i + 1;
+    let mut depth = 1i32;
+    i += 1;
+    while i < bytes.len() && depth > 0 {
+        if bytes[i] == b'(' { depth += 1; }
+        else if bytes[i] == b')' { depth -= 1; }
+        i += 1;
+    }
+    let end = i - 1;
+    if end <= start {
+        return Vec::new();
+    }
+    let params_text = &src[start..end];
+    // Simple comma-split for identifier params (ignores defaults/destructuring).
+    params_text.split(',')
+        .flat_map(|p| {
+            let trimmed = p.trim();
+            if trimmed.is_empty() { return vec![]; }
+            // Extract just the identifier (no default, no type annotation).
+            let ident: String = trimmed.chars().take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$').collect();
+            if ident.is_empty() { vec![] } else { vec![ident] }
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
