@@ -346,26 +346,6 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
                 // captures in the outlined body (still needed for body rewriting).
                 let free_vars = extract_free_variables(&info.body_text, &info.param_names);
 
-                // Generate a unique name.
-                // With @enableNameAnonymousFunctions, use `_ComponentOnClick` style names
-                // (component name + capitalized variable name). Otherwise `_temp`, `_temp2`, ...
-                // NOTE: Babel's generateUidIdentifier skips "_temp1" → sequence is _temp, _temp2, _temp3, ...
-                let temp_name = if enable_named && !component_name.is_empty() {
-                    if let Some(var_name) = fn_id_to_var_name.get(&instr.lvalue.identifier.0) {
-                        // Capitalize first letter of var name.
-                        let mut cap = var_name.clone();
-                        if let Some(f) = cap.get_mut(0..1) { f.make_ascii_uppercase(); }
-                        format!("_{}{}", component_name, cap)
-                    } else {
-                        if temp_counter == 0 { "_temp".to_string() } else { format!("_temp{}", temp_counter + 1) }
-                    }
-                } else if temp_counter == 0 {
-                    "_temp".to_string()
-                } else {
-                    format!("_temp{}", temp_counter + 1)
-                };
-                temp_counter += 1;
-
                 // Rename params that shadow outer local variables (add _0 suffix).
                 // This matches the TS compiler's behavior of renaming shadowing params.
                 let final_param_names: Vec<String> = info.param_names.iter().map(|p| {
@@ -414,6 +394,54 @@ pub fn outline_functions(hir: &mut HIRFunction, env: &mut Environment) {
                 if !info.is_expr_body {
                     renamed_body = normalize_single_return_arrows(&renamed_body);
                 }
+
+                // Recursively outline any pure inner arrows within this function's body.
+                // This matches the TS compiler's bottom-up outlining behavior.
+                {
+                    let params_joined = final_param_names.join(", ");
+                    let temp_func_src = format!("({}) => {}", params_joined, renamed_body);
+                    let mut forbidden_inner: HashSet<String> = final_param_names.iter().cloned().collect();
+                    forbidden_inner.extend(outer_local_names.iter().cloned());
+                    // Add variables locally declared in the function body — inner arrows that
+                    // capture these would not be pure (they'd capture a local, not a global).
+                    for name in collect_body_declared_names(&renamed_body) {
+                        forbidden_inner.insert(name);
+                    }
+                    forbidden_inner.retain(|n| !module_names.contains(n)
+                        && !const_local_to_global.contains_key(n)
+                        && !const_name_to_primitive.contains_key(n));
+                    let patched = outline_inner_arrows_in_source(
+                        &temp_func_src, &final_param_names, &forbidden_inner,
+                        &outer_local_names, &module_names,
+                        &const_local_to_global, &const_name_to_primitive,
+                        env, &mut temp_counter,
+                    );
+                    if patched != temp_func_src {
+                        let prefix = format!("({}) => ", params_joined);
+                        if patched.starts_with(&prefix) {
+                            renamed_body = patched[prefix.len()..].to_string();
+                        }
+                    }
+                }
+
+                // Generate a unique name after outlining inner arrows (bottom-up ordering).
+                // With @enableNameAnonymousFunctions, use `_ComponentOnClick` style names.
+                // Otherwise `_temp`, `_temp2`, ... (Babel skips "_temp1").
+                let fn_lvalue_id = instr.lvalue.identifier.0;
+                let temp_name = if enable_named && !component_name.is_empty() {
+                    if let Some(var_name) = fn_id_to_var_name.get(&fn_lvalue_id) {
+                        let mut cap = var_name.clone();
+                        if let Some(f) = cap.get_mut(0..1) { f.make_ascii_uppercase(); }
+                        format!("_{}{}", component_name, cap)
+                    } else {
+                        if temp_counter == 0 { "_temp".to_string() } else { format!("_temp{}", temp_counter + 1) }
+                    }
+                } else if temp_counter == 0 {
+                    "_temp".to_string()
+                } else {
+                    format!("_temp{}", temp_counter + 1)
+                };
+                temp_counter += 1;
 
                 // TS-style normalization: convert single destructured params to t0 + explicit
                 // destructuring at top of body. e.g. `({id, name}) => <C />` becomes
@@ -1261,6 +1289,45 @@ fn outline_inner_arrows_in_source(
         }
     }
     result
+}
+
+/// Collect all identifiers declared via `const`/`let`/`var` in a function body text.
+/// Used to build the forbidden set for inner-arrow outlining: inner arrows that capture
+/// locally-declared variables cannot be outlined to top-level `_temp` functions.
+fn collect_body_declared_names(body: &str) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Check for `const `, `let `, or `var ` at word boundary
+        let kw = if body[i..].starts_with("const ") || body[i..].starts_with("const\t") {
+            Some(5usize)
+        } else if body[i..].starts_with("let ") || body[i..].starts_with("let\t") {
+            Some(3)
+        } else if body[i..].starts_with("var ") || body[i..].starts_with("var\t") {
+            Some(3)
+        } else {
+            None
+        };
+        // Only treat as keyword if preceded by a word boundary
+        let at_boundary = i == 0 || {
+            let prev = bytes[i - 1];
+            !prev.is_ascii_alphanumeric() && prev != b'_' && prev != b'$'
+        };
+        if let Some(kw_len) = kw {
+            if at_boundary {
+                let mut j = i + kw_len;
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() { j += 1; }
+                if j < bytes.len() && (bytes[j].is_ascii_alphabetic() || bytes[j] == b'_' || bytes[j] == b'$') {
+                    let start = j;
+                    while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] == b'$') { j += 1; }
+                    names.insert(body[start..j].to_string());
+                }
+            }
+        }
+        i += 1;
+    }
+    names
 }
 
 /// Pre-normalize inner arrow functions in a block body: convert each `=> { return EXPR; }`
