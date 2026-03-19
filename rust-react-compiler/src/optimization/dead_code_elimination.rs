@@ -295,8 +295,8 @@ fn remove_dead_instructions(hir: &mut HIRFunction, env: Option<&Environment>) {
         if let Terminal::For { update: Some(ubid), .. } = &block.terminal {
             for_update_blocks.push(*ubid);
         }
-        if matches!(&block.terminal, Terminal::For { .. }) {
-            for_init_block_ids.insert(block.id);
+        if let Terminal::For { init, .. } = &block.terminal {
+            for_init_block_ids.insert(*init);
         }
         for instr in &block.instructions {
             collect_instruction_uses(&instr.value, &mut used);

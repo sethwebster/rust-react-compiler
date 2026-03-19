@@ -889,7 +889,6 @@ pub fn run_with_environment(
         return Err(env.aggregate_errors());
     }
 
-    // --- Codegen ---
     let js = crate::codegen::hir_codegen::codegen_hir_function(hir, env);
     Ok(CodegenOutput { js, outlines: Vec::new() })
 }
