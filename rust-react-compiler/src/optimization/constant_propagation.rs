@@ -82,6 +82,21 @@ fn constant_propagation_round(hir: &mut HIRFunction) -> bool {
     // in 2+ distinct blocks (cross_block_mutable_ids). Same-block assignments are handled
     // by the per-block blocking + local_constants in the rewrite pass. This avoids the
     // O(N_vars × N_iters) slowdown that would occur if ALL mutable variables were tracked.
+    // Build a mapping from SSA lvalue id → pre-SSA orig id for StoreLocal instructions.
+    // This is needed to connect PostfixUpdate/PrefixUpdate (which use the SSA-renamed id
+    // in their InstructionValue.lvalue) back to the same orig variable as the StoreLocal
+    // (which retains the pre-SSA orig id in lvalue.place.identifier after SSA).
+    let mut ssa_lval_to_orig: HashMap<IdentifierId, IdentifierId> = HashMap::new();
+    for block in hir.body.blocks.values() {
+        for instr in &block.instructions {
+            if let InstructionValue::StoreLocal { lvalue, .. } = &instr.value {
+                if matches!(lvalue.kind, InstructionKind::Let | InstructionKind::HoistedLet | InstructionKind::Reassign) {
+                    ssa_lval_to_orig.insert(instr.lvalue.identifier, lvalue.place.identifier);
+                }
+            }
+        }
+    }
+
     let mut block_mutable_ids: HashMap<BlockId, HashSet<IdentifierId>> = HashMap::new();
     // Count blocks per mutable variable to find cross-block assignments.
     let mut var_block_count: HashMap<IdentifierId, usize> = HashMap::new();
@@ -97,6 +112,23 @@ fn constant_propagation_round(hir: &mut HIRFunction) -> bool {
                     let first = var_seen_blocks.entry(id).or_insert(block.id);
                     if *first != block.id {
                         *var_block_count.entry(id).or_insert(1) += 1;
+                    }
+                }
+            }
+            // PostfixUpdate/PrefixUpdate (`i++`, `--i`, etc.) also mutate their operand.
+            // In the React compiler's SSA, PostfixUpdate.lvalue.identifier (InstructionValue)
+            // holds the SSA-renamed id of the variable (same id as the init StoreLocal's
+            // instr.lvalue.identifier). We use ssa_lval_to_orig to map back to the orig id,
+            // then track it as a cross-block mutation so the init constant isn't incorrectly
+            // propagated into the loop test expression.
+            if let InstructionValue::PostfixUpdate { lvalue, .. }
+               | InstructionValue::PrefixUpdate { lvalue, .. } = &instr.value
+            {
+                if let Some(&orig_id) = ssa_lval_to_orig.get(&lvalue.identifier) {
+                    mutable_in_block.insert(orig_id);
+                    let first = var_seen_blocks.entry(orig_id).or_insert(block.id);
+                    if *first != block.id {
+                        *var_block_count.entry(orig_id).or_insert(1) += 1;
                     }
                 }
             }
@@ -348,7 +380,6 @@ fn constant_propagation_round(hir: &mut HIRFunction) -> bool {
                 }
             }
         }
-
         // Collect all blocks reachable from any loop body (BFS, stopping at loop fallthroughs).
         // Assignments in these blocks might not execute if the loop runs 0 iterations.
         let mut loop_reachable_blocks: HashSet<BlockId> = HashSet::new();
@@ -386,6 +417,13 @@ fn constant_propagation_round(hir: &mut HIRFunction) -> bool {
         }
 
         let mut single_assign_consts: HashMap<IdentifierId, PrimitiveValue> = HashMap::new();
+        // Also track SSA lvalue ids (instr.lvalue.identifier) for single-assignment consts.
+        // After eliminate_redundant_phi, LoadLocals may use the StoreLocal's SSA lvalue id
+        // rather than the original pre-SSA id (lvalue.place.identifier). We need both in
+        // ssa_constants so the rewrite pass can substitute constants into those LoadLocals.
+        // Maps: orig_id → (ssa_lvalue_id, val). Needed to find the right SSA id to remove
+        // when a second assignment of the same orig variable is encountered.
+        let mut single_assign_with_ssa: HashMap<IdentifierId, (IdentifierId, PrimitiveValue)> = HashMap::new();
         let mut multi_assign: HashSet<IdentifierId> = HashSet::new();
         for (bid, block) in &hir.body.blocks {
             // Skip blocks inside loop bodies — assignments there may not execute.
@@ -401,12 +439,16 @@ fn constant_propagation_round(hir: &mut HIRFunction) -> bool {
                         let id = lvalue.place.identifier;
                         if multi_assign.contains(&id) {
                             // Already seen twice — skip
-                        } else if single_assign_consts.contains_key(&id) {
-                            // Second assignment: can't constant-fold cross-block
+                        } else if single_assign_with_ssa.contains_key(&id) {
+                            // Second assignment: can't constant-fold, remove both entries
+                            single_assign_with_ssa.remove(&id);
                             single_assign_consts.remove(&id);
                             multi_assign.insert(id);
                         } else if let Some(val) = ssa_constants.get(&value.identifier).cloned() {
-                            single_assign_consts.insert(id, val);
+                            single_assign_consts.insert(id, val.clone());
+                            // Track SSA lvalue id paired with orig id so we can remove it
+                            // if a second assignment is found.
+                            single_assign_with_ssa.insert(id, (instr.lvalue.identifier, val));
                         }
                         // Non-constant assignment: just don't insert
                     }
@@ -415,6 +457,11 @@ fn constant_propagation_round(hir: &mut HIRFunction) -> bool {
         }
         for (id, val) in single_assign_consts {
             ssa_constants.insert(id, val);
+        }
+        // Also add SSA lvalue ids so the rewrite pass can fold LoadLocals that were
+        // rewritten to the StoreLocal's instruction lvalue (after phi elimination).
+        for (_orig_id, (ssa_id, val)) in single_assign_with_ssa {
+            ssa_constants.insert(ssa_id, val);
         }
     }
 
@@ -515,8 +562,16 @@ fn constant_propagation_round(hir: &mut HIRFunction) -> bool {
             // Only fold If terminals. Branch is used for loop tests and
             // ternaries — folding those corrupts loop/for codegen structure.
             Terminal::If { test, consequent, alternate, id, loc, .. } => {
-                if let Some(LatticeValue::Constant(val)) = lattice.get(&test.identifier) {
-                    let target = if is_truthy(val) { *consequent } else { *alternate };
+                // Check lattice first (from the main lattice analysis), then fall back to
+                // ssa_constants (updated by the rewrite pass above). The rewrite pass may
+                // have folded instructions like BinaryExpression after the main lattice
+                // converged (e.g., when single-assign Let constants propagated through
+                // a comparison), making the folded result available in ssa_constants.
+                let const_val = lattice.get(&test.identifier)
+                    .and_then(|v| if let LatticeValue::Constant(c) = v { Some(c.clone()) } else { None })
+                    .or_else(|| ssa_constants.get(&test.identifier).cloned());
+                if let Some(val) = const_val {
+                    let target = if is_truthy(&val) { *consequent } else { *alternate };
                     Some(Terminal::Goto {
                         block: target,
                         variant: GotoVariant::Break,
