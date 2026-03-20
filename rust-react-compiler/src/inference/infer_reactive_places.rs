@@ -240,6 +240,14 @@ pub fn infer_reactive_places(hir: &mut HIRFunction, env: &Environment) {
                                         if let InstructionValue::StoreContext { lvalue, .. } = &instr.value {
                                             reactive.insert(lvalue.place.identifier);
                                         }
+                                        // MethodCall inside reactive branch mutates the receiver → reactive.
+                                        // e.g., `if (props.cond) { x.push(1); }` makes x reactive.
+                                        // Skip globals (console, Array, Math, etc.) which are never reactive.
+                                        if let InstructionValue::MethodCall { receiver, .. } = &instr.value {
+                                            if !global_ids.contains(&receiver.identifier) {
+                                                reactive.insert(receiver.identifier);
+                                            }
+                                        }
                                     }
                                     for &succ in branch_block.terminal.successors().iter() {
                                         work.push(succ);
@@ -250,7 +258,13 @@ pub fn infer_reactive_places(hir: &mut HIRFunction, env: &Environment) {
                     }
                 }
                 Terminal::Switch { test, cases, fallthrough, .. } => {
-                    if reactive.contains(&test.identifier) {
+                    // Reactive if: switch test is reactive, OR any case label is reactive
+                    // (e.g., `switch (GLOBAL) { case value: ... }` where `value` is reactive).
+                    let switch_reactive = reactive.contains(&test.identifier)
+                        || cases.iter().any(|c| {
+                            c.test.as_ref().map_or(false, |t| reactive.contains(&t.identifier))
+                        });
+                    if switch_reactive {
                         control_reactive_blocks.insert(*fallthrough);
                         // Strategy B for switch cases.
                         for case in cases {
@@ -262,6 +276,11 @@ pub fn infer_reactive_places(hir: &mut HIRFunction, env: &Environment) {
                                     for instr in &branch_block.instructions {
                                         if let InstructionValue::StoreLocal { lvalue, .. } = &instr.value {
                                             reactive.insert(lvalue.place.identifier);
+                                        }
+                                        if let InstructionValue::MethodCall { receiver, .. } = &instr.value {
+                                            if !global_ids.contains(&receiver.identifier) {
+                                                reactive.insert(receiver.identifier);
+                                            }
                                         }
                                     }
                                     for &succ in branch_block.terminal.successors().iter() {
@@ -311,6 +330,11 @@ pub fn infer_reactive_places(hir: &mut HIRFunction, env: &Environment) {
                                     for instr in &branch_block.instructions {
                                         if let InstructionValue::StoreLocal { lvalue, .. } = &instr.value {
                                             reactive.insert(lvalue.place.identifier);
+                                        }
+                                        if let InstructionValue::MethodCall { receiver, .. } = &instr.value {
+                                            if !global_ids.contains(&receiver.identifier) {
+                                                reactive.insert(receiver.identifier);
+                                            }
                                         }
                                     }
                                     for &succ in branch_block.terminal.successors().iter() {
@@ -366,6 +390,11 @@ pub fn infer_reactive_places(hir: &mut HIRFunction, env: &Environment) {
                                     for instr in &branch_block.instructions {
                                         if let InstructionValue::StoreLocal { lvalue, .. } = &instr.value {
                                             reactive.insert(lvalue.place.identifier);
+                                        }
+                                        if let InstructionValue::MethodCall { receiver, .. } = &instr.value {
+                                            if !global_ids.contains(&receiver.identifier) {
+                                                reactive.insert(receiver.identifier);
+                                            }
                                         }
                                     }
                                     for &succ in branch_block.terminal.successors().iter() {
