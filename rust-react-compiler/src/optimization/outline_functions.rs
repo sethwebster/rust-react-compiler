@@ -1250,6 +1250,31 @@ fn outline_inner_arrows_in_source(
         }
     }
 
+    // Collect all variable names declared in the outer body.
+    // Inner arrows that reference these names capture them from the outer scope
+    // and therefore cannot be safely outlined as top-level functions.
+    fn collect_all_declared_in_stmts<'a>(stmts: &[Statement<'a>], out: &mut HashSet<String>) {
+        for stmt in stmts {
+            match stmt {
+                Statement::VariableDeclaration(vd) => {
+                    for decl in &vd.declarations {
+                        let mut names: Vec<String> = Vec::new();
+                        collect_binding_names(&decl.id.kind, &mut names);
+                        out.extend(names);
+                    }
+                }
+                Statement::BlockStatement(b) => collect_all_declared_in_stmts(&b.body, out),
+                Statement::IfStatement(i) => {
+                    collect_all_declared_in_stmts(std::slice::from_ref(&i.consequent), out);
+                    if let Some(alt) = &i.alternate {
+                        collect_all_declared_in_stmts(std::slice::from_ref(alt), out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     let mut to_outline: Vec<(usize, usize, String)> = Vec::new();
     if let Some(stmt) = parsed.program.body.first() {
         if let Statement::VariableDeclaration(vd) = stmt {
@@ -1257,14 +1282,19 @@ fn outline_inner_arrows_in_source(
                 if let Some(init) = &decl.init {
                     match init {
                         Expression::ArrowFunctionExpression(arrow) => {
+                            // Extend forbidden with all locally-declared names in the outer body.
+                            let mut extended_forbidden = forbidden.clone();
+                            collect_all_declared_in_stmts(&arrow.body.statements, &mut extended_forbidden);
                             for s in &arrow.body.statements {
-                                collect_stmts(s, src, prefix_len, forbidden, module_names, const_local_to_global, const_name_to_primitive, &mut to_outline);
+                                collect_stmts(s, src, prefix_len, &extended_forbidden, module_names, const_local_to_global, const_name_to_primitive, &mut to_outline);
                             }
                         }
                         Expression::FunctionExpression(f) => {
                             if let Some(b) = &f.body {
+                                let mut extended_forbidden = forbidden.clone();
+                                collect_all_declared_in_stmts(&b.statements, &mut extended_forbidden);
                                 for s in &b.statements {
-                                    collect_stmts(s, src, prefix_len, forbidden, module_names, const_local_to_global, const_name_to_primitive, &mut to_outline);
+                                    collect_stmts(s, src, prefix_len, &extended_forbidden, module_names, const_local_to_global, const_name_to_primitive, &mut to_outline);
                                 }
                             }
                         }
