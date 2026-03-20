@@ -27,6 +27,42 @@ fn is_hook_name(name: &str) -> bool {
     name.starts_with("use") && name[3..].chars().next().map_or(false, |c| c.is_uppercase())
 }
 
+/// Extract a property access chain from the start of `rest` (the source text after
+/// a reactive variable name). Stops before any method call (`(` or `?.(`) and
+/// before computed property access (`[`).
+///
+/// For example, given rest = ".post.feedback.comments?.edges?.map(render)",
+/// returns [("post", false), ("feedback", false), ("comments", false), ("edges", true)].
+/// The "map" is excluded because it's followed by `(`.
+fn extract_inline_js_chain(rest: &str) -> Vec<DependencyPathEntry> {
+    let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
+    let mut chain = Vec::new();
+    let mut s = rest;
+    loop {
+        let (optional, skip) = if s.starts_with("?.") && s.len() > 2 && s.as_bytes()[2] != b'(' && s.as_bytes()[2] != b'[' {
+            // Optional property access: ?.name
+            (true, 2)
+        } else if s.starts_with('.') && s.len() > 1 && s.as_bytes()[1] != b'.' {
+            // Regular property access: .name
+            (false, 1)
+        } else {
+            break;
+        };
+        s = &s[skip..];
+        // Extract the property identifier
+        let prop_end = s.as_bytes().iter().position(|&b| !is_ident(b)).unwrap_or(s.len());
+        let prop = &s[..prop_end];
+        if prop.is_empty() { break; }
+        s = &s[prop_end..];
+        // If followed by a call `(` or optional call `?.(`, stop (method call — not a dep)
+        if s.starts_with('(') || s.starts_with("?.(") {
+            break;
+        }
+        chain.push(DependencyPathEntry { property: prop.to_string(), optional });
+    }
+    chain
+}
+
 /// Trace the property access path used for `name` in the function source text.
 ///
 /// Only applies to arrow functions. For regular function expressions, returns
@@ -379,6 +415,22 @@ fn resolve_dep_path_inner(
                     }
                     return None;
                 }
+                // ComputedLoad defined before scope: trace object first, then property key.
+                // Prefer a reactive base: if object resolves to a reactive id, use it.
+                // Otherwise try the property key — e.g., `foo[props.method]` where
+                // `foo` is a non-reactive global should add `props.method` as dep.
+                InstructionValue::ComputedLoad { object, property, .. } => {
+                    if let Some((base_id, path)) = resolve_dep_path_inner(object.identifier, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited, scope_decl_ids, reactive_ids) {
+                        if reactive_ids.contains(&base_id) {
+                            return Some((base_id, path));
+                        }
+                        // Object resolved to non-reactive base — try property key instead.
+                    }
+                    if let Some(result) = resolve_dep_path_inner(property.identifier, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited, scope_decl_ids, reactive_ids) {
+                        return Some(result);
+                    }
+                    return None;
+                }
                 _ => {}
             }
         }
@@ -430,11 +482,19 @@ fn resolve_dep_path_inner(
             | InstructionValue::LoadContext { place, .. } => {
                 return resolve_dep_path_inner(place.identifier, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited, scope_decl_ids, reactive_ids);
             }
-            // ComputedLoad: trace through the object operand. We can't represent
-            // computed property indices in the dep path, but tracking the base
-            // object is better than no dep at all.
-            InstructionValue::ComputedLoad { object, .. } => {
-                return resolve_dep_path_inner(object.identifier, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited, scope_decl_ids, reactive_ids);
+            // ComputedLoad: trace through the object operand first.
+            // If the object resolves to a reactive base, use it.
+            // If the object is non-reactive (e.g., a global like `foo`), also try
+            // the property key — e.g., `foo[props.method]` should add `props.method`
+            // as a dep, not `foo`.
+            InstructionValue::ComputedLoad { object, property, .. } => {
+                if let Some((base_id, path)) = resolve_dep_path_inner(object.identifier, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited, scope_decl_ids, reactive_ids) {
+                    if reactive_ids.contains(&base_id) {
+                        return Some((base_id, path));
+                    }
+                    // Object resolved to a non-reactive base — try the property key instead.
+                }
+                return resolve_dep_path_inner(property.identifier, def_at, instr_map, store_local_value, phi_operands, range_start, depth + 1, visited, scope_decl_ids, reactive_ids);
             }
             // Internal allocations: trace through to operands.
             InstructionValue::ObjectExpression { properties, .. } => {
@@ -1084,13 +1144,36 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
 
                 // InlineJs: used for optional chains (no tracked operands). Scan source text
                 // for named variable references and add reactive ones as deps.
+                //
+                // When a reactive name appears at the START of the InlineJs source text,
+                // also extract the property chain that follows it (e.g., `props.a?.b.c?.d`)
+                // to get a more specific dep than just the base variable.
+                // For names appearing inside call arguments (not at position 0), use the
+                // base variable as the dep (conservative but correct).
                 if let InstructionValue::InlineJs { source, .. } = &instr.value {
                     for (name, ids) in &name_to_id {
                         if !contains_as_word(source, name) { continue; }
                         for &id in ids {
                             if !reactive_ids.contains(&id) { continue; }
-                            let Some((base_id, path)) = resolve_dep_path(id, &def_at, &instr_map, &store_local_value, &phi_operands, range_start, &all_scope_decl_ids, &reactive_ids) else {
+                            let Some((base_id, base_path)) = resolve_dep_path(id, &def_at, &instr_map, &store_local_value, &phi_operands, range_start, &all_scope_decl_ids, &reactive_ids) else {
                                 continue;
+                            };
+                            // When this name is at the start of the source, extract
+                            // the property chain for a more specific dep.
+                            let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
+                            let path = if source.starts_with(name.as_str())
+                                && source.as_bytes().get(name.len()).map_or(true, |&b| !is_ident(b))
+                            {
+                                let chain = extract_inline_js_chain(&source[name.len()..]);
+                                if chain.is_empty() {
+                                    base_path
+                                } else {
+                                    let mut extended = base_path;
+                                    extended.extend(chain);
+                                    extended
+                                }
+                            } else {
+                                base_path
                             };
                             let path_key: Vec<String> = path.iter().map(|e| e.property.clone()).collect();
                             let has_ancestor = !path_key.is_empty() && {
@@ -1134,13 +1217,24 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
                     };
 
                     // Choose which place to use as the primary dep operand.
+                    // When use_property_path=true (receiver is a direct param like `props`),
+                    // use `property` as the primary place to get `props.render` style deps.
+                    // When use_property_path=false (receiver is a global/local, not a param),
+                    // use `receiver` as primary AND also include `property` — the property
+                    // key itself may be reactive (e.g., `foo[props.method](...)` should add
+                    // `props.method` as a dep even though `foo` is a global).
                     let primary_place = if use_property_path { property } else { receiver };
-                    let places_to_process: Vec<&Place> = std::iter::once(primary_place)
+                    let mut places_to_process: Vec<&Place> = std::iter::once(primary_place)
                         .chain(args.iter().filter_map(|a| match a {
                             crate::hir::hir::CallArg::Place(p) => Some(p),
                             crate::hir::hir::CallArg::Spread(s) => Some(&s.place),
                         }))
                         .collect();
+                    // Also include the computed property key when receiver is not a direct param,
+                    // so reactive computed method names (e.g. `props.method`) are tracked.
+                    if !use_property_path {
+                        places_to_process.push(property);
+                    }
 
                     for place in places_to_process {
                         let resolved = resolve_dep_path(place.identifier, &def_at, &instr_map, &store_local_value, &phi_operands, range_start, &all_scope_decl_ids, &reactive_ids);
