@@ -106,13 +106,35 @@ pub fn run(hir: &mut HIRFunction, env: Option<&Environment>) {
             };
             match &mut lvalue.pattern {
                 Pattern::Object(obj) => {
-                    obj.properties.retain(|prop| {
-                        let id = match prop {
-                            ObjectPatternProperty::Property(p) => p.place.identifier,
-                            ObjectPatternProperty::Spread(s) => s.place.identifier,
-                        };
-                        is_id_used(id)
+                    // If there's a USED Spread (rest) element, we MUST NOT remove non-spread
+                    // properties even if they're unused. Removing `unused` from
+                    // `{ unused, ...rest }` changes which properties end up in `rest`,
+                    // changing semantics. When the spread itself is unused, remove everything
+                    // unused normally.
+                    let has_used_spread = obj.properties.iter().any(|p| {
+                        if let ObjectPatternProperty::Spread(s) = p {
+                            is_id_used(s.place.identifier)
+                        } else {
+                            false
+                        }
                     });
+                    if has_used_spread {
+                        // Only remove the unused spread (if any) but keep non-spread properties.
+                        obj.properties.retain(|prop| {
+                            match prop {
+                                ObjectPatternProperty::Property(_) => true, // keep all non-spread
+                                ObjectPatternProperty::Spread(s) => is_id_used(s.place.identifier),
+                            }
+                        });
+                    } else {
+                        obj.properties.retain(|prop| {
+                            let id = match prop {
+                                ObjectPatternProperty::Property(p) => p.place.identifier,
+                                ObjectPatternProperty::Spread(s) => s.place.identifier,
+                            };
+                            is_id_used(id)
+                        });
+                    }
                 }
                 Pattern::Array(arr) => {
                     // Remove unused non-hole elements.

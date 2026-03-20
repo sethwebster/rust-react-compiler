@@ -1927,8 +1927,28 @@ impl<'a> Codegen<'a> {
                         let parts: Vec<String> = b.instructions.iter()
                             .filter(|instr| inlined_ids.contains(&instr.lvalue.identifier.0))
                             .filter_map(|instr| {
-                                self.emit_stmt(instr, None, &[])
-                                    .map(|s| s.trim_end_matches(';').to_string())
+                                // Try the normal emit path first.
+                                if let Some(s) = self.emit_stmt(instr, None, &[]) {
+                                    return Some(s.trim_end_matches(';').to_string());
+                                }
+                                // Fallback for StoreLocal that was suppressed by build_inline_map
+                                // (e.g. `const i = 0` promoted from `let i = 0` and inlined away).
+                                // We must still emit it in the for-loop init position.
+                                if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
+                                    if let Some(name) = self.env.get_identifier(lvalue.place.identifier)
+                                        .and_then(|i| i.name.as_ref())
+                                        .map(|n| n.value().to_string())
+                                    {
+                                        let kw = match lvalue.kind {
+                                            InstructionKind::Const | InstructionKind::HoistedConst
+                                            | InstructionKind::Function | InstructionKind::HoistedFunction => "const",
+                                            _ => "let",
+                                        };
+                                        let val_expr = self.expr(value);
+                                        return Some(format!("{kw} {name} = {val_expr}"));
+                                    }
+                                }
+                                None
                             }).collect();
                         parts.join(", ")
                     }).unwrap_or_default();
@@ -4205,8 +4225,16 @@ let test_expr = if let Some((skip_idx, store_lv_id, value_place)) = inline_assig
                             }
                         }
                     }
-                    // While condition inlines the assignment
-                    format!("({var_name} = {rhs})")
+                    // While condition inlines the assignment.
+                    // Guard against double-wrapping: if Pass 1.6 (reassign_wrap) already
+                    // inlined value_place as "(var_name = expr)", rhs is already the
+                    // correct assignment expression — don't wrap again.
+                    let already_assign = rhs.starts_with(&format!("({var_name} = "));
+                    if already_assign {
+                        rhs
+                    } else {
+                        format!("({var_name} = {rhs})")
+                    }
                 } else {
                     let test_expr = self.hir.body.blocks.get(&while_test_bid).and_then(|b| {
                         if let Terminal::Branch { test, .. } = &b.terminal {
@@ -7162,6 +7190,16 @@ let test_expr = if let Some((skip_idx, store_lv_id, value_place)) = inline_assig
                             exprs.push(e);
                         }
                     }
+                    InstructionValue::Primitive { value, .. } => {
+                        // After CP, a LoadLocal that was replaced with Primitive still leaves
+                        // a trailing "read" that the reference compiler preserves in the update.
+                        // E.g. `for (let i = 0; ...; i)` becomes `for (const i = 0; true; 0)`
+                        // after CP substitutes i → 0. If the result is not consumed by another
+                        // update instruction, emit the primitive value.
+                        if !used_in_update.contains(&instr.lvalue.identifier.0) {
+                            exprs.push(primitive_expr(value));
+                        }
+                    }
                     _ => {
                         // For other instructions not in local_exprs, try emit_stmt.
                         if !local_exprs.contains_key(&instr.lvalue.identifier.0) {
@@ -8581,6 +8619,19 @@ fn escape_js_string_with_quote(s: &str, quote: char) -> String {
             c if c < ' ' => {
                 out.push_str(&format!("\\x{:02x}", c as u32));
             }
+            c if (c as u32) > 127 => {
+                // Escape non-ASCII characters as \uXXXX (or surrogate pair for > U+FFFF)
+                let code = c as u32;
+                if code <= 0xFFFF {
+                    out.push_str(&format!("\\u{:04X}", code));
+                } else {
+                    // Surrogate pair for supplementary characters (> U+FFFF)
+                    let code = code - 0x10000;
+                    let high = 0xD800 + (code >> 10);
+                    let low = 0xDC00 + (code & 0x3FF);
+                    out.push_str(&format!("\\u{:04X}\\u{:04X}", high, low));
+                }
+            }
             _ => out.push(c),
         }
     }
@@ -9524,6 +9575,18 @@ fn extract_iife_return_expr(expr: &str) -> Option<String> {
 
     // Case 2: Expression body `() => EXPR` (no braces)
     if !s.is_empty() {
+        // Strip outer parens around object literals: `({a})` → `{ a }`.
+        // Arrow functions wrap object literal returns in parens to avoid `{` being
+        // parsed as a block: `() => ({a})`. When we inline the IIFE result, the
+        // parens are unnecessary and the TS compiler emits the object without them.
+        let stripped = s.trim();
+        if stripped.starts_with('(') && stripped.ends_with(')') {
+            let inner = &stripped[1..stripped.len()-1].trim();
+            if inner.starts_with('{') {
+                // Re-emit the object literal with proper spacing.
+                return Some(inner.to_string());
+            }
+        }
         return Some(s.to_string());
     }
 

@@ -1381,6 +1381,9 @@ fn unwrap_parens<'r, 'a: 'r>(expr: &'r Expression<'a>) -> &'r Expression<'a> {
 fn stmt_has_return(stmt: &Statement<'_>) -> bool {
     match stmt {
         Statement::ReturnStatement(_) => true,
+        // Throw statements terminate control flow like return — don't inline
+        // IIFEs containing throw (they should be outlined to _temp() instead).
+        Statement::ThrowStatement(_) => true,
         Statement::BlockStatement(b) => b.body.iter().any(stmt_has_return),
         Statement::IfStatement(s) => {
             stmt_has_return(&s.consequent)
@@ -1479,9 +1482,7 @@ pub fn lower_expr<'r, 'a: 'r>(
             // with no params and no args — inline body statements in place.
             if e.arguments.is_empty() {
                 if let Some(stmts) = iife_body_stmts(e) {
-                    // Lower each statement inline. If any statement is a return,
-                    // we handle it as the IIFE result. For now, only inline IIFEs
-                    // with no return statements (pure side-effect bodies).
+                    // Case 1: no return/throw in body — inline all statements, result = undefined.
                     let has_return = stmts.iter().any(stmt_has_return);
                     if !has_return {
                         for stmt in stmts {
@@ -1495,6 +1496,22 @@ pub fn lower_expr<'r, 'a: 'r>(
                             },
                             loc,
                         ));
+                    }
+                    // Case 2: last statement is `return expr` with no earlier returns/throws.
+                    // Inline all statements before the return, then evaluate the return expr
+                    // as the IIFE result. This handles `(function() { side(); return val; })()`.
+                    if let Some((last, rest)) = stmts.split_last() {
+                        if let Statement::ReturnStatement(ret) = last {
+                            let no_early_return = !rest.iter().any(stmt_has_return);
+                            if no_early_return {
+                                if let Some(ret_expr) = &ret.argument {
+                                    for stmt in rest {
+                                        lower_statement(stmt, semantic, ctx)?;
+                                    }
+                                    return lower_expr(ret_expr, semantic, ctx);
+                                }
+                            }
+                        }
                     }
                 }
             }

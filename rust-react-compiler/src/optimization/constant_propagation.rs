@@ -57,13 +57,13 @@ pub fn constant_propagation(hir: &mut HIRFunction) {
         }
         round += 1;
         let branches_folded = constant_propagation_round(hir);
-        if !branches_folded {
-            break;
+        if branches_folded {
+            // Clean up graph after branch folding.
+            cp_remove_unreachable_blocks(hir);
+            cp_prune_dead_phi_operands(hir);
+            eliminate_redundant_phi(hir);
         }
-        // Clean up graph after branch folding.
-        cp_remove_unreachable_blocks(hir);
-        cp_prune_dead_phi_operands(hir);
-        eliminate_redundant_phi(hir);
+        if !branches_folded { break; }
     }
 }
 
@@ -309,7 +309,10 @@ fn constant_propagation_round(hir: &mut HIRFunction) -> bool {
                             _ => None,
                         }
                     }
-                    _ => None,
+                    // All other instruction types produce non-constant values. Mark them
+                    // as Bottom so phi nodes that reference them correctly resolve to Bottom
+                    // rather than being incorrectly folded to a Constant from another operand.
+                    _ => Some(LatticeValue::Bottom),
                 };
 
                 if let Some(new_val) = new_val {
@@ -552,6 +555,41 @@ fn constant_propagation_round(hir: &mut HIRFunction) -> bool {
                     }
                 }
             }
+
+            // Fold TemplateLiteral when all subexprs are known non-undefined constants.
+            if let InstructionValue::TemplateLiteral { subexprs, quasis, loc } = &instr.value {
+                let mut result_parts: Vec<String> = Vec::new();
+                let mut can_fold = true;
+                // quasis.len() == subexprs.len() + 1
+                for (i, quasi) in quasis.iter().enumerate() {
+                    match &quasi.cooked {
+                        Some(s) => result_parts.push(s.clone()),
+                        None => { can_fold = false; break; }
+                    }
+                    if i < subexprs.len() {
+                        let place = &subexprs[i];
+                        let val = ssa_constants.get(&place.identifier)
+                            .or_else(|| local_constants.get(&place.identifier))
+                            .cloned();
+                        match val {
+                            Some(pv) => {
+                                match primitive_to_template_str(&pv) {
+                                    Some(s) => result_parts.push(s),
+                                    None => { can_fold = false; break; }
+                                }
+                            }
+                            None => { can_fold = false; break; }
+                        }
+                    }
+                }
+                if can_fold {
+                    let result_str = result_parts.join("");
+                    let loc = loc.clone();
+                    let result = PrimitiveValue::String(result_str);
+                    instr.value = InstructionValue::Primitive { value: result.clone(), loc };
+                    ssa_constants.insert(instr.lvalue.identifier, result);
+                }
+            }
         }
     }
 
@@ -622,6 +660,40 @@ fn cp_prune_dead_phi_operands(hir: &mut HIRFunction) {
     }
 }
 
+/// Convert a primitive value to its JS template-literal string representation.
+/// Returns None for Undefined (cannot fold templates containing undefined interpolations).
+fn primitive_to_template_str(val: &PrimitiveValue) -> Option<String> {
+    match val {
+        PrimitiveValue::Undefined => None,
+        PrimitiveValue::Null => Some("null".to_string()),
+        PrimitiveValue::Boolean(b) => Some(if *b { "true".to_string() } else { "false".to_string() }),
+        PrimitiveValue::String(s) => Some(s.clone()),
+        PrimitiveValue::Number(n) => {
+            // -0 should format as "0"
+            if *n == 0.0 { return Some("0".to_string()); }
+            // Integers up to 1e15 format without decimal point
+            if n.fract() == 0.0 && n.abs() < 1e15 {
+                Some(format!("{}", *n as i64))
+            } else {
+                // Use JavaScript-style number formatting
+                Some(format_js_number(*n))
+            }
+        }
+    }
+}
+
+/// Format a floating-point number in JavaScript's canonical string form.
+fn format_js_number(n: f64) -> String {
+    // NaN / Infinity are handled by the caller (not folded since they come from LoadGlobal).
+    // For regular finite floats, use Rust's shortest-round-trip representation
+    // then post-process to match JS conventions.
+    if n.is_nan() { return "NaN".to_string(); }
+    if n.is_infinite() { return if n > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }; }
+    // Use ryu (shortest repr) or default Rust formatting
+    let s = format!("{}", n);
+    s
+}
+
 fn fold_unary(val: PrimitiveValue, op: &UnaryOperator) -> Option<PrimitiveValue> {
     match op {
         UnaryOperator::Not => {
@@ -659,6 +731,7 @@ fn fold_unary(val: PrimitiveValue, op: &UnaryOperator) -> Option<PrimitiveValue>
         UnaryOperator::Void => Some(PrimitiveValue::Undefined),
     }
 }
+
 
 fn fold_binary(left: PrimitiveValue, right: PrimitiveValue, op: BinaryOperator) -> Option<PrimitiveValue> {
     // Strict equality/inequality works across all primitive types

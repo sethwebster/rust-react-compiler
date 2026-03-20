@@ -1171,6 +1171,32 @@ fn outline_inner_arrows_in_source(
                     }
                 }
             }
+            Expression::FunctionExpression(func) => {
+                let s = func.span.start as usize;
+                let e = func.span.end as usize;
+                if s < pl || e <= s { return; }
+                let ss = s - pl;
+                let se = e - pl;
+                if se > src.len() || ss >= se { return; }
+                let fsrc = &src[ss..se];
+                let mut params: Vec<String> = Vec::new();
+                for p in &func.params.items { collect_binding_names(&p.pattern.kind, &mut params); }
+                if let Some(r) = &func.params.rest { collect_binding_names(&r.argument.kind, &mut params); }
+                if let Some(body) = &func.body {
+                    let bs = (body.span.start as usize).saturating_sub(s);
+                    let be = (body.span.end as usize).saturating_sub(s);
+                    let body_text = fsrc.get(bs..be).unwrap_or(fsrc);
+                    let free = extract_free_variables(body_text, &params);
+                    let bad = free.iter().any(|v| forbidden.contains(v) && !module_names.contains(v) && !ctg.contains_key(v) && !ctp.contains_key(v));
+                    if !bad {
+                        out.push((ss, se, fsrc.to_string()));
+                    } else {
+                        for st in &body.statements {
+                            collect_stmts(st, src, pl, forbidden, module_names, ctg, ctp, out);
+                        }
+                    }
+                }
+            }
             Expression::CallExpression(c) => {
                 collect_arrows(&c.callee, src, pl, forbidden, module_names, ctg, ctp, out);
                 for a in &c.arguments {
@@ -1191,6 +1217,8 @@ fn outline_inner_arrows_in_source(
                 }
             }
             Expression::AssignmentExpression(a) => collect_arrows(&a.right, src, pl, forbidden, module_names, ctg, ctp, out),
+            Expression::StaticMemberExpression(m) => collect_arrows(&m.object, src, pl, forbidden, module_names, ctg, ctp, out),
+            Expression::ComputedMemberExpression(m) => collect_arrows(&m.object, src, pl, forbidden, module_names, ctg, ctp, out),
             Expression::SequenceExpression(sq) => { for ex in &sq.expressions { collect_arrows(ex, src, pl, forbidden, module_names, ctg, ctp, out); } }
             Expression::ConditionalExpression(c) => {
                 collect_arrows(&c.test, src, pl, forbidden, module_names, ctg, ctp, out);

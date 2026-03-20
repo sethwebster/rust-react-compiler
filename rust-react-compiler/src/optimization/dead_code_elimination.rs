@@ -620,11 +620,26 @@ fn eliminate_dead_let_initializers(hir: &mut HIRFunction) {
         }
     }
 
+    // Collect for-loop init block IDs: StoreLocals in these blocks must NOT be
+    // converted to DeclareLocal — codegen needs `let i = 0` (or `const i = 0`
+    // after promotion) in the for-loop init position, even if `i` has no reads.
+    let mut for_init_block_ids: HashSet<BlockId> = HashSet::new();
+    for block in hir.body.blocks.values() {
+        if let Terminal::For { init, .. } = &block.terminal {
+            for_init_block_ids.insert(*init);
+        }
+    }
+
     // Collect candidate Let StoreLocals: block_id, instr_idx, pre_ssa_id, ssa_result_id.
     // A candidate is a Let StoreLocal whose SSA result is not directly consumed by
     // instructions/terminals (phi-only uses are OK) and whose stored value is pure.
     let mut candidates: Vec<(BlockId, usize, IdentifierId, IdentifierId)> = Vec::new();
     for (block_id, block) in &hir.body.blocks {
+        // Never eliminate for-loop init declarations (e.g. `let i = 0`): codegen
+        // needs them to emit `for (const i = 0; ...)` even after CP substitutes `i`.
+        if for_init_block_ids.contains(block_id) {
+            continue;
+        }
         for (idx, instr) in block.instructions.iter().enumerate() {
             if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
                 if !matches!(lvalue.kind, InstructionKind::Let | InstructionKind::HoistedLet) {
