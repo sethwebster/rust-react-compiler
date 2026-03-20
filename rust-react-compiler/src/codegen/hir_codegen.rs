@@ -6987,7 +6987,11 @@ let test_expr = if let Some((skip_idx, store_lv_id, value_place)) = inline_assig
                             .or_else(|| self.inlined_exprs.get(&right.identifier.0))
                             .cloned()
                             .unwrap_or_else(|| self.ident_name(right.identifier));
-                        Some(format!("{l} {op} {r}"))
+                        // Ternary has lower precedence than any binary operator, so
+                        // wrap in parens when either operand is a ternary expression.
+                        let l_str = if l.contains(" ? ") { format!("({l})") } else { l };
+                        let r_str = if r.contains(" ? ") { format!("({r})") } else { r };
+                        Some(format!("{l_str} {op} {r_str}"))
                     }
                     _ => None, // other instructions handled below
                 };

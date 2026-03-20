@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::hir::environment::Environment;
 use crate::hir::hir::{
-    DependencyPathEntry, Effect, HIRFunction, IdentifierId, Instruction, InstructionId,
-    InstructionValue, NonLocalBinding, Place, ReactiveScopeDependency,
+    BlockId, DependencyPathEntry, Effect, HIRFunction, IdentifierId, Instruction, InstructionId,
+    InstructionValue, NonLocalBinding, Place, ReactiveScopeDependency, Terminal,
 };
 use crate::hir::hir::Param;
 use crate::hir::visitors::{each_dep_operand, each_instruction_value_operand, each_terminal_operand};
@@ -1263,6 +1263,24 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
         // operand may be a complex expression (e.g., BinaryExpression `a.length === 1`)
         // that wraps multiple reactive property reads. collect_all_reactive_deps traces
         // through all operands recursively to find all reactive bases.
+        //
+        // For loop test blocks (test blocks of DoWhile/While terminals), we strip property
+        // paths from deps. The TS compiler's DeriveMinimalDependencies truncates `props.cond`
+        // to `props` when the PropertyLoad cannot be safely hoisted before the scope (which is
+        // the case for loop tests since they run on each iteration). This matches the TS
+        // behavior where e.g. `while (props.cond)` produces dep `props` not `props.cond`.
+        let loop_test_blocks: HashSet<BlockId> = {
+            let mut s = HashSet::new();
+            for (_, block) in &hir.body.blocks {
+                match &block.terminal {
+                    Terminal::DoWhile { test, .. } | Terminal::While { test, .. } => {
+                        s.insert(*test);
+                    }
+                    _ => {}
+                }
+            }
+            s
+        };
         for (_, block) in &hir.body.blocks {
             let term_id = block.terminal.id();
             if std::env::var("RC_DEBUG").is_ok() {
@@ -1279,6 +1297,12 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
                     &reactive_ids, range_start, 0, &mut term_visited, &mut term_deps, &HashSet::new(),
                 );
                 for (base_id, path) in term_deps {
+                    // For loop test blocks (while/do-while test), strip the property path
+                    // and use just the base object as the dep. The TS compiler does this via
+                    // DeriveMinimalDependencies hoistable truncation: a PropertyLoad in a
+                    // loop test block cannot be hoisted before the scope, so the dep is
+                    // promoted to the base object (e.g., `props.cond` → `props`).
+                    let path = if loop_test_blocks.contains(&block.id) { vec![] } else { path };
                     let path_key: Vec<String> = path.iter().map(|e| e.property.clone()).collect();
                     let has_ancestor = !path_key.is_empty() && {
                         let mut found = false;

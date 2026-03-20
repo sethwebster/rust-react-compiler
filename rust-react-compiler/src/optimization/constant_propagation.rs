@@ -329,6 +329,95 @@ fn constant_propagation_round(hir: &mut HIRFunction) -> bool {
         }
     }
 
+    // Extend ssa_constants with single-assignment mutable variables (Let/Reassign) that are
+    // assigned exactly once to a known constant. These variables are not in
+    // cross_block_mutable_ids (single-block). After dead-code elimination removes a branch,
+    // a variable like `_b = "baz"` may become single-block; without this extension,
+    // LoadLocals in other blocks can't see the constant value.
+    //
+    // Safety guards:
+    // 1. Exclude any StoreLocal whose SSA lvalue appears as a phi operand (conditional branch).
+    // 2. Exclude assignments in blocks reachable from any loop body (loop may not execute).
+    {
+        // Collect all SSA ids used as phi operands.
+        let mut phi_operand_ids: HashSet<IdentifierId> = HashSet::new();
+        for block in hir.body.blocks.values() {
+            for phi in &block.phis {
+                for (_, place) in &phi.operands {
+                    phi_operand_ids.insert(place.identifier);
+                }
+            }
+        }
+
+        // Collect all blocks reachable from any loop body (BFS, stopping at loop fallthroughs).
+        // Assignments in these blocks might not execute if the loop runs 0 iterations.
+        let mut loop_reachable_blocks: HashSet<BlockId> = HashSet::new();
+        {
+            // First, collect (loop_body, fallthrough) pairs.
+            let mut worklist: Vec<(BlockId, BlockId)> = Vec::new();
+            for block in hir.body.blocks.values() {
+                match &block.terminal {
+                    Terminal::While { loop_, fallthrough, .. }
+                    | Terminal::DoWhile { loop_, fallthrough, .. }
+                    | Terminal::For { loop_, fallthrough, .. }
+                    | Terminal::ForOf { loop_, fallthrough, .. }
+                    | Terminal::ForIn { loop_, fallthrough, .. } => {
+                        worklist.push((*loop_, *fallthrough));
+                    }
+                    _ => {}
+                }
+            }
+            // BFS from each loop body block, stopping at the loop fallthrough.
+            for (start, stop) in worklist {
+                let mut queue = std::collections::VecDeque::new();
+                queue.push_back(start);
+                while let Some(bid) = queue.pop_front() {
+                    if bid == stop || loop_reachable_blocks.contains(&bid) { continue; }
+                    loop_reachable_blocks.insert(bid);
+                    if let Some(block) = hir.body.blocks.get(&bid) {
+                        for succ_bid in block.terminal.successors() {
+                            if succ_bid != stop {
+                                queue.push_back(succ_bid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut single_assign_consts: HashMap<IdentifierId, PrimitiveValue> = HashMap::new();
+        let mut multi_assign: HashSet<IdentifierId> = HashSet::new();
+        for (bid, block) in &hir.body.blocks {
+            // Skip blocks inside loop bodies — assignments there may not execute.
+            if loop_reachable_blocks.contains(bid) { continue; }
+            for instr in &block.instructions {
+                if let InstructionValue::StoreLocal { lvalue, value, .. } = &instr.value {
+                    if matches!(lvalue.kind, InstructionKind::Let | InstructionKind::HoistedLet | InstructionKind::Reassign)
+                        && !cross_block_mutable_ids.contains(&lvalue.place.identifier)
+                        && !closure_captured_ids.contains(&lvalue.place.identifier)
+                        // Exclude conditional assignments whose SSA lvalue feeds into a phi.
+                        && !phi_operand_ids.contains(&instr.lvalue.identifier)
+                    {
+                        let id = lvalue.place.identifier;
+                        if multi_assign.contains(&id) {
+                            // Already seen twice — skip
+                        } else if single_assign_consts.contains_key(&id) {
+                            // Second assignment: can't constant-fold cross-block
+                            single_assign_consts.remove(&id);
+                            multi_assign.insert(id);
+                        } else if let Some(val) = ssa_constants.get(&value.identifier).cloned() {
+                            single_assign_consts.insert(id, val);
+                        }
+                        // Non-constant assignment: just don't insert
+                    }
+                }
+            }
+        }
+        for (id, val) in single_assign_consts {
+            ssa_constants.insert(id, val);
+        }
+    }
+
     // Rewrite pass: substitute constants into instructions.
     // Uses ssa_constants (cross-block) + local_constants (per-block, for let vars).
     // For blocks where x_orig is also mutated (StoreLocal Reassign/Let), we skip ssa_constants
