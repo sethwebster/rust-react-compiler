@@ -17,6 +17,7 @@ pub mod prune_non_reactive_dependencies;
 pub mod prune_unused_scopes;
 pub mod merge_reactive_scopes_that_invalidate_together;
 pub mod prune_always_invalidating_scopes;
+pub mod prune_locally_used_scope_declarations;
 pub mod propagate_early_returns;
 pub mod prune_unused_lvalues;
 pub mod promote_used_temporaries;

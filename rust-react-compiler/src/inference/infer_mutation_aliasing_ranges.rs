@@ -404,6 +404,16 @@ pub fn infer_mutation_aliasing_ranges(
     let mut pure_read_lvalues: HashSet<IdentifierId> = HashSet::new();
     let mut phase3_extended: HashSet<IdentifierId> = HashSet::new();
 
+    // Track SSA temps produced by FunctionExpression/ObjectMethod instructions.
+    // Used to identify named variables that hold function references (fn_holder_vars),
+    // so we can skip mutable-range extension when they're passed to non-hook calls.
+    let mut fn_expr_temps: HashSet<IdentifierId> = HashSet::new();
+    // Named variables that hold a FunctionExpression or ObjectMethod value.
+    // Passing such a variable to a non-hook call does NOT mutate the variable itself —
+    // it's a function reference, not a data value. We skip the conservative
+    // mutable-range extension for these to avoid spurious scope flattening.
+    let mut fn_holder_vars: HashSet<IdentifierId> = HashSet::new();
+
     // Tracks DeclareLocal instruction ids for variables that are ONLY assigned via
     // StoreContext inside closures (never via StoreLocal in the outer function).
     // For these variables, named_defs is not populated during Phase 1 (because we
@@ -478,6 +488,12 @@ pub fn infer_mutation_aliasing_ranges(
                         // when the closure is called.
                         if let Some(ctx_ids) = closure_context_map.get(&value.identifier) {
                             closure_var_contexts.insert(var_id, ctx_ids.clone());
+                        }
+                        // Track named variables that hold FunctionExpression/ObjectMethod values.
+                        // These are function references — passing them to non-hook calls does not
+                        // mutate the variable itself, so skip mutable-range extension for them.
+                        if fn_expr_temps.contains(&value.identifier) {
+                            fn_holder_vars.insert(var_id);
                         }
                         // If the stored value is from IteratorNext, record that this
                         // named variable holds an element of the iterated collection.
@@ -620,6 +636,15 @@ pub fn infer_mutation_aliasing_ranges(
                     | InstructionValue::JsxFragment { .. }
             ) {
                 pure_read_lvalues.insert(lv);
+                // Track FunctionExpression/ObjectMethod temps specifically so we can
+                // identify named variables that hold function references.
+                if matches!(
+                    &instr.value,
+                    InstructionValue::FunctionExpression { .. }
+                        | InstructionValue::ObjectMethod { .. }
+                ) {
+                    fn_expr_temps.insert(lv);
+                }
             }
 
             // Track all operand uses for SSA temp liveness.
@@ -767,7 +792,12 @@ pub fn infer_mutation_aliasing_ranges(
                             };
                             if let Some(&source_var) = aliases.get(&arg_id) {
                                 // Skip frozen variables — hook has already frozen them.
-                                if !hook_frozen_vars.contains(&source_var) && !hook_frozen_vars.contains(&arg_id) {
+                                // Skip function-holder variables — passing a function reference
+                                // to a non-hook call does not mutate the variable itself.
+                                if !hook_frozen_vars.contains(&source_var)
+                                    && !hook_frozen_vars.contains(&arg_id)
+                                    && !fn_holder_vars.contains(&source_var)
+                                {
                                     use_at(&mut named_mut_uses, source_var, iid);
                                     use_at(&mut named_real_muts, source_var, iid);
                                 }
@@ -809,38 +839,48 @@ pub fn infer_mutation_aliasing_ranges(
                         //   const x = {foo};
                         //   const f0 = function() { x.z = bar; };
                         //   f0();  ← x is mutated here through the closure
-                        if let Some(&callee_source) = aliases.get(&callee.identifier) {
-                            if std::env::var("RC_DEBUG2").is_ok() {
-                                eprintln!("[closure_call] callee={} source={} has_ctx={}", callee.identifier.0, callee_source.0, closure_var_contexts.contains_key(&callee_source));
-                            }
-                            if let Some(ctx_ids) = closure_var_contexts.get(&callee_source) {
-                                for &ctx_id in ctx_ids {
-                                    // Retroactively add DeclareLocal-only vars to named_defs
-                                    // so the writeback sets their mutable_range.
-                                    // This handles `let x; const fn = () => { x = {}; }; fn();`
-                                    // where x is only mutated inside the closure, never via StoreLocal.
-                                    if !named_defs.contains_key(&ctx_id) {
-                                        if let Some(&decl_iid) = declare_local_iids.get(&ctx_id) {
-                                            named_defs.insert(ctx_id, decl_iid);
-                                        }
+                        //
+                        // Also handles IIFE patterns like:
+                        //   const x = {foo};
+                        //   (function() { x.z = bar; })();  ← x mutated via IIFE
+                        // In IIFE cases the callee IS the FunctionExpression temp directly
+                        // (no StoreLocal alias), so we check closure_context_map directly.
+                        let callee_id = callee.identifier;
+                        let callee_source_opt = aliases.get(&callee_id).copied();
+                        let closure_ctx_ids: Option<&Vec<IdentifierId>> =
+                            callee_source_opt
+                                .and_then(|src| closure_var_contexts.get(&src))
+                                .or_else(|| closure_context_map.get(&callee_id));
+                        if let Some(ctx_ids) = closure_ctx_ids {
+                            let ctx_ids_clone: Vec<_> = ctx_ids.clone();
+                            for ctx_id in ctx_ids_clone {
+                                // Retroactively add DeclareLocal-only vars to named_defs
+                                // so the writeback sets their mutable_range.
+                                // This handles `let x; const fn = () => { x = {}; }; fn();`
+                                // where x is only mutated inside the closure, never via StoreLocal.
+                                if !named_defs.contains_key(&ctx_id) {
+                                    if let Some(&decl_iid) = declare_local_iids.get(&ctx_id) {
+                                        named_defs.insert(ctx_id, decl_iid);
                                     }
-                                    // ctx_id may be either a named var id or an SSA temp id.
-                                    // If it's a named var, extend named_mut_uses.
-                                    // If it's an SSA temp, extend last_uses.
-                                    // We conservatively extend both — whichever one gets
-                                    // written back will have the correct range.
-                                    use_at(&mut named_mut_uses, ctx_id, iid);
-                                    use_at(&mut named_real_muts, ctx_id, iid);
-                                    use_at(&mut last_uses, ctx_id, iid);
                                 }
-                                // Also extend the callee variable's mutable_range to the call site.
-                                // This is needed so that infer_reactive_scope_variables can link
-                                // the callee (foo=2) with the FunctionExpression (fn_temp) and its
-                                // context vars (x=1) into a single co-located scope group.
-                                // Without this, foo's range ends at StoreLocal and the LoadLocal
-                                // of foo at the call site falls outside the range, breaking the chain:
-                                //   fn_temp=14 ←→ foo=2 ←→ t_foo ←→ t0
-                                use_at(&mut named_mut_uses, callee_source, iid);
+                                // ctx_id may be either a named var id or an SSA temp id.
+                                // If it's a named var, extend named_mut_uses.
+                                // If it's an SSA temp, extend last_uses.
+                                // We conservatively extend both — whichever one gets
+                                // written back will have the correct range.
+                                use_at(&mut named_mut_uses, ctx_id, iid);
+                                use_at(&mut named_real_muts, ctx_id, iid);
+                                use_at(&mut last_uses, ctx_id, iid);
+                            }
+                            // Also extend the callee variable's mutable_range to the call site.
+                            // This is needed so that infer_reactive_scope_variables can link
+                            // the callee (foo=2) with the FunctionExpression (fn_temp) and its
+                            // context vars (x=1) into a single co-located scope group.
+                            // Without this, foo's range ends at StoreLocal and the LoadLocal
+                            // of foo at the call site falls outside the range, breaking the chain:
+                            //   fn_temp=14 ←→ foo=2 ←→ t_foo ←→ t0
+                            if let Some(src) = callee_source_opt {
+                                use_at(&mut named_mut_uses, src, iid);
                             }
                         }
                     }

@@ -213,9 +213,42 @@ pub fn run_with_env(hir: &HIRFunction, env: &mut Environment) {
     // Build per-scope dependency lists from instructions.
     // We track which declarations are read as operands while inside a scope's range.
     // Keyed by ScopeId → set of decl_ids that are deps.
-    // We approximate: for each instruction whose lvalue belongs to a scope, its operands
+    //
+    // Pass 1: for each instruction whose lvalue belongs to a scope, its operands
     // are deps of that scope.
+    //
+    // Pass 2: for each instruction WITHOUT a scoped lvalue that falls within a scope's
+    // instruction range, add its operands to that scope's deps. This catches side-effect
+    // instructions like PropertyStore, MethodCall, CallExpression that use external values
+    // within the scope body but produce no scoped output themselves.
+    // Example: `d.b = b` (PropertyStore) within c's scope range uses `b` — b should
+    // become a dep of c's scope so it gets force-memoized when c is memoized.
     let mut scope_dep_decls: HashMap<ScopeId, HashSet<DeclarationId>> = HashMap::new();
+
+    // Build scope range lookup for Pass 2.
+    let scope_ranges_for_lookup: Vec<(ScopeId, u32, u32)> = env
+        .scopes
+        .values()
+        .map(|s| (s.id, s.range.start.0, s.range.end.0))
+        .collect();
+
+    let find_scope_for_iid = |iid: u32| -> Option<ScopeId> {
+        // Return the scope whose range contains this instruction id.
+        // Prefer the innermost scope (smallest range).
+        let mut best: Option<(ScopeId, u32)> = None; // (scope_id, range_len)
+        for &(sid, start, end) in &scope_ranges_for_lookup {
+            if iid >= start && iid < end {
+                let len = end - start;
+                match best {
+                    None => best = Some((sid, len)),
+                    Some((_, best_len)) if len < best_len => best = Some((sid, len)),
+                    _ => {}
+                }
+            }
+        }
+        best.map(|(sid, _)| sid)
+    };
+
     for (_, block) in &hir.body.blocks {
         for instr in &block.instructions {
             let lv_decl = decl_for(instr.lvalue.identifier);
@@ -224,7 +257,13 @@ pub fn run_with_env(hir: &HIRFunction, env: &mut Environment) {
                 .get_identifier(instr.lvalue.identifier)
                 .and_then(|i| i.scope);
 
-            if let Some(sid) = lv_scope {
+            let target_scope = lv_scope.or_else(|| {
+                // Pass 2: for instructions with no scoped lvalue, find the scope
+                // whose range contains this instruction's id.
+                find_scope_for_iid(instr.id.0)
+            });
+
+            if let Some(sid) = target_scope {
                 // Add all operand decl_ids as scope deps.
                 let entry = scope_dep_decls.entry(sid).or_default();
                 for op in each_instruction_value_operand(&instr.value) {
@@ -241,6 +280,54 @@ pub fn run_with_env(hir: &HIRFunction, env: &mut Environment) {
                 // For Destructure, add the source value's decl.
                 if let InstructionValue::Destructure { value, .. } = &instr.value {
                     entry.insert(decl_for(value.identifier));
+                }
+            }
+        }
+    }
+
+    // Propagate inner-scope declarations into outer-scope deps.
+    // When scope A's instruction range fully contains scope B's range, B is "nested"
+    // inside A. Force-memoizing A should also force-memoize B's declarations, since B
+    // is part of A's computation. This matches the TS compiler's behavior where nested
+    // FunctionExpressions/ObjectExpressions within a reactive scope are independently
+    // memoized but linked to the enclosing scope.
+    {
+        let scope_ranges: Vec<(ScopeId, u32, u32)> = env
+            .scopes
+            .values()
+            .map(|s| (s.id, s.range.start.0, s.range.end.0))
+            .collect();
+
+        // For each pair (outer, inner), if inner is fully contained within outer,
+        // add inner's declaration decl_ids to outer's scope_dep_decls.
+        let inner_decls_by_scope: Vec<(ScopeId, Vec<DeclarationId>)> = env
+            .scopes
+            .values()
+            .map(|s| {
+                let decls: Vec<DeclarationId> = s
+                    .declarations
+                    .keys()
+                    .map(|&id| decl_for(id))
+                    .collect();
+                (s.id, decls)
+            })
+            .collect();
+
+        for &(outer_id, outer_start, outer_end) in &scope_ranges {
+            for &(inner_id, inner_start, inner_end) in &scope_ranges {
+                if outer_id != inner_id
+                    && inner_start >= outer_start
+                    && inner_end <= outer_end
+                {
+                    // inner scope is fully nested within outer scope
+                    if let Some((_, decls)) =
+                        inner_decls_by_scope.iter().find(|(id, _)| *id == inner_id)
+                    {
+                        let entry = scope_dep_decls.entry(outer_id).or_default();
+                        for &d in decls {
+                            entry.insert(d);
+                        }
+                    }
                 }
             }
         }

@@ -57,6 +57,7 @@ use crate::reactive_scopes::{
     prune_unused_scopes::run_with_env as prune_unused_scopes,
     merge_reactive_scopes_that_invalidate_together::run_with_env as merge_reactive_scopes_that_invalidate_together,
     prune_always_invalidating_scopes::run as prune_always_invalidating_scopes,
+    prune_locally_used_scope_declarations::run as prune_locally_used_scope_declarations,
     propagate_early_returns::run_with_env as propagate_early_returns,
     prune_unused_lvalues::run as prune_unused_lvalues,
     promote_used_temporaries::run_with_env as promote_used_temporaries,
@@ -862,9 +863,20 @@ pub fn run_with_environment(
     // and then prune their reactive scope (creating a merge barrier). Now they can go.
     prune_unused_jsx(hir);
     propagate_scope_dependencies_hir(hir, env);
+    if std::env::var("RC_DEBUG").is_ok() { eprintln!("[pipeline] scopes before merge_invalidate: {}", env.scopes.len()); }
     merge_reactive_scopes_that_invalidate_together(hir, env);
+    if std::env::var("RC_DEBUG").is_ok() { eprintln!("[pipeline] scopes after merge_invalidate: {}", env.scopes.len()); }
     prune_non_reactive_dependencies(hir, env);
+    if std::env::var("RC_DEBUG").is_ok() {
+        eprintln!("[pipeline] scopes after prune_non_reactive: {}", env.scopes.len());
+        for (_, scope) in &env.scopes {
+            eprintln!("[pipeline] scope {:?} range=[{},{}) deps={:?} decls={:?}", scope.id.0, scope.range.start.0, scope.range.end.0,
+                scope.dependencies.iter().map(|d| (d.place.identifier.0, d.place.reactive)).collect::<Vec<_>>(),
+                scope.declarations.keys().map(|id| id.0).collect::<Vec<_>>());
+        }
+    }
     prune_always_invalidating_scopes(hir, env);
+    if std::env::var("RC_DEBUG").is_ok() { eprintln!("[pipeline] scopes after prune_always_inval: {}", env.scopes.len()); }
     prune_unused_lvalues(hir, Some(env));
     promote_used_temporaries(hir, env);
     extract_scope_declarations_from_destructuring(hir);

@@ -70,12 +70,29 @@ pub fn run(hir: &mut HIRFunction, env: &mut Environment) {
     let mut unmemoized: HashSet<IdentifierId> = HashSet::new();
     let mut invalidating_def_id: HashMap<IdentifierId, InstructionId> = HashMap::new();
 
+    // Build a set of identifiers that are declared as outputs of any scope.
+    // These are "scope-declared" identifiers — they are effectively memoized
+    // regardless of whether their defining instruction falls inside the scope's
+    // instruction range. This handles the case where merge_reactive_scopes
+    // creates a merged scope whose range doesn't cover the original instruction
+    // (e.g., scope 4 declares `x = JSX`, scope 1 depends on `x`, merge creates
+    // a new scope with scope 1's range but keeps `x` as scope 4's declaration).
+    let scope_declared_ids: HashSet<IdentifierId> = env
+        .scopes
+        .values()
+        .flat_map(|s| s.declarations.keys().copied())
+        .collect();
+
     for (_, block) in &hir.body.blocks {
         for instr in &block.instructions {
             if is_always_invalidating_value(&instr.value) {
                 always_invalidating.insert(instr.lvalue.identifier);
                 invalidating_def_id.insert(instr.lvalue.identifier, instr.id);
-                if instr_in_scope(instr.id.0).is_none() {
+                // An identifier is "unmemoized" if its defining instruction is outside
+                // any scope's range AND it is not declared as an output of any scope.
+                if instr_in_scope(instr.id.0).is_none()
+                    && !scope_declared_ids.contains(&instr.lvalue.identifier)
+                {
                     unmemoized.insert(instr.lvalue.identifier);
                 }
             }

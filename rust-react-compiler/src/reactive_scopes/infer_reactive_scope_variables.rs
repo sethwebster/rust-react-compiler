@@ -318,11 +318,11 @@ fn find_disjoint_mutable_values(
                 .unwrap_or(block.terminal.id());
             let mutated_after = phi_range.start.0 + 1 != phi_range.end.0
                 && phi_range.end > block_start;
-            // Also union when a phi operand allocates (e.g., default param with array literal).
-            // This ensures phi results that carry allocating values get memoized scopes.
-            let any_operand_allocates = phi.operands.values()
-                .any(|op| ident_allocates.contains(&op.identifier));
-            if mutated_after || any_operand_allocates {
+            // Only union phi operands when the phi result is mutated after the join point.
+            // (Mirrors TS compiler: only mutatedAfterPhi triggers phi union.)
+            // When not mutated after, each allocating operand independently gets its own scope
+            // from the instruction-level allocation detection — no union needed.
+            if mutated_after {
                 let mut operands = vec![phi.place.identifier];
                 let phi_decl = env
                     .get_identifier(phi.place.identifier)
@@ -519,11 +519,18 @@ fn find_disjoint_mutable_values(
                         let val_allocates = ident_allocates.contains(&value.identifier);
                         let val_reactive = ident_reactive.contains(&value.identifier);
                         if val_allocates || val_reactive {
+                            // Directly-allocating values (ObjectExpression, ArrayExpression, etc.)
+                            // are in `pure_read_lvalues` and have short ranges [def, def+1].
+                            // is_mutable_at would return false for them even though they're the
+                            // source being destructured. Always union them.
+                            let val_is_direct_alloc = ident_direct_allocates.contains(&value.identifier);
                             let val_range = env
                                 .get_identifier(value.identifier)
                                 .map(|i| i.mutable_range.clone())
                                 .unwrap_or_else(MutableRange::zero);
-                            if is_mutable_at(instr.id, &val_range) && val_range.start.0 > 0 {
+                            if val_is_direct_alloc
+                                || (is_mutable_at(instr.id, &val_range) && val_range.start.0 > 0)
+                            {
                                 operands.push(value.identifier);
                             }
                         }
@@ -631,7 +638,14 @@ fn find_disjoint_mutable_values(
                             // Exclude parameters (mutable_range.start=0) — they are reactive
                             // deps, not allocating values to co-locate.
                             // Also exclude non-allocating captures with no mutable range.
-                            if is_mutable_at(instr.id, &cap_range) && cap_range.start.0 > 0 {
+                            // Special case: hoisted captures may be defined AFTER the function
+                            // expression (JS `let`/`function` hoisting). For these,
+                            // cap_range.start > instr.id, so is_mutable_at returns false —
+                            // but we must still union them.
+                            if cap_range.start.0 > 0
+                                && (is_mutable_at(instr.id, &cap_range)
+                                    || cap_range.start > instr.id)
+                            {
                                 operands.push(ctx_place.identifier);
                             }
                         }
