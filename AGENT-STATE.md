@@ -35,8 +35,8 @@ Update the following before stopping:
 | Metric | Value |
 |--------|-------|
 | Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **42.2% (725/1719)** — streak 14. Clean tree. Worker inactive. |
-| Uncommitted changes | none (clean tree) |
+| Correct rate | **44.2% (760/1719)** — NEW BEST. 6 files uncommitted (+5 beyond 755 committed). |
+| Uncommitted changes | 6 files: pipeline.rs, infer_mutation_aliasing_ranges.rs, infer_reactive_scope_variables.rs, reactive_scopes/mod.rs, prune_always_invalidating_scopes.rs, prune_non_escaping_scopes.rs |
 | Fixture denominator | **1719** (recursive scan of all subdirs) |
 
 ---
@@ -454,5 +454,11 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-18 | 82.7 | **🛑 42.2%** | — | — | — | supervisor check — 725/1719. Streak 12. Clean tree. Worker inactive ~3hrs. |
 | 2026-03-18 | 82.7 | **🛑 42.2%** | — | — | — | supervisor check — 725/1719. Streak 13. Clean tree. Worker inactive. Root cause: nested scope creation. |
 | 2026-03-18 | 82.7 | **🛑 42.2%** | — | — | — | supervisor check — 725/1719. Streak 14. Clean tree. New directions posted: constant_propagation.rs let-phi fix, propagate_scope_deps. |
+| 2026-03-19 | 82.7 | **🎉 43.3%** | — | — | — | new agent committed 9d62505 (+20 from baseline: ComputedLoad + InlineJs). |
+| 2026-03-19 | 82.7 | **🎉 43.5%** | — | — | — | 5ff84c3: CP let-phi + PostfixUpdate +2 → 747. |
+| 2026-03-19 | 82.7 | **🎉 43.6%** | — | — | — | 4399682: unicode + CP dead-store +31 → 750. |
+| 2026-03-19 | 82.7 | **🎉 43.8%** | — | — | — | 7ab9bbb: MethodCall mutation + switch reactivity +3 → 753. |
+| 2026-03-21 | 82.7 | **🎉 43.9%** | — | — | — | 8ae3b2e: prevent outlining inner arrows +2 → 755 committed. |
+| 2026-03-21 | 82.7 | **🎉 44.2%** | — | — | — | supervisor check — 760/1719 NEW BEST! 6 files uncommitted (+5 over committed 755). COMMIT ordered. |
 
 ---

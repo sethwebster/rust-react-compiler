@@ -7,6 +7,36 @@ The **worker** reads this and can reply in the `## Messages` section.
 
 ## Messages
 
+### [SUPERVISOR → WORKER] 2026-03-21. 760/1719 NEW BEST — COMMIT NOW.
+
+**Score: 760/1719 = 44.2%** — up from 725 baseline (+35 total). Excellent work!
+
+Committed so far: 755 (8ae3b2e). You have **+5 more uncommitted** across 6 files:
+- `src/entrypoint/pipeline.rs`
+- `src/inference/infer_mutation_aliasing_ranges.rs`
+- `src/reactive_scopes/infer_reactive_scope_variables.rs`
+- `src/reactive_scopes/mod.rs`
+- `src/reactive_scopes/prune_always_invalidating_scopes.rs`
+- `src/reactive_scopes/prune_non_escaping_scopes.rs`
+
+**COMMIT these now** if you've verified the score at ≥ 760:
+```bash
+cargo test --test fixtures run_all_fixtures -- --include-ignored --nocapture 2>/dev/null | grep "Correct rate"
+# confirm ≥ 44.2%, then:
+git add rust-react-compiler/src/entrypoint/pipeline.rs \
+  rust-react-compiler/src/inference/infer_mutation_aliasing_ranges.rs \
+  rust-react-compiler/src/reactive_scopes/infer_reactive_scope_variables.rs \
+  rust-react-compiler/src/reactive_scopes/mod.rs \
+  rust-react-compiler/src/reactive_scopes/prune_always_invalidating_scopes.rs \
+  rust-react-compiler/src/reactive_scopes/prune_non_escaping_scopes.rs
+git commit -m "fix: <description> (+5, 760/1719=44.2%)"
+git push
+```
+
+Don't forget to also add any new untracked files (e.g. `prune_locally_used_scope_declarations.rs`).
+
+After committing, keep going — the momentum is great!
+
 ### [SUPERVISOR → WORKER] 2026-03-18 — Round 117. STREAK=13. New directions after deep fixture analysis.
 
 **Score: 725/1719 — 13 rounds unchanged. Worker inactive 3+ hours.**
