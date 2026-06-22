@@ -3591,8 +3591,15 @@ impl<'a> Codegen<'a> {
             // Skip DeclareLocal instructions that were hoisted to before the scope block.
             if self.hoisted_declare_instr_ids.contains(&instr.id) { continue; }
             let lv_id = instr.lvalue.identifier.0;
-            // Skip inlined-only temporaries unless they're intra-scope StoreLocals.
-            if inlined_ids.contains(&lv_id) && !intra_instr_ids.contains(&instr.id) { continue; }
+            let is_scope_output_store = self.is_named_scope_output_store(instr, all_out_names);
+            // Skip inlined-only temporaries unless they're intra-scope stores or named
+            // scope outputs that must materialize inside the memo branch.
+            if inlined_ids.contains(&lv_id)
+                && !intra_instr_ids.contains(&instr.id)
+                && !is_scope_output_store
+            {
+                continue;
+            }
             if let Some(s) = self.emit_stmt(instr, Some(*scope_id), all_out_names) {
                 for line in s.lines() {
                     let _ = writeln!(out, "{pad}{}", line);
@@ -3700,6 +3707,16 @@ impl<'a> Codegen<'a> {
                     indent, stop_at, visited, out,
                 );
                 self.active_early_return = saved_er;
+            }
+            Terminal::Branch { fallthrough, logical_op: Some(_), .. } => {
+                // Logical expressions (&&, ||, ??) compute their value through phis.
+                // The scope body still needs the shared continuation block where the
+                // resolved value is stored or used for side effects.
+                self.emit_scope_body_cfg_walk(
+                    *fallthrough, scope_block_set, scope_instr_set, intra_instr_ids,
+                    skip_instr_set, inlined_ids, all_out_names, scope_id,
+                    indent, stop_at, visited, out,
+                );
             }
             Terminal::Goto { block: next, variant, .. } => {
                 // If this is a Break goto to a labeled block's fallthrough and we're NOT
@@ -6128,6 +6145,24 @@ let test_expr = if let Some((skip_idx, store_lv_id, value_place)) = inline_assig
         matches!(&instr.value, InstructionValue::StoreLocal { .. })
     }
 
+    fn store_local_name(&self, instr: &Instruction) -> Option<String> {
+        if let InstructionValue::StoreLocal { lvalue, .. } = &instr.value {
+            return self.env
+                .get_identifier(lvalue.place.identifier)
+                .and_then(|id| id.name.as_ref())
+                .map(|_| self.ident_name(lvalue.place.identifier));
+        }
+        None
+    }
+
+    fn is_named_scope_output_store(&self, instr: &Instruction, scope_out_names: &[String]) -> bool {
+        if scope_out_names.is_empty() {
+            return false;
+        }
+        self.store_local_name(instr)
+            .is_some_and(|name| scope_out_names.contains(&name))
+    }
+
     // -----------------------------------------------------------------------
     // Instruction emission
     // -----------------------------------------------------------------------
@@ -6184,6 +6219,7 @@ let test_expr = if let Some((skip_idx, store_lv_id, value_place)) = inline_assig
                 // store that is part of an inlined assignment-expression like `(x = val)`), suppress it.
                 if self.inlined_exprs.contains_key(&instr.lvalue.identifier.0)
                     && matches!(lvalue.kind, InstructionKind::Const | InstructionKind::HoistedConst | InstructionKind::Reassign)
+                    && !self.is_named_scope_output_store(instr, scope_out_names)
                 {
                     return None;
                 }

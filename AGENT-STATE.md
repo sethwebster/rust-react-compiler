@@ -34,10 +34,12 @@ Update the following before stopping:
 
 | Metric | Value |
 |--------|-------|
-| Compile rate | 82.7% (1421/1719 all fixtures) |
-| Correct rate | **44.2% (760/1719)** — NEW BEST. 6 files uncommitted (+5 beyond 755 committed). |
-| Uncommitted changes | 6 files: pipeline.rs, infer_mutation_aliasing_ranges.rs, infer_reactive_scope_variables.rs, reactive_scopes/mod.rs, prune_always_invalidating_scopes.rs, prune_non_escaping_scopes.rs |
-| Fixture denominator | **1719** (recursive scan of all subdirs) |
+| Compile rate | 82.6% (1419/1717 all fixtures; local tracker-aligned run 2026-06-22) |
+| Correct rate | **44.3% (760/1717)** — NEW BEST after `align-scopes-iife-return-modified-later-logical.ts` (+1 over local baseline 759). |
+| Error (expected) | 227 |
+| Error (unexpected) | 71 |
+| Uncommitted changes | 0 files expected after this verified commit (local `is-port-done-yet/worker.ts` and `.wrangler/` scratch are unrelated to compiler parity). |
+| Fixture denominator | **1717** (recursive scan of all subdirs; matches tracker canonical total) |
 
 ---
 
@@ -54,7 +56,7 @@ Update the following before stopping:
 - `94474d0`: populate `declared_names_before_scope` for flat codegen
 - **2026-03-12**: for-loop update expression fix — ternary phi (Phase 3/4), loop-carried phi, trailing LoadLocal, ternary-in-arithmetic parens (**~611/1717=35.6%**)
 
-**Next step**: Commit uncommitted hir_codegen.rs changes (+415 lines across 3 files), then investigate remaining fixture failures. Run suite to verify new score before committing.
+**Next step**: Continue flat CFG codegen work from the next tracker-aligned mismatch. Prioritize small fixes that preserve the full-suite +1 invariant; `build_reactive_function` remains the main architectural blocker.
 
 Recent commits (newest first):
 - 94474d0: fix: populate declared_names_before_scope for flat codegen
@@ -119,6 +121,12 @@ Recent commits (newest first):
 ---
 
 ## Completed This Session
+
+2026-06-22 Codex session:
+- Located the tracker-measured source surface at `/Users/sethwebster/Development/react/react-compiler-bun/rust-react-compiler` and verified it is the source behind the public tracker.
+- `src/codegen/hir_codegen.rs` — CFG scope-body walk now follows logical `Branch` fallthrough blocks (`&&`, `||`, `??`) so shared continuation instructions inside memo branches are emitted.
+- `src/codegen/hir_codegen.rs` — named scope-output `StoreLocal` instructions are no longer suppressed when inline analysis marked their result temp as consumed; this preserves assignments such as `items = getNull() ?? []`.
+- Verification: `align-scopes-iife-return-modified-later-logical.ts` now matches; full suite improved from 759 to 760 correct with no lost fixtures.
 
 Commits (newest first):
 - `8edcf81` dead unused variable removal normalization (+5, 414/1048)
@@ -460,5 +468,6 @@ codegen (currently bypasses ReactiveFunction) -> oxc_codegen -> JS output
 | 2026-03-19 | 82.7 | **🎉 43.8%** | — | — | — | 7ab9bbb: MethodCall mutation + switch reactivity +3 → 753. |
 | 2026-03-21 | 82.7 | **🎉 43.9%** | — | — | — | 8ae3b2e: prevent outlining inner arrows +2 → 755 committed. |
 | 2026-03-21 | 82.7 | **🎉 44.2%** | — | — | — | supervisor check — 760/1719 NEW BEST! 6 files uncommitted (+5 over committed 755). COMMIT ordered. |
+| 2026-06-22 | 82.6 | 44.3 | 40 | 20 | 31 | CFG logical-branch scope fallthrough + named output StoreLocal emission: 760/1717 correct, gained `align-scopes-iife-return-modified-later-logical.ts`; 0 lost fixtures. |
 
 ---
